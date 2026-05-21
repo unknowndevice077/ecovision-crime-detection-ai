@@ -1,0 +1,100 @@
+/* 1. The new v4 Entry Point */
+@import "tailwindcss";
+
+/* 2. Link your config file so Tailwind knows your custom colors/animations */
+@config "../tailwind.config.ts";
+
+/* 3. Tactical UI Utilities */
+@layer utilities {
+  .glass {
+    @apply bg-slate-900/40 backdrop-blur-xl border border-white/10;
+  }
+  .glass-dark {
+    @apply bg-black/40 backdrop-blur-2xl border border-white/5;
+  }
+  .neon-blue {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
+  }
+  .neon-red {
+    box-shadow: 0 0 30px rgba(239, 68, 68, 0.3);
+  }
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* 4. Global Core Styles */
+body {
+  @apply bg-[#020617] text-slate-100 antialiased overflow-hidden;
+  font-family: 'Inter', sans-serif;
+}
+
+/* 5. Neon Command Accents */
+.neon-border-emerald {
+  @apply border-emerald-500/50;
+  box-shadow: 0 0 15px rgba(16, 185, 129, 0.2);
+}
+
+.neon-border-red {
+  @apply border-red-500/50;
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.2);
+}
+
+/* 6. Neural Scan Animation */
+.scanline {
+  width: 100%;
+  height: 2px;
+  background: rgba(16, 185, 129, 0.2);
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  animation: scan 4s linear infinite;
+}
+
+@keyframes scan {
+  0% { top: 0; }
+  100% { top: 100%; }
+}
+
+/* 7. Custom Tactical Scrollbar (Module Level) */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  @apply bg-white/5 rounded-full;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  @apply bg-white/10;
+}
+
+/* 8. Global Scrollbar (Browser Level) */
+::-webkit-scrollbar { 
+  width: 3px; 
+}
+::-webkit-scrollbar-track { 
+  background: transparent; 
+}
+::-webkit-scrollbar-thumb { 
+  background: #1e293b; 
+  border-radius: 10px; 
+}
+
+/* 9. Map Marker Logic (Crucial for CrimeReportsView) */
+.custom-div-icon {
+  background: none !important;
+  border: none !important;
+}
+
+/* 10. Accessibility & UI Polish */
+::selection {
+  @apply bg-emerald-500/30 text-emerald-400;
+}
+
+/* Fix for Select visibility in certain browsers */
+select {
+  color-scheme: dark;
+}

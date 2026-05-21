@@ -1,0 +1,48 @@
+{
+  "name": "ecovision-security-sentinel",
+  "version": "2.0.0",
+  "description": "Advanced Real-Time Security Monitoring & Threat Detection System",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.4",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.5.0",
+    "axios": "^1.6.2",
+    "date-fns": "^2.30.0",
+    "lucide-react": "^1.12.0",
+    "next": "^16.2.4",
+    "postcss": "^8.5.12",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^6.0.3"
+  },
+  "keywords": [
+    "security",
+    "surveillance",
+    "monitoring",
+    "detection",
+    "threat",
+    "dashboard",
+    "esp32",
+    "yolo",
+    "ai",
+    "real-time"
+  ],
+  "author": "EcoVision Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  }
+}
