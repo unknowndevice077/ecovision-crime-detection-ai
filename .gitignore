@@ -28,7 +28,6 @@ runs/
 *.onnx
 roboflow_cache/
 Assault_Snapshots/
-weights/
 node_modules/
 .next/
 .vs/
