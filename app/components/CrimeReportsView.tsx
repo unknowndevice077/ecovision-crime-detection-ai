@@ -78,6 +78,9 @@ export default function CrimeReportsView({ onUpdate }: { onUpdate: () => void })
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<any[]>([]);
 
+  // DYNAMIC API URL DISCOVERY FOR MIGRATION
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
   const formatTo12Hour = (timeStr: string) => {
     if (!timeStr) return "";
     let h = 0, m = "00";
@@ -94,7 +97,7 @@ export default function CrimeReportsView({ onUpdate }: { onUpdate: () => void })
 
   const fetchIncidents = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/incidents");
+      const res = await fetch(`${API_URL}/api/incidents`);
       const data = await res.json();
       setIncidents([...SAMPLE_REPORTS, ...data]);
     } catch {
@@ -159,7 +162,7 @@ export default function CrimeReportsView({ onUpdate }: { onUpdate: () => void })
 
   const handleExpunge = async () => {
     if (!selected) return;
-    const res = await fetch(`http://localhost:8000/api/incidents/${selected.id}`, { method: 'DELETE' });
+    const res = await fetch(`${API_URL}/api/incidents/${selected.id}`, { method: 'DELETE' });
     if (res.ok) { setIncidents(prev => prev.filter(i => i.id !== selected.id)); setSelected(null); onUpdate(); }
   };
 
@@ -172,7 +175,7 @@ export default function CrimeReportsView({ onUpdate }: { onUpdate: () => void })
   const handleSubmitOfficialReport = async () => {
     if (!filingTarget || !reportForm.badgeNumber || !reportForm.reportingOfficer) return;
     try {
-      await fetch(`http://localhost:8000/api/incidents/${filingTarget.id}/status`, {
+      await fetch(`${API_URL}/api/incidents/${filingTarget.id}/status`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "Confirmed" })
       });

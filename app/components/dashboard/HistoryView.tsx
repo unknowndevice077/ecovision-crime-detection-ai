@@ -6,6 +6,9 @@ import {
   ListFilter, ArrowUpDown, FileText, Search, ShieldCheck
 } from 'lucide-react';
 
+// Centralized dynamic environment endpoint targeting for migration stability
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 export default function HistoryView() {
   const [historyRecords, setHistoryRecords] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -18,7 +21,7 @@ export default function HistoryView() {
   useEffect(() => {
     const loadLogs = async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/incidents");
+        const res = await fetch(`${API_URL}/api/incidents`);
         if (res.ok) {
           const data = await res.json();
           const processedHistory = data.filter((inc: any) => inc.status !== 'Active');

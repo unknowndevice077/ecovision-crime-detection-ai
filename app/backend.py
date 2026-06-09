@@ -11,20 +11,41 @@ import os
 import requests
 from datetime import datetime
 
-app = FastAPI()
+# --- CONFIGURATION ENGINE SETUP ---
+# Dynamically discovers project root relative to this file's absolute path track
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+with open(CONFIG_PATH, 'r') as f:
+    sys_config = json.load(f)
 
-DB_PATH = "ecovision.db"
-ESP32_IP = "192.168.254.152"
-RECORDINGS_DIR = r"D:\projects\EcoVisionCode\recordings"
+# Safe folder verification tracking routines anchored to workspace root
+DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, sys_config["database"]["path"]))
+LOGS_DIR = os.path.abspath(os.path.join(BASE_DIR, os.path.dirname(sys_config["monitoring"]["log_file"])))
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Porting paths, databases, and variables safely
+DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
+ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
+RECORDINGS_DIR = os.path.join(BASE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+app = FastAPI(
+    title=sys_config["system"]["name"],
+    version=sys_config["system"]["version"]
+)
+
+# Cross-Origin Isolation Rules mapping options directly from central config matrix
+if sys_config["security"]["enable_cors"]:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=sys_config["security"]["cors_origins"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.mount("/static/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 
 active_connections: List[WebSocket] = []
@@ -38,7 +59,6 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, role TEXT, assignment TEXT
         )
     ''')
-    # FIXED: Appended explicit structured confidence floating-point data column to schema definition
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS incidents (
             id TEXT PRIMARY KEY, caseId TEXT, type TEXT, officer TEXT, lat REAL, lng REAL, 
@@ -156,7 +176,7 @@ async def signup(user: UserSignup):
         conn.commit()
         return {"status": "success"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Operator ID already exists")
+        raise HTTPException(status_code=400, detail=f"Operator ID already exists")
     finally:
         conn.close()
 
@@ -212,7 +232,6 @@ async def ai_trigger(data: AiTriggerSchema, request: Request):
     case_id = f"CASE-{incident_id.upper()}"
     
     try:
-        # FIXED: Cleared dynamic percentage text injections out of textual narrative statements
         clean_narrative = f"Automated neural detection of {data.event}."
         cursor.execute('''
             INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -325,4 +344,9 @@ async def reset_siren():
     return {"status": "siren_nominal"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "backend:app", 
+        host=sys_config["backend"]["host"], 
+        port=sys_config["backend"]["port"],
+        reload=sys_config["backend"]["reload"]
+    )

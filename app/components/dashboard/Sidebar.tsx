@@ -159,7 +159,6 @@ export default function Sidebar({
   );
 }
 
-// --- CORE LAYOUT NAVIGATION ATOM FRAMEWORK ---
 function NavItem({ icon, label, badge, active, onClick }: any) {
   return (
     <button 
