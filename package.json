@@ -3,13 +3,15 @@
   "version": "2.0.0",
   "description": "Advanced Real-Time Security Monitoring & Threat Detection System",
   "private": true,
+  "main": "electron-main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "desktop": "electron ."
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.4",
@@ -44,5 +46,8 @@
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"
+  },
+  "devDependencies": {
+    "electron": "^42.5.0"
   }
 }

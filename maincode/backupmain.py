@@ -24,18 +24,11 @@ except ImportError:
     sys.exit("❌  Missing libs. Run: pip install fastapi uvicorn")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0.1  ROBBERY / VANDALISM CORE DETECTION IMPORTS
-# ──────────────────────────────────────────────────────────────────────────────
-from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
-from x3d_violence_detector import X3DViolenceDetector
-
-# ──────────────────────────────────────────────────────────────────────────────
 # 1.  ULTRALYTICS GIT-BYPASS  (offline / no-git environment)
 # ──────────────────────────────────────────────────────────────────────────────
 os.environ["ULTRALYTICS_GIT"]     = "False"
 os.environ["ULTRALYTICS_OFFLINE"] = "True"
-_mock_repo      = MagicMock()
-_mock_repo.root = Path(".")
+_mock_repo      = MagicMock(); _mock_repo.root = Path(".")
 _mock_git_mod   = ModuleType("ultralytics.utils.git")
 _mock_git_mod.GitRepo = MagicMock(return_value=_mock_repo)
 sys.modules["ultralytics.utils.git"] = _mock_git_mod
@@ -66,7 +59,6 @@ DETECTION_INTERVAL  = sys_config["detection"].get("detection_interval", 5)
 # -- Per-class confidence thresholds
 WEAPON_CLASSES   = {"gun", "knife", "pistol", "firearm", "handgun", "rifle", "phone"}
 VIOLENCE_CLASSES = {"violence", "fight", "assault"}
-SIGN_CLASSES     = {"sign"}   
 
 CONF_BY_CLASS = {
     "gun":      0.52,
@@ -79,7 +71,6 @@ CONF_BY_CLASS = {
     "fight":    0.40,
     "assault":  0.40,
     "phone":    0.38,
-    "sign":     0.40,   
 }
 WEAPON_CONF_GUN_SUSTAINED = 0.35
 
@@ -188,21 +179,13 @@ threading.Thread(target=_start_stream_server, daemon=True).start()
 print(f"📡 Dynamic Stream server live → http://localhost:8001/video_feed")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4.  MODEL INIT + GPU WARM-UP (STATIC CENTRALIZED WEIGHTS PATHING)
+# 4.  MODEL INIT + GPU WARM-UP (DECOUPLED)
 # ──────────────────────────────────────────────────────────────────────────────
-WEIGHTS_DIR = r"D:\projects\EcoVisionCode\weights"
-os.makedirs(WEIGHTS_DIR, exist_ok=True)
-
-pose_file_name     = os.path.basename(sys_config["detection"]["models"]["pose"])
-violence_file_name = os.path.basename(sys_config["detection"]["models"]["violence"])
-
-pose_model_path = os.path.join(WEIGHTS_DIR, pose_file_name)
-v_weight_path   = os.path.join(WEIGHTS_DIR, violence_file_name)
-x3d_model_path  = os.path.join(WEIGHTS_DIR, "x3d_xs_violence_best.pt")
+pose_model_path = os.path.abspath(os.path.join(BASE_DIR, sys_config["detection"]["models"]["pose"]))
+v_weight_path   = os.path.abspath(os.path.join(BASE_DIR, sys_config["detection"]["models"]["violence"]))
 
 pose_model     = YOLO(pose_model_path)
 violence_model = YOLO(v_weight_path)
-x3d_detector   = X3DViolenceDetector(model_path=x3d_model_path)
 
 _dummy = np.zeros((POSE_IMGSZ, POSE_IMGSZ, 3), dtype=np.uint8)
 pose_model.predict(_dummy, verbose=False, imgsz=POSE_IMGSZ, half=True)
@@ -344,12 +327,6 @@ def _run_weapon_detection(frame_copy):
                         "name": cls_name, "conf": raw_conf,
                         "center": [(xyxy[0]+xyxy[2])/2, (xyxy[1]+xyxy[3])/2], "box": xyxy,
                     })
-            elif cls_name in SIGN_CLASSES:   
-                if raw_conf >= required_conf:
-                    weapons.append({
-                        "name": cls_name, "conf": raw_conf,
-                        "center": [(xyxy[0]+xyxy[2])/2, (xyxy[1]+xyxy[3])/2], "box": xyxy,
-                    })
     with _weapon_lock:
         _weapon_cache["weapons"] = weapons
         _weapon_cache["vboxes"]  = vboxes
@@ -363,12 +340,10 @@ def _bbox_overlap_count(p_box, all_boxes):
     count  = 0
     for b in all_boxes:
         if np.array_equal(b, p_box): continue
-        ix1 = max(px1, b[0])
-        iy1 = max(py1, b[1])
-        ix2 = min(px2, b[2])
-        iy2 = min(py2, b[3])
+        ix1 = max(px1, b[0]); iy1 = max(py1, b[1])
+        ix2 = min(px2, b[2]); iy2 = min(py2, b[3])
         if ix2 > ix1 and iy2 > iy1:
-            inter = (ix2 - ix1) * (iy2 - iy1)
+            inter = (ix2-ix1)*(iy2-iy1)
             b_area = max((b[2]-b[0])*(b[3]-b[1]), 1)
             ratio  = inter / min(p_area, b_area)
             if ratio > OVERLAP_IOU_THRESH: count += 1
@@ -449,12 +424,12 @@ def _vbox_overlap_ratio(p_box, vb):
 # ──────────────────────────────────────────────────────────────────────────────
 # 11.  ALERT POSTER (Decoupled hardware commands from AI thread)
 # ──────────────────────────────────────────────────────────────────────────────
-def _post_alert(tid, conf: float, event: str = "ASSAULT"):
-    print(f"🔥 [ALERT] Posting {event} event for {tid} | conf={conf:.2f}")
+def _post_alert(tid: int, conf: float):
+    print(f"🔥 [ALERT] Posting assault event for track {tid} | conf={conf:.2f}")
     try:
-        r = requests.post(BACKEND_URL, json={"id": str(tid), "event": event, "confidence": round(conf, 4)}, timeout=2.0)
+        r = requests.post(BACKEND_URL, json={"id": str(tid), "event": "ASSAULT", "confidence": round(conf, 4)}, timeout=2.0)
         print(f"   ✅ Backend {r.status_code}: {r.text[:120]}")
-    except Exception as e:
+    except Exception as e: 
         print(f"   ❌ Backend unreachable: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -479,8 +454,8 @@ class TrackState:
             self.assault_confirm  = min(self.assault_confirm + 1, confirm_needed)
             self.assault_release  = 0
         else:
-            self.assault_release = min(self.assault_release + 1, ASSAULT_RELEASE_FRAMES)
-            if self.assault_release >= ASSAULT_RELEASE_FRAMES:
+            self.assault_release  = min(self.assault_release + 1, ASSAULT_RELEASE_FRAMES)
+            if self.assault_release >= ASSAULT_RELEASE_FRAMES: 
                 self.assault_confirm = 0
 
         if is_armed:
@@ -488,27 +463,27 @@ class TrackState:
             self.armed_release  = 0
         else:
             self.armed_release  = min(self.armed_release + 1, ARMED_RELEASE_FRAMES)
-            if self.armed_release >= ARMED_RELEASE_FRAMES:
+            if self.armed_release >= ARMED_RELEASE_FRAMES: 
                 self.armed_confirm = 0
 
-        if self.assault_confirm >= confirm_needed:
+        if self.assault_confirm >= confirm_needed: 
             self.state = "ASSAULT"
-        elif self.armed_confirm >= ARMED_CONFIRM_FRAMES:
+        elif self.armed_confirm >= ARMED_CONFIRM_FRAMES: 
             self.state = "ARMED"
         else:
-            if self.assault_confirm == 0 and self.armed_confirm == 0:
+            if self.assault_confirm == 0 and self.armed_confirm == 0: 
                 self.state = "NEUTRAL"
         return self.state
 
     def should_alert(self, frame_no: int, scene_last: int, scene_cooldown: int = SCENE_COOLDOWN_ASSAULT) -> bool:
-        if self.state != "ASSAULT":
+        if self.state != "ASSAULT": 
             return False
         evidence_ok    = sum(self.evidence_buf) >= EVIDENCE_THRESHOLD
         track_cooldown = (frame_no - self.last_alert_frame) > ALERT_COOLDOWN_FRAMES
         scene_ok       = (frame_no - scene_last) > scene_cooldown
         return evidence_ok and track_cooldown and scene_ok
 
-    def mark_alerted(self, frame_no: int):
+    def mark_alerted(self, frame_no: int): 
         self.last_alert_frame = frame_no
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -520,7 +495,7 @@ def _draw_overlay(frame, p_box, tid, state, weapons=None):
     color, thick, show_label = _STATE_CFG[state]
     x1, y1, x2, y2 = int(p_box[0]), int(p_box[1]), int(p_box[2]), int(p_box[3])
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
-
+    
     if show_label:
         label = f"{tid}:{state}"
         if weapons:
@@ -534,27 +509,6 @@ def _draw_violence_boxes(frame, live_vboxes):
     for vb in live_vboxes:
         cv2.rectangle(frame, (int(vb[0]), int(vb[1])), (int(vb[2]), int(vb[3])), (0,0,200), 1)
         cv2.putText(frame, "VIOLENCE", (int(vb[0]), int(vb[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0,0,200), 1, cv2.LINE_AA)
-
-def _draw_sign_boxes(frame, sign_boxes):
-    for sb in sign_boxes:
-        x1, y1, x2, y2 = int(sb[0]), int(sb[1]), int(sb[2]), int(sb[3])
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 1)
-        cv2.putText(frame, "SIGN", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 200, 0), 1, cv2.LINE_AA)
-
-def _draw_x3d_confidence(frame, p_box, debug_info: dict):
-    x1, y1, x2, y2 = int(p_box[0]), int(p_box[1]), int(p_box[2]), int(p_box[3])
-    conf = debug_info["confidence"]
-    fill = debug_info["buffer_fill"]
-    target = debug_info["buffer_target"]
-
-    color = (
-        int(255 * conf),        
-        int(255 * (1 - conf)),  
-        255 if conf > 0.3 else 0,  
-    )
-
-    label = f"X3D:{conf*100:.0f}% [{fill}/{target}]"
-    cv2.putText(frame, label, (x1, y2 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 14.  CAMERA INIT (DYNAMIC HARDWARE DETECTION INDEX)
@@ -571,16 +525,10 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 # 15.  PER-TRACK STORES
 # ──────────────────────────────────────────────────────────────────────────────
 track_states, prev_joints, vel_history, id_last_seen = {}, {}, {}, {}
-robbery_tracker = RobberyTracker()                  
-vandal_states: dict = {}             
-vandal_sweep_history: dict = {}                     
-_vandal_alert_cooldown: dict = {}  
-_robbery_alert_cooldown: dict = {}
-
 scene_last_alert_frame = -SCENE_COOLDOWN_FRAMES
 
 _running = True
-def _shutdown(*_):
+def _shutdown(*_): 
     global _running
     _running = False
 
@@ -616,43 +564,40 @@ while _running:
         kpts = pose_res[0].keypoints.xy.cpu().numpy()
         boxes = pose_res[0].boxes.xyxy.cpu().numpy()
 
-        for tid in ids:
+        for tid in ids: 
             id_last_seen[tid] = frame_count
-            
         stale = [t for t, lf in id_last_seen.items() if frame_count - lf > MAX_UNSEEN_FRAMES]
         for tid in stale:
-            for d in (track_states, prev_joints, vel_history, id_last_seen,
-                      vandal_states, vandal_sweep_history, _vandal_alert_cooldown):                
+            for d in (track_states, prev_joints, vel_history, id_last_seen): 
                 d.pop(tid, None)
-            x3d_detector.cleanup_track(tid)   
 
         victims = {}
         for tid, joints, b in zip(ids, kpts, boxes):
             torso = joints[5:13]
             valid = torso[np.any(torso > 1, axis=1)]
-            if len(valid) > 0:
+            if len(valid) > 0: 
                 victims[tid] = {"center": np.mean(valid, axis=0), "box": b}
 
-        weapon_only = [w for w in tracked_weapons if w["name"] not in SIGN_CLASSES]
-        weapon_assigns = _assign_weapons(weapon_only, ids, kpts, boxes)
+        weapon_assigns = _assign_weapons(tracked_weapons, ids, kpts, boxes)
 
         for tid, joints, p_box in zip(ids, kpts, boxes):
-            if tid not in victims:
+            if tid not in victims: 
                 continue
-            if tid not in track_states:
+            if tid not in track_states: 
                 track_states[tid] = TrackState()
             ts = track_states[tid]
 
             has_weapon = len(weapon_assigns.get(tid, [])) > 0
             crowded = _bbox_overlap_count(p_box, boxes) >= OVERLAP_CROWD_LIMIT
+            
+            if crowded:
+                is_melee = False
+            else:
+                is_melee = _score_strike(tid, joints, prev_joints, vel_history, victims)[0]
 
             prev_joints[tid] = joints[[9, 10]].copy()
-
-            is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count)
-            _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))   
-
             in_vbox = max((_vbox_overlap_ratio(p_box, vb) for vb in live_vboxes), default=0.0) >= VBOX_ASSAULT_THRESHOLD
-            is_assault = is_violent_x3d or in_vbox
+            is_assault = is_melee or in_vbox
 
             override_confirm = max(1, ASSAULT_CONFIRM_FRAMES - 1) if (crowded and in_vbox) else None
             state = ts.update(is_assault, has_weapon, frame_count, override_assault_confirm=override_confirm)
@@ -662,42 +607,10 @@ while _running:
                 conf = min(1.0, sum(ts.evidence_buf) / EVIDENCE_WINDOW + 0.55)
                 ts.mark_alerted(frame_count)
                 scene_last_alert_frame = frame_count
-                _alert_exec.submit(_post_alert, tid, conf, "ASSAULT")
+                _alert_exec.submit(_post_alert, tid, conf)
 
             _draw_overlay(frame, p_box, tid, state, weapon_assigns.get(tid))
-
-        # ─── ROBBERY FILTER ANALYSIS ───
-        armed_states    = {t: (track_states[t].state == "ARMED")   for t in ids if t in track_states}
-        violence_states = {t: (track_states[t].state == "ASSAULT") for t in ids if t in track_states}
-        
-        robbery_pairs = robbery_tracker.update(ids, boxes, armed_states, violence_states)
-        for pair_key, r_state in robbery_pairs.items():
-            if r_state == "ROBBERY":
-                last_alert = _robbery_alert_cooldown.get(pair_key, -ALERT_COOLDOWN_FRAMES)
-                if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
-                    _robbery_alert_cooldown[pair_key] = frame_count
-                    pair_label = f"{pair_key[0]}_{pair_key[1]}"
-                    _alert_exec.submit(_post_alert, pair_label, 0.75, "ROBBERY")
-
-        # ─── VANDALISM FILTER ANALYSIS ───
-        sign_boxes = [w["box"] for w in tracked_weapons if w["name"] == "sign"]
-        _draw_sign_boxes(frame, sign_boxes)
-        
-        for tid, joints, p_box in zip(ids, kpts, boxes):
-            if tid not in vandal_states:
-                vandal_states[tid] = VandalismTrackState()
-            sweep_hist = vandal_sweep_history.setdefault(tid, deque(maxlen=45))
-            
-            is_vandal, target = score_vandalism(
-                tid, joints, prev_joints, sweep_hist,
-                static_targets=sign_boxes, all_person_boxes=boxes, my_box=p_box
-            )
-            v_state_res = vandal_states[tid].update(is_vandal)
-            
-            last_alert = _vandal_alert_cooldown.get(tid, -ALERT_COOLDOWN_FRAMES)
-            if v_state_res == "VANDALISM" and (frame_count - last_alert > ALERT_COOLDOWN_FRAMES):
-                _vandal_alert_cooldown[tid] = frame_count
-                _alert_exec.submit(_post_alert, tid, 0.84, "VANDALISM")
+        _draw_violence_boxes(frame, live_vboxes)
 
     now = time.perf_counter()
     if now - fps_timer >= 1.0:
@@ -715,6 +628,7 @@ while _running:
             _push_frame(buf.tobytes())
         _encode_future = _encode_exec.submit(_encode_and_push)
 
+    # Clean background service execution throttling loop delay layer
     time.sleep(0.005)
 
 print("\n🛑 Shutting down Portable Sentinel Matrix pipeline...")

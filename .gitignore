@@ -40,7 +40,6 @@ __pycache__/
 useless/
 yolo11n_openvino_model/
 yolo11n_openvino_model/
-
 *.mp4
 .vs/
 *.db

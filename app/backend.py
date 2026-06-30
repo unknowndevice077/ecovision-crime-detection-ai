@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -12,7 +12,6 @@ import requests
 from datetime import datetime
 
 # --- CONFIGURATION ENGINE SETUP ---
-# Dynamically discovers project root relative to this file's absolute path track
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
@@ -25,11 +24,9 @@ LOGS_DIR = os.path.abspath(os.path.join(BASE_DIR, os.path.dirname(sys_config["mo
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-# Porting paths, databases, and variables safely
 DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
 ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
 RECORDINGS_DIR = os.path.join(BASE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
-
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 app = FastAPI(
@@ -37,7 +34,6 @@ app = FastAPI(
     version=sys_config["system"]["version"]
 )
 
-# Cross-Origin Isolation Rules mapping options directly from central config matrix
 if sys_config["security"]["enable_cors"]:
     app.add_middleware(
         CORSMiddleware,
@@ -46,24 +42,53 @@ if sys_config["security"]["enable_cors"]:
         allow_headers=["*"],
     )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER
+# ─────────────────────────────────────────────────────────────────────────────
+class ConnectionManager:
+    """Tracks every open dashboard WebSocket connection and broadcasts to all of them."""
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        dead_connections = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                dead_connections.append(connection)
+        for dead in dead_connections:
+            self.disconnect(dead)
+
+manager = ConnectionManager()
+
 app.mount("/static/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 
-active_connections: List[WebSocket] = []
-
-# --- DATABASE INITIALIZATION ---
+# --- DATABASE INITIALIZATION CORE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, role TEXT, assignment TEXT
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, 
+            role TEXT, barangayId TEXT, assignment TEXT
         )
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS incidents (
             id TEXT PRIMARY KEY, caseId TEXT, type TEXT, officer TEXT, lat REAL, lng REAL, 
             locationName TEXT, severity TEXT, date TEXT, militaryTime TEXT, narrative TEXT, 
-            natureOfCall TEXT, arrivalReason TEXT, additionalOfficers TEXT, status TEXT, confidence REAL
+            natureOfCall TEXT, arrivalReason TEXT, additionalOfficers TEXT, status TEXT, 
+            confidence REAL, barangayId TEXT
         )
     ''')
     cursor.execute('''
@@ -72,16 +97,29 @@ def init_db():
             type TEXT, associatedCrimeId TEXT, crimeTimeMarker TEXT, notes TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cameras (
+            id TEXT PRIMARY KEY, name TEXT, url TEXT, status TEXT, barangayId TEXT
+        )
+    ''')
+    
+    # Pre-seed defaults if table is empty
+    cursor.execute("SELECT COUNT(*) FROM cameras")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO cameras VALUES ('1', 'Main Entrance Hub', 'rtsp://ecovision:REDACTED_ROTATE_THIS_PASSWORD@192.168.254.106:554/stream1', 'online', 'cogon')")
+        cursor.execute("INSERT INTO cameras VALUES ('2', 'Sector B Gate', 'rtsp://192.168.1.15/stream', 'online', 'cogon')")
+    
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- DATA MODELS ---
+# --- DATA SCHEMAS ---
 class UserSignup(BaseModel):
     username: str
     password: str
-    role: str
+    role: str          
+    barangayId: str    
     assignment: str
 
 class UserLogin(BaseModel):
@@ -105,15 +143,23 @@ class IncidentSchema(BaseModel):
     additionalOfficers: str
     status: str
     confidence: Optional[float] = 1.0
+    barangayId: str
 
 class AiTriggerSchema(BaseModel):
     id: str
     event: str
     confidence: float
+    barangayId: Optional[str] = "cogon"
 
 class PanicSchema(BaseModel):
     event: str
     device: str
+    barangayId: Optional[str] = "cogon"
+
+class CameraSchema(BaseModel):
+    name: str
+    url: str
+    barangayId: str
 
 class StatusUpdateSchema(BaseModel):
     status: str
@@ -128,7 +174,60 @@ class ManualClipSchema(BaseModel):
     crimeTimeMarker: str
     notes: str
 
-# --- RECORDS INTERACTION ENDPOINTS ---
+# --- PERSISTENT CAMERA ROUTINES ---
+@app.get("/api/cameras")
+async def get_cameras(barangayId: Optional[str] = None, role: Optional[str] = None):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    if role == "BARANGAY" and barangayId:
+        cursor.execute("SELECT * FROM cameras WHERE LOWER(barangayId) = ?", (barangayId.lower(),))
+    else:
+        cursor.execute("SELECT * FROM cameras")
+        
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/cameras")
+async def add_camera(cam: CameraSchema):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cam_id = str(uuid.uuid4())[:8]
+    try:
+        cursor.execute("INSERT INTO cameras VALUES (?, ?, ?, ?, ?)",
+                       (cam_id, cam.name, cam.url, "online", cam.barangayId.lower()))
+        conn.commit()
+        return {"status": "created", "id": cam_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+@app.delete("/api/cameras/{cam_id}")
+async def delete_camera(cam_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM cameras WHERE id = ?", (cam_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE DASHBOARD STREAM INTERACTION TERMINAL ROUTE
+# ─────────────────────────────────────────────────────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Captures client status nodes to safeguard socket execution registers
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+# --- VIDEO RECS MODULES ---
 @app.get("/api/records")
 async def get_video_records():
     conn = sqlite3.connect(DB_PATH)
@@ -156,27 +255,18 @@ async def register_clip(data: ManualClipSchema):
     finally:
         conn.close()
 
-@app.patch("/api/records/{record_id}/notes")
-async def update_record_notes(record_id: str, data: NoteUpdateSchema):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE video_records SET notes = ? WHERE id = ?", (data.notes, record_id))
-    conn.commit()
-    conn.close()
-    return {"status": "notes_saved"}
-
-# --- AUTHENTICATION ENDPOINTS ---
+# --- AUTH SECTOR CORES ---
 @app.post("/api/signup")
 async def signup(user: UserSignup):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO users (username, password, role, assignment) VALUES (?, ?, ?, ?)",
-                       (user.username, user.password, user.role, user.assignment))
+        cursor.execute("INSERT INTO users (username, password, role, barangayId, assignment) VALUES (?, ?, ?, ?, ?)",
+                       (user.username, user.password, user.role.upper(), user.barangayId.lower(), user.assignment))
         conn.commit()
         return {"status": "success"}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail=f"Operator ID already exists")
+        raise HTTPException(status_code=400, detail="Operator profile already mapped.")
     finally:
         conn.close()
 
@@ -192,13 +282,21 @@ async def login(creds: UserLogin):
         return {"status": "success", "user": dict(user)}
     raise HTTPException(status_code=401, detail="Invalid Credentials")
 
-# --- INCIDENT REPORTING ENDPOINTS ---
-@app.get("/api/incidents", response_model=List[IncidentSchema])
-async def get_incidents():
+# --- HIERARCHICAL INCIDENT FETCH DATA INTERCEPTOR ---
+@app.get("/api/incidents")
+async def get_incidents(userBarangayId: Optional[str] = None, role: Optional[str] = None, filterBarangayId: Optional[str] = "all"):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM incidents ORDER BY date DESC, militaryTime DESC")
+    
+    if role == "BARANGAY" and userBarangayId:
+        cursor.execute("SELECT * FROM incidents WHERE LOWER(barangayId) = ? ORDER BY date DESC, militaryTime DESC", (userBarangayId.lower(),))
+    else:
+        if filterBarangayId and filterBarangayId.lower() != "all":
+            cursor.execute("SELECT * FROM incidents WHERE LOWER(barangayId) = ? ORDER BY date DESC, militaryTime DESC", (filterBarangayId.lower(),))
+        else:
+            cursor.execute("SELECT * FROM incidents ORDER BY date DESC, militaryTime DESC")
+        
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -209,15 +307,16 @@ async def add_incident(incident: IncidentSchema):
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO incidents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO incidents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (incident.id, incident.caseId, incident.type, incident.officer,
               incident.lat, incident.lng, incident.locationName, incident.severity,
               incident.date, incident.militaryTime, incident.narrative,
-              incident.natureOfCall, incident.arrivalReason, incident.additionalOfficers, incident.status, incident.confidence))
+              incident.natureOfCall, incident.arrivalReason, incident.additionalOfficers, 
+              incident.status, incident.confidence, incident.barangayId.lower()))
         conn.commit()
         return {"status": "persisted"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Data persistence failure: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         conn.close()
 
@@ -234,30 +333,28 @@ async def ai_trigger(data: AiTriggerSchema, request: Request):
     try:
         clean_narrative = f"Automated neural detection of {data.event}."
         cursor.execute('''
-            INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (incident_id, case_id, data.event, "AI_SENTINEL", 11.0176, 124.6031, "Cogon Core Smartpole", "CRITICAL", 
-              current_date, current_time, clean_narrative, "AI Threat Flag", "Automated Tracking", "None", "Active", data.confidence))
+              current_date, current_time, clean_narrative, "AI Threat Flag", "Automated Tracking", "None", "Active", data.confidence, data.barangayId.lower()))
         conn.commit()
-        
-        alert_payload = {
+
+        # Pushes transaction payload natively to every operational UI layout frame instantly
+        await manager.broadcast({
             "status": "CRITICAL",
             "id": incident_id,
             "type": data.event,
-            "conf": data.confidence
-        }
-        for connection in active_connections:
-            try:
-                await connection.send_text(json.dumps(alert_payload))
-            except Exception:
-                pass
-                
+            "location": "Cogon Core Smartpole",
+            "conf": data.confidence,
+            "cameraLinkId": "1",
+        })
+
         return {"status": "persisted", "id": incident_id}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Data persistence failure: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         conn.close()
 
-@app.post("/api/panic")
+@app.post("/panic")
 async def panic_trigger(data: PanicSchema, request: Request):
     global ESP32_IP
     ESP32_IP = request.client.host
@@ -272,27 +369,25 @@ async def panic_trigger(data: PanicSchema, request: Request):
     
     try:
         cursor.execute('''
-            INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (incident_id, case_id, "MANUAL_PANIC", "HARDWARE_BUTTON", 11.0176, 124.6031, "Cogon Core Smartpole", "CRITICAL", 
               current_date, current_time, "Physical hardware panic button pressed manually on device node.", 
-              "Emergency Panic System", "Manual Activation", "None", "Active", 1.00))
+              "Emergency Panic System", "Manual Activation", "None", "Active", 1.00, data.barangayId.lower()))
         conn.commit()
-        
-        alert_payload = {
+
+        # Broadcast hardware interrupt alerts instantly across open clients
+        await manager.broadcast({
             "status": "CRITICAL",
             "id": incident_id,
             "type": "MANUAL_PANIC",
-            "conf": 1.00
-        }
-        for connection in active_connections:
-            try:
-                await connection.send_text(json.dumps(alert_payload))
-            except Exception:
-                pass
-                
+            "location": "Cogon Core Smartpole",
+            "conf": 1.00,
+            "cameraLinkId": "1",
+        })
+
         return {"status": "panic_recorded", "id": incident_id}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Data persistence failure: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         conn.close()
 
@@ -314,39 +409,17 @@ async def delete_incident(incident_id: str):
     conn.close()
     return {"status": "expunged"}
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.append(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-
 @app.post("/siren/activate")
 async def activate_siren():
-    try:
-        requests.get(f"http://{ESP32_IP}/alarm/on", timeout=1.0)
-    except Exception:
-        pass
+    try: requests.get(f"http://{ESP32_IP}/alarm/on", timeout=1.0)
+    except Exception: pass
     return {"status": "siren_triggered"}
 
 @app.post("/siren/reset")
 async def reset_siren():
-    try:
-        requests.get(f"http://{ESP32_IP}/alarm/off", timeout=0.2)
-    except Exception:
-        pass
+    try: requests.get(f"http://{ESP32_IP}/alarm/off", timeout=0.2)
+    except Exception: pass
     return {"status": "siren_nominal"}
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "backend:app", 
-        host=sys_config["backend"]["host"], 
-        port=sys_config["backend"]["port"],
-        reload=sys_config["backend"]["reload"]
-    )
+    uvicorn.run("backend:app", host=sys_config["backend"]["host"], port=sys_config["backend"]["port"], reload=sys_config["backend"]["reload"])
