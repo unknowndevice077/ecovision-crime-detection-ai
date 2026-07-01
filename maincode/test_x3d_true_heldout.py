@@ -108,10 +108,13 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
             continue
         if not (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None):
             continue
+            
         ids = pose_res[0].boxes.id.int().cpu().tolist()
         boxes = pose_res[0].boxes.xyxy.cpu().numpy()
+        
         for tid, p_box in zip(ids, boxes):
-            is_violent, conf = x3d_detector.update(tid, frame, p_box, frame_count)
+            # FIXED: Added all_boxes=boxes argument configuration constraint sync
+            is_violent, conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
             max_confidence_seen = max(max_confidence_seen, conf)
             if is_violent:
                 any_violence_detected = True
@@ -138,8 +141,11 @@ def run_test(roots: list, device: str):
 
     print(f"\nLoading pose model on {device}...")
     pose_model = YOLO(POSE_MODEL_PATH)
+    
     print("Loading X3D-XS detector...")
-    x3d_detector = X3DViolenceDetector(device=device)
+    # FIXED: Re-engineered device allocation map context to satisfy PyTorch runtime signatures
+    x3d_device = f"cuda:{device}" if device.isdigit() else device
+    x3d_detector = X3DViolenceDetector(device=x3d_device)
 
     results = []
     confusion = defaultdict(int)

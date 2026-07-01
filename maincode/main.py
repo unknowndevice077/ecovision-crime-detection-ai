@@ -7,6 +7,7 @@ import threading
 import requests
 import numpy as np
 import json
+import uuid
 from pathlib import Path
 from collections import deque
 from unittest.mock import MagicMock
@@ -188,20 +189,22 @@ threading.Thread(target=_start_stream_server, daemon=True).start()
 print(f"📡 Dynamic Stream server live → http://localhost:8001/video_feed")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4.  MODEL INIT + GPU WARM-UP (STATIC CENTRALIZED WEIGHTS PATHING)
+# 4.  MODEL INIT + GPU WARM-UP (HARDCODED STATIC PATHING)
 # ──────────────────────────────────────────────────────────────────────────────
 WEIGHTS_DIR = r"D:\projects\EcoVisionCode\weights"
+SCREENSHOTS_DIR = os.path.join(BASE_DIR, "static", "screenshots")
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
+os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
-pose_file_name     = os.path.basename(sys_config["detection"]["models"]["pose"])
-violence_file_name = os.path.basename(sys_config["detection"]["models"]["violence"])
+pose_file_name     = "yolo11s-pose.pt"
+weapon_file_name   = "weapon_signs.pt"
 
 pose_model_path = os.path.join(WEIGHTS_DIR, pose_file_name)
-v_weight_path   = os.path.join(WEIGHTS_DIR, violence_file_name)
+w_weight_path   = os.path.join(WEIGHTS_DIR, weapon_file_name)
 x3d_model_path  = os.path.join(WEIGHTS_DIR, "x3d_xs_violence_best.pt")
 
 pose_model     = YOLO(pose_model_path)
-violence_model = YOLO(v_weight_path)
+violence_model = YOLO(w_weight_path)
 x3d_detector   = X3DViolenceDetector(model_path=x3d_model_path)
 
 _dummy = np.zeros((POSE_IMGSZ, POSE_IMGSZ, 3), dtype=np.uint8)
@@ -449,10 +452,15 @@ def _vbox_overlap_ratio(p_box, vb):
 # ──────────────────────────────────────────────────────────────────────────────
 # 11.  ALERT POSTER (Decoupled hardware commands from AI thread)
 # ──────────────────────────────────────────────────────────────────────────────
-def _post_alert(tid, conf: float, event: str = "ASSAULT"):
-    print(f"🔥 [ALERT] Posting {event} event for {tid} | conf={conf:.2f}")
+def _post_alert(incident_id, conf: float, event: str = "ASSAULT"):
+    print(f"🔥 [ALERT] Posting {event} event | case_id={incident_id} | conf={conf:.2f}")
     try:
-        r = requests.post(BACKEND_URL, json={"id": str(tid), "event": event, "confidence": round(conf, 4)}, timeout=2.0)
+        r = requests.post(BACKEND_URL, json={
+            "id": str(incident_id), 
+            "event": event, 
+            "confidence": round(conf, 4),
+            "barangayId": "cogon"
+        }, timeout=2.0)
         print(f"   ✅ Backend {r.status_code}: {r.text[:120]}")
     except Exception as e:
         print(f"   ❌ Backend unreachable: {e}")
@@ -611,6 +619,9 @@ while _running:
     live_vboxes = _vbox_tracker.update(raw_vboxes)
     pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, half=True)
 
+    # Context collection array to remember alerts triggered in this specific execution frame
+    triggered_alerts_this_frame = []
+
     if (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None and pose_res[0].keypoints is not None):
         ids = pose_res[0].boxes.id.int().cpu().tolist()
         kpts = pose_res[0].keypoints.xy.cpu().numpy()
@@ -648,7 +659,7 @@ while _running:
 
             prev_joints[tid] = joints[[9, 10]].copy()
 
-            is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count)
+            is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
             _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))   
 
             in_vbox = max((_vbox_overlap_ratio(p_box, vb) for vb in live_vboxes), default=0.0) >= VBOX_ASSAULT_THRESHOLD
@@ -662,7 +673,10 @@ while _running:
                 conf = min(1.0, sum(ts.evidence_buf) / EVIDENCE_WINDOW + 0.55)
                 ts.mark_alerted(frame_count)
                 scene_last_alert_frame = frame_count
-                _alert_exec.submit(_post_alert, tid, conf, "ASSAULT")
+                
+                # Pre-generate unique case tracking tokens
+                incident_id = str(uuid.uuid4())[:8]
+                triggered_alerts_this_frame.append({"id": incident_id, "conf": conf, "event": "ASSAULT"})
 
             _draw_overlay(frame, p_box, tid, state, weapon_assigns.get(tid))
 
@@ -676,8 +690,8 @@ while _running:
                 last_alert = _robbery_alert_cooldown.get(pair_key, -ALERT_COOLDOWN_FRAMES)
                 if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
                     _robbery_alert_cooldown[pair_key] = frame_count
-                    pair_label = f"{pair_key[0]}_{pair_key[1]}"
-                    _alert_exec.submit(_post_alert, pair_label, 0.75, "ROBBERY")
+                    incident_id = str(uuid.uuid4())[:8]
+                    triggered_alerts_this_frame.append({"id": incident_id, "conf": 0.895, "event": "ROBBERY"})
 
         # ─── VANDALISM FILTER ANALYSIS ───
         sign_boxes = [w["box"] for w in tracked_weapons if w["name"] == "sign"]
@@ -697,7 +711,8 @@ while _running:
             last_alert = _vandal_alert_cooldown.get(tid, -ALERT_COOLDOWN_FRAMES)
             if v_state_res == "VANDALISM" and (frame_count - last_alert > ALERT_COOLDOWN_FRAMES):
                 _vandal_alert_cooldown[tid] = frame_count
-                _alert_exec.submit(_post_alert, tid, 0.84, "VANDALISM")
+                incident_id = str(uuid.uuid4())[:8]
+                triggered_alerts_this_frame.append({"id": incident_id, "conf": 0.84, "event": "VANDALISM"})
 
     now = time.perf_counter()
     if now - fps_timer >= 1.0:
@@ -708,6 +723,13 @@ while _running:
     hud = f"EcoVision v16.0 | FPS: {fps_display:.0f} | Tracks: {len(id_last_seen)}"
     cv2.rectangle(frame, (0, 0), (len(hud) * 8 + 10, 26), (0, 0, 0), -1)
     cv2.putText(frame, hud, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 80), 1, cv2.LINE_AA)
+
+    # ─── SECURE POST-RENDER ANNOTATION SNAPSHOT FLUSH ───
+    # Iterates over active incidents *after* all boxes, metrics, and text matrices are rendered
+    for alert in triggered_alerts_this_frame:
+        snap_path = os.path.join(SCREENSHOTS_DIR, f"snap_{alert['id']}.jpg")
+        cv2.imwrite(snap_path, frame) # Bakes complete visualization canvas configuration directly to file
+        _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'])
 
     if _encode_future is None or _encode_future.done():
         def _encode_and_push(f=frame.copy()):

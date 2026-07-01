@@ -83,7 +83,8 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
         boxes = pose_res[0].boxes.xyxy.cpu().numpy()
 
         for tid, p_box in zip(ids, boxes):
-            is_violent, conf = x3d_detector.update(tid, frame, p_box, frame_count)
+            # FIXED: Passed all_boxes=boxes parameter context to support contextual interaction padding maps
+            is_violent, conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
             max_confidence_seen = max(max_confidence_seen, conf)
             if is_violent:
                 any_violence_detected = True
@@ -122,10 +123,6 @@ def run_test(roots: list, limit: int, device: str):
     confusion = defaultdict(int)
     clip_counter = 0
 
-    # Separate into fight/nonfight folders, then interleave them so a
-    # --limit cutoff doesn't bias toward whichever class came first
-    # alphabetically (this is exactly what caused the all-violent sample
-    # last time).
     fight_dirs = [d for d in video_dirs if classify_folder(d.name) == "fight"]
     nonfight_dirs = [d for d in video_dirs if classify_folder(d.name) == "nonfight"]
 
@@ -141,8 +138,6 @@ def run_test(roots: list, limit: int, device: str):
     random.shuffle(fight_files)
     random.shuffle(nonfight_files)
 
-    # Balance: cap both lists to the same size so the test set is 50/50,
-    # same principle as train_x3d_full.py's balancing
     min_count = min(len(fight_files), len(nonfight_files))
     if limit is not None:
         per_class_limit = min(min_count, limit // 2)

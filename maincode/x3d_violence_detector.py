@@ -43,13 +43,31 @@ import cv2
 # CONFIG
 # ──────────────────────────────────────────────────────────────────────────────
 
-MODEL_PATH        = r"D:\projects\EcoVisionCode\weights\x3d_xs_violence_best.pt"   # adjust filename if yours differs
-CLIP_FRAMES        = 13     # must match training (CLIP_FRAMES in train_x3d_full.py)
-FRAME_SIZE         = 160    # must match training (FRAME_SIZE in train_x3d_full.py)
-X3D_CHECK_INTERVAL = 15     # run X3D-XS once every 15 frames PER TRACK (~0.5s @ 30fps)
-                            # lower = more responsive but more GPU cost
-                            # higher = cheaper but slower to detect onset
-VIOLENCE_CONFIDENCE_THRESHOLD = 0.55   # softmax prob needed to call it "violent"
+MODEL_PATH        = r"D:\projects\EcoVisionCode\weights\x3d_xs_violence_best.pt"
+CLIP_FRAMES        = 13
+FRAME_SIZE         = 160
+
+# CHANGED -- training sampled 13 frames evenly across each WHOLE clip
+# (np.linspace), capturing several seconds of motion arc. The live pipeline
+# was capturing 13 CONSECUTIVE frames (~0.4 sec at 30fps), which is a
+# fundamentally different, much shorter temporal window than what the
+# model learned to recognize. BUFFER_SPAN widens the live window to match:
+# we now keep BUFFER_SPAN raw frames and subsample 13 of them evenly,
+# mirroring training's temporal coverage instead of a tight burst.
+BUFFER_SPAN         = 45     # raw frames kept before subsampling (~1.5 sec @ 30fps)
+                            # TRADEOFF REASONING:
+                            # - BUFFER_SPAN=13 (original): only 0.4sec coverage, model trained on
+                            #   whole clips (several sec) -- temporal mismatch causes accuracy gap
+                            # - BUFFER_SPAN=90: 3sec coverage but clips <90 frames get zero
+                            #   inferences -- half the test set fires nothing
+                            # - BUFFER_SPAN=45: 1.5sec coverage, fills on 41+ frame clips,
+                            #   linspace gap of 3.7 frames between samples -- reasonable
+                            #   approximation of training's temporal distribution without
+                            #   being incompatible with the shorter clips in the dataset
+                            # On a LIVE CONTINUOUS CAMERA this distinction doesn't matter
+                            # (buffer fills once, stays full forever) -- only affects test harness
+X3D_CHECK_INTERVAL  = 15
+VIOLENCE_CONFIDENCE_THRESHOLD = 0.55
 
 
 class X3DViolenceDetector:
@@ -90,36 +108,81 @@ class X3DViolenceDetector:
         self._last_check_frame: dict[int, int] = {}
         self._cached_result: dict[int, tuple] = {}   # tid -> (is_violent, confidence)
 
-    def _crop_person(self, frame: np.ndarray, p_box) -> np.ndarray:
-        """Crops the frame to a person's bbox with some padding, resizes to FRAME_SIZE."""
+    def _crop_person(self, frame: np.ndarray, p_box, all_boxes=None) -> np.ndarray:
+        """
+        Crops the frame around a person's bbox, padded generously enough to
+        usually include a SECOND nearby person if one exists. Violence is an
+        interaction signal -- a tight crop on only the tracked individual can
+        cut the other party out of frame entirely, removing the exact visual
+        evidence (contact, reciprocal motion) the model needs.
+
+        If all_boxes is provided, the crop expands to include any other
+        person bbox within a reasonable distance, instead of using a fixed
+        padding ratio alone.
+        """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = [int(v) for v in p_box]
-        pad_x = int((x2 - x1) * 0.3)
-        pad_y = int((y2 - y1) * 0.3)
-        x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-        x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
 
-        if x2 <= x1 or y2 <= y1:
+        # Start with generous fixed padding (wider than before: 30% -> 60%)
+        pad_x = int((x2 - x1) * 0.6)
+        pad_y = int((y2 - y1) * 0.6)
+        cx1, cy1 = x1 - pad_x, y1 - pad_y
+        cx2, cy2 = x2 + pad_x, y2 + pad_y
+
+        # Expand further to include any nearby person -- this is what
+        # actually captures two-person interactions instead of guessing
+        # via padding alone.
+        if all_boxes is not None:
+            my_center_x = (x1 + x2) / 2
+            my_center_y = (y1 + y2) / 2
+            search_radius = max(x2 - x1, y2 - y1) * 3   # only consider plausibly-nearby people
+
+            for ob in all_boxes:
+                ox1, oy1, ox2, oy2 = [int(v) for v in ob]
+                if (ox1, oy1, ox2, oy2) == (x1, y1, x2, y2):
+                    continue
+                other_cx, other_cy = (ox1 + ox2) / 2, (oy1 + oy2) / 2
+                dist = ((other_cx - my_center_x) ** 2 + (other_cy - my_center_y) ** 2) ** 0.5
+                if dist <= search_radius:
+                    cx1 = min(cx1, ox1)
+                    cy1 = min(cy1, oy1)
+                    cx2 = max(cx2, ox2)
+                    cy2 = max(cy2, oy2)
+
+        cx1, cy1 = max(0, cx1), max(0, cy1)
+        cx2, cy2 = min(w, cx2), min(h, cy2)
+
+        if cx2 <= cx1 or cy2 <= cy1:
             return np.zeros((FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
 
-        crop = frame[y1:y2, x1:x2]
+        crop = frame[cy1:cy2, cx1:cx2]
         return cv2.resize(crop, (FRAME_SIZE, FRAME_SIZE))
 
-    def update(self, tid: int, frame: np.ndarray, p_box, frame_count: int) -> tuple:
+    def update(self, tid: int, frame: np.ndarray, p_box, frame_count: int, all_boxes=None) -> tuple:
         """
         Call this once per track per frame. Returns (is_violent: bool, confidence: float)
         -- this is a CACHED result most of the time; only recomputes every
-        X3D_CHECK_INTERVAL frames once the buffer is full.
+        X3D_CHECK_INTERVAL frames once the buffer holds BUFFER_SPAN frames.
+
+        all_boxes: optional list of ALL person bboxes this frame (not just
+        this track's own box) -- enables the crop to widen and include a
+        nearby second person, capturing interaction signal instead of a
+        tight solo crop. Pass main.py's `boxes` array here.
+
+        The buffer now holds BUFFER_SPAN raw frames (a wide window, ~3 sec)
+        and SUBSAMPLES 13 evenly-spaced frames from it at inference time --
+        mirroring training's np.linspace sampling across a whole clip,
+        instead of feeding the model a narrow burst of consecutive frames.
         """
         if tid not in self._frame_buffers:
-            self._frame_buffers[tid] = deque(maxlen=CLIP_FRAMES)
+            self._frame_buffers[tid] = deque(maxlen=BUFFER_SPAN)
             self._last_check_frame[tid] = -X3D_CHECK_INTERVAL
             self._cached_result[tid] = (False, 0.0)
 
-        cropped = self._crop_person(frame, p_box)
+        cropped = self._crop_person(frame, p_box, all_boxes=all_boxes)
         self._frame_buffers[tid].append(cropped)
 
-        buffer_full = len(self._frame_buffers[tid]) == CLIP_FRAMES
+        buffer_full = len(self._frame_buffers[tid]) == BUFFER_SPAN
         due_for_check = (frame_count - self._last_check_frame[tid]) >= X3D_CHECK_INTERVAL
 
         if buffer_full and due_for_check:
@@ -129,7 +192,14 @@ class X3DViolenceDetector:
         return self._cached_result[tid]
 
     def _run_inference(self, frames_deque: deque) -> tuple:
-        frames = np.stack(list(frames_deque), axis=0).astype(np.float32) / 255.0
+        # Subsample CLIP_FRAMES evenly across the wide buffer -- same
+        # np.linspace logic train_x3d_full.py used per-clip, applied here
+        # to the rolling window instead of a whole offline file.
+        all_frames = list(frames_deque)
+        indices = np.linspace(0, len(all_frames) - 1, CLIP_FRAMES).astype(int)
+        sampled = [all_frames[i] for i in indices]
+
+        frames = np.stack(sampled, axis=0).astype(np.float32) / 255.0
         frames = (frames - 0.45) / 0.225
         tensor = torch.from_numpy(frames).permute(3, 0, 1, 2).float().unsqueeze(0)
         tensor = tensor.to(self.device)
@@ -146,17 +216,16 @@ class X3DViolenceDetector:
         """
         Returns diagnostic info for visual overlay/debugging:
           - confidence: last computed violence probability (0.0-1.0)
-          - buffer_fill: how full the rolling frame buffer is (0 to CLIP_FRAMES)
+          - buffer_fill: how full the rolling frame buffer is (0 to BUFFER_SPAN)
           - frames_until_next_check: countdown to next real inference
         """
         is_violent, conf = self._cached_result.get(tid, (False, 0.0))
         buf_len = len(self._frame_buffers.get(tid, []))
-        last_check = self._last_check_frame.get(tid, 0)
         return {
             "confidence": conf,
             "is_violent": is_violent,
             "buffer_fill": buf_len,
-            "buffer_target": CLIP_FRAMES,
+            "buffer_target": BUFFER_SPAN,
         }
 
     def cleanup_track(self, tid: int):
