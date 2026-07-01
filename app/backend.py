@@ -8,8 +8,13 @@ import uvicorn
 import json
 import uuid
 import os
+import cv2
+import numpy as np # FIXED: Added missing numpy import to resolve Pylance undefined variable error
+import threading
+import collections
 import requests
 from datetime import datetime
+import time
 
 # --- CONFIGURATION ENGINE SETUP ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,7 +32,9 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
 ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
 RECORDINGS_DIR = os.path.join(BASE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
+SCREENSHOTS_DIR = os.path.join(BASE_DIR, "static", "screenshots")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
 app = FastAPI(
     title=sys_config["system"]["name"],
@@ -42,9 +49,7 @@ if sys_config["security"]["enable_cors"]:
         allow_headers=["*"],
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER
-# ─────────────────────────────────────────────────────────────────────────────
+# --- WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER ---
 class ConnectionManager:
     """Tracks every open dashboard WebSocket connection and broadcasts to all of them."""
     def __init__(self):
@@ -71,6 +76,7 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 app.mount("/static/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
+app.mount("/static/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
 
 # --- DATABASE INITIALIZATION CORE ---
 def init_db():
@@ -88,7 +94,7 @@ def init_db():
             id TEXT PRIMARY KEY, caseId TEXT, type TEXT, officer TEXT, lat REAL, lng REAL, 
             locationName TEXT, severity TEXT, date TEXT, militaryTime TEXT, narrative TEXT, 
             natureOfCall TEXT, arrivalReason TEXT, additionalOfficers TEXT, status TEXT, 
-            confidence REAL, barangayId TEXT
+            confidence REAL, barangayId TEXT, screenshotPath TEXT
         )
     ''')
     cursor.execute('''
@@ -103,7 +109,12 @@ def init_db():
         )
     ''')
     
-    # Pre-seed defaults if table is empty
+    # Structural column verification for screenshot deep linking
+    cursor.execute("PRAGMA table_info(incidents)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "screenshotPath" not in columns:
+        cursor.execute("ALTER TABLE incidents ADD COLUMN screenshotPath TEXT")
+
     cursor.execute("SELECT COUNT(*) FROM cameras")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO cameras VALUES ('1', 'Main Entrance Hub', 'rtsp://ecovision:REDACTED_ROTATE_THIS_PASSWORD@192.168.254.106:554/stream1', 'online', 'cogon')")
@@ -113,6 +124,101 @@ def init_db():
     conn.close()
 
 init_db()
+
+# --- NVIDIA SHADOWPLAY & 24/7 BACKGROUND RECORDING SYSTEMS ---
+class VideoRecordingEngine:
+    def __init__(self, buffer_seconds=15, fps=20):
+        self.buffer_size = buffer_seconds * fps
+        self.frame_buffer = collections.deque(maxlen=self.buffer_size)
+        self.latest_frame = None
+        self.lock = threading.Lock()
+        self.fps = fps
+        self.running = True
+
+    def start_workers(self):
+        threading.Thread(target=self._continuous_capture_worker, daemon=True).start()
+        threading.Thread(target=self._continuous_247_writer_worker, daemon=True).start()
+
+    def _continuous_capture_worker(self):
+        """Simulates continuous video streaming capture pipeline (replaces camera hardware)"""
+        while self.running:
+            # Generate highly distinct matrix pattern arrays to simulate real live footage
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank, f"LIVE FEED RAW - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
+                        (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (16, 185, 129), 2)
+            
+            with self.lock:
+                self.latest_frame = blank.copy()
+                self.frame_buffer.append(blank)
+            time.sleep(1.0 / self.fps)
+
+    def _continuous_247_writer_worker(self):
+        """Enforces 24/7 recording logic by slicing video feeds into discrete hourly segment files"""
+        while self.running:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"rec_247_{timestamp}.mp4"
+            filepath = os.path.join(RECORDINGS_DIR, filename)
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(filepath, fourcc, self.fps, (640, 480))
+            
+            # Slice files incrementally into clean 2-minute chunk files for thesis performance balance
+            segment_end_time = time.time() + 120 
+            while time.time() < segment_end_time and self.running:
+                with self.lock:
+                    frame = self.latest_frame
+                if frame is not None:
+                    writer.write(frame)
+                time.sleep(1.0 / self.fps)
+            writer.release()
+
+    def save_shadow_clip(self, incident_id: str, post_trigger_duration=10):
+        """Saves a ShadowPlay video clip by taking buffered frames and appending post-alert footage"""
+        with self.lock:
+            pre_trigger_frames = list(self.frame_buffer)
+            current_frame = self.latest_frame
+
+        # Save standard scene preview snapshot image chip
+        screenshot_filename = f"snap_{incident_id}.jpg"
+        screenshot_path = os.path.join(SCREENSHOTS_DIR, screenshot_filename)
+        if current_frame is not None:
+            cv2.imwrite(screenshot_path, current_frame)
+
+        def _async_writer():
+            clip_filename = f"clip_crime_{incident_id}.mp4"
+            clip_filepath = os.path.join(RECORDINGS_DIR, clip_filename)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(clip_filepath, fourcc, self.fps, (640, 480))
+
+            for frame in pre_trigger_frames:
+                writer.write(frame)
+
+            # Gather post-trigger footage frames in real time
+            post_frames_count = post_trigger_duration * self.fps
+            for _ in range(post_frames_count):
+                with self.lock:
+                    frame = self.latest_frame
+                if frame is not None:
+                    writer.write(frame)
+                time.sleep(1.0 / self.fps)
+            
+            writer.release()
+
+            # Record metadata elements inside database indices
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute("INSERT INTO video_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (str(uuid.uuid4())[:8], clip_filename, clip_filepath, now_str, 
+                            f"{post_trigger_duration + 15}s", "CRIME_CLIP", incident_id, "00:15", "Auto-generated clip via ShadowPlay engine."))
+            conn.commit()
+            conn.close()
+
+        threading.Thread(target=_async_writer, daemon=True).start()
+        return f"/static/screenshots/{screenshot_filename}"
+
+recorder_engine = VideoRecordingEngine()
+recorder_engine.start_workers()
 
 # --- DATA SCHEMAS ---
 class UserSignup(BaseModel):
@@ -145,6 +251,14 @@ class IncidentSchema(BaseModel):
     confidence: Optional[float] = 1.0
     barangayId: str
 
+class CameraSchema(BaseModel):
+    name: str
+    url: str
+    barangayId: str
+
+class StatusUpdateSchema(BaseModel):
+    status: str
+
 class AiTriggerSchema(BaseModel):
     id: str
     event: str
@@ -155,17 +269,6 @@ class PanicSchema(BaseModel):
     event: str
     device: str
     barangayId: Optional[str] = "cogon"
-
-class CameraSchema(BaseModel):
-    name: str
-    url: str
-    barangayId: str
-
-class StatusUpdateSchema(BaseModel):
-    status: str
-
-class NoteUpdateSchema(BaseModel):
-    notes: str
 
 class ManualClipSchema(BaseModel):
     filename: str
@@ -214,15 +317,11 @@ async def delete_camera(cam_id: str):
     conn.close()
     return {"status": "deleted"}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LIVE DASHBOARD STREAM INTERACTION TERMINAL ROUTE
-# ─────────────────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Captures client status nodes to safeguard socket execution registers
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -291,15 +390,27 @@ async def get_incidents(userBarangayId: Optional[str] = None, role: Optional[str
     
     if role == "BARANGAY" and userBarangayId:
         cursor.execute("SELECT * FROM incidents WHERE LOWER(barangayId) = ? ORDER BY date DESC, militaryTime DESC", (userBarangayId.lower(),))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Intercept and scrub confidential fields on the fly for non-police profiles
+        secure_redacted_list = []
+        for row in rows:
+            record = dict(row)
+            record["narrative"]          = "🔒 [RESTRICTED] Investigative logs masked for non-police profiles."
+            record["natureOfCall"]       = "CONFIDENTIAL // RESTRICTED"
+            record["arrivalReason"]      = "CONFIDENTIAL // RESTRICTED"
+            record["additionalOfficers"] = "CONFIDENTIAL"
+            secure_redacted_list.append(record)
+        return secure_redacted_list
     else:
         if filterBarangayId and filterBarangayId.lower() != "all":
             cursor.execute("SELECT * FROM incidents WHERE LOWER(barangayId) = ? ORDER BY date DESC, militaryTime DESC", (filterBarangayId.lower(),))
         else:
             cursor.execute("SELECT * FROM incidents ORDER BY date DESC, militaryTime DESC")
-        
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
 @app.post("/api/incidents")
 async def add_incident(incident: IncidentSchema):
@@ -307,7 +418,7 @@ async def add_incident(incident: IncidentSchema):
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO incidents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO incidents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,null)
         ''', (incident.id, incident.caseId, incident.type, incident.officer,
               incident.lat, incident.lng, incident.locationName, incident.severity,
               incident.date, incident.militaryTime, incident.narrative,
@@ -321,105 +432,55 @@ async def add_incident(incident: IncidentSchema):
         conn.close()
 
 @app.post("/api/ai_trigger")
-async def ai_trigger(data: AiTriggerSchema, request: Request):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+async def ai_trigger(data: AiTriggerSchema):
+    incident_id = data.id if data.id else str(uuid.uuid4())[:8]
+    case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     now = datetime.now()
-    current_date = now.strftime("%Y-%m-%d")
-    current_time = now.strftime("%H:%M:%S")
-    incident_id = str(uuid.uuid4())[:8]
-    case_id = f"CASE-{incident_id.upper()}"
     
-    try:
-        clean_narrative = f"Automated neural detection of {data.event}."
-        cursor.execute('''
-            INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (incident_id, case_id, data.event, "AI_SENTINEL", 11.0176, 124.6031, "Cogon Core Smartpole", "CRITICAL", 
-              current_date, current_time, clean_narrative, "AI Threat Flag", "Automated Tracking", "None", "Active", data.confidence, data.barangayId.lower()))
-        conn.commit()
-
-        # Pushes transaction payload natively to every operational UI layout frame instantly
-        await manager.broadcast({
-            "status": "CRITICAL",
-            "id": incident_id,
-            "type": data.event,
-            "location": "Cogon Core Smartpole",
-            "conf": data.confidence,
-            "cameraLinkId": "1",
-        })
-
-        return {"status": "persisted", "id": incident_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        conn.close()
-
-@app.post("/panic")
-async def panic_trigger(data: PanicSchema, request: Request):
-    global ESP32_IP
-    ESP32_IP = request.client.host
+    # Process NVIDIA ShadowPlay image slice and capture preview path link
+    screenshot_url = recorder_engine.save_shadow_clip(incident_id)
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    now = datetime.now()
-    current_date = now.strftime("%Y-%m-%d")
-    current_time = now.strftime("%H:%M:%S")
-    incident_id = str(uuid.uuid4())[:8]
-    case_id = f"CASE-PANIC-{incident_id.upper()}"
-    
-    try:
-        cursor.execute('''
-            INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (incident_id, case_id, "MANUAL_PANIC", "HARDWARE_BUTTON", 11.0176, 124.6031, "Cogon Core Smartpole", "CRITICAL", 
-              current_date, current_time, "Physical hardware panic button pressed manually on device node.", 
-              "Emergency Panic System", "Manual Activation", "None", "Active", 1.00, data.barangayId.lower()))
-        conn.commit()
-
-        # Broadcast hardware interrupt alerts instantly across open clients
-        await manager.broadcast({
-            "status": "CRITICAL",
-            "id": incident_id,
-            "type": "MANUAL_PANIC",
-            "location": "Cogon Core Smartpole",
-            "conf": 1.00,
-            "cameraLinkId": "1",
-        })
-
-        return {"status": "panic_recorded", "id": incident_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        conn.close()
-
-@app.patch("/api/incidents/{incident_id}/status")
-async def update_incident_status(incident_id: str, data: StatusUpdateSchema):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
+    cursor.execute('''
+        INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (incident_id, case_id, data.event, "AI_AUTOMATION", 11.0504, 124.6062, "Cogon Core Smartpole Node", 
+          "HIGH", now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), 
+          f"Autonomous edge detection triggered via spatiotemporal analysis classification matrix.", 
+          "EMERGENCY_AI_FLAG", "AUTOMATED_TRIGGER", "NONE", "Active", data.confidence, data.barangayId.lower(), screenshot_url))
     conn.commit()
     conn.close()
-    return {"status": "status_updated"}
+    
+    await manager.broadcast({
+        "status": "CRITICAL", "id": incident_id, "type": data.event, 
+        "location": "Cogon Core Smartpole Node", "conf": data.confidence, "cameraLinkId": "1"
+    })
+    return {"status": "processed", "incident_id": incident_id}
 
-@app.delete("/api/incidents/{incident_id}")
-async def delete_incident(incident_id: str):
+@app.post("/api/panic_trigger")
+async def panic_trigger(data: PanicSchema):
+    incident_id = str(uuid.uuid4())[:8]
+    case_id = f"PANIC-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
+    now = datetime.now()
+    
+    screenshot_url = recorder_engine.save_shadow_clip(incident_id)
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
+    cursor.execute('''
+        INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (incident_id, case_id, "HARDWARE_PANIC_INTERRUPT", "FIELD_NODE", 11.0510, 124.6070, 
+          "Hardware Node Interface", "CRITICAL", now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), 
+          f"Manual hardware safety interface switch depressed at source terminal.", 
+          "PANIC_BUTTON_ENGAGED", "MANUAL_OVERRIDE", "NONE", "Active", 1.0, data.barangayId.lower(), screenshot_url))
     conn.commit()
     conn.close()
-    return {"status": "expunged"}
-
-@app.post("/siren/activate")
-async def activate_siren():
-    try: requests.get(f"http://{ESP32_IP}/alarm/on", timeout=1.0)
-    except Exception: pass
-    return {"status": "siren_triggered"}
-
-@app.post("/siren/reset")
-async def reset_siren():
-    try: requests.get(f"http://{ESP32_IP}/alarm/off", timeout=0.2)
-    except Exception: pass
-    return {"status": "siren_nominal"}
+    
+    await manager.broadcast({
+        "status": "CRITICAL", "id": incident_id, "type": "HARDWARE_PANIC_INTERRUPT", 
+        "location": "Hardware Node Interface", "conf": 1.0, "cameraLinkId": "2"
+    })
+    return {"status": "panic_logged", "id": incident_id}
 
 if __name__ == "__main__":
     uvicorn.run("backend:app", host=sys_config["backend"]["host"], port=sys_config["backend"]["port"], reload=sys_config["backend"]["reload"])
