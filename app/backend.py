@@ -109,11 +109,18 @@ def init_db():
         )
     ''')
     
-    # Structural column verification for screenshot deep linking
+    # Structural column verification and migration paths
     cursor.execute("PRAGMA table_info(incidents)")
     columns = [col[1] for col in cursor.fetchall()]
+    
     if "screenshotPath" not in columns:
+        print("💾 [DATABASE MIGRATION] Appending missing column 'screenshotPath' to table structure...")
         cursor.execute("ALTER TABLE incidents ADD COLUMN screenshotPath TEXT")
+        
+    # FIXED: Added migration verify step to append barangayId column to legacy files dynamically
+    if "barangayId" not in columns:
+        print("💾 [DATABASE MIGRATION] Appending missing column 'barangayId' to table structure...")
+        cursor.execute("ALTER TABLE incidents ADD COLUMN barangayId TEXT DEFAULT 'cogon'")
 
     cursor.execute("SELECT COUNT(*) FROM cameras")
     if cursor.fetchone()[0] == 0:
@@ -142,7 +149,6 @@ class VideoRecordingEngine:
     def _continuous_capture_worker(self):
         """Simulates continuous video streaming capture pipeline (replaces camera hardware)"""
         while self.running:
-            # Generate highly distinct matrix pattern arrays to simulate real live footage
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(blank, f"LIVE FEED RAW - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
                         (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (16, 185, 129), 2)
@@ -150,6 +156,7 @@ class VideoRecordingEngine:
             with self.lock:
                 self.latest_frame = blank.copy()
                 self.frame_buffer.append(blank)
+        
             time.sleep(1.0 / self.fps)
 
     def _continuous_247_writer_worker(self):
@@ -162,7 +169,6 @@ class VideoRecordingEngine:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(filepath, fourcc, self.fps, (640, 480))
             
-            # Slice files incrementally into clean 2-minute chunk files for thesis performance balance
             segment_end_time = time.time() + 120 
             while time.time() < segment_end_time and self.running:
                 with self.lock:
@@ -170,6 +176,7 @@ class VideoRecordingEngine:
                 if frame is not None:
                     writer.write(frame)
                 time.sleep(1.0 / self.fps)
+            
             writer.release()
 
     def save_shadow_clip(self, incident_id: str, post_trigger_duration=10):
@@ -178,7 +185,6 @@ class VideoRecordingEngine:
             pre_trigger_frames = list(self.frame_buffer)
             current_frame = self.latest_frame
 
-        # Save standard scene preview snapshot image chip
         screenshot_filename = f"snap_{incident_id}.jpg"
         screenshot_path = os.path.join(SCREENSHOTS_DIR, screenshot_filename)
         if current_frame is not None:
@@ -193,7 +199,6 @@ class VideoRecordingEngine:
             for frame in pre_trigger_frames:
                 writer.write(frame)
 
-            # Gather post-trigger footage frames in real time
             post_frames_count = post_trigger_duration * self.fps
             for _ in range(post_frames_count):
                 with self.lock:
@@ -204,13 +209,12 @@ class VideoRecordingEngine:
             
             writer.release()
 
-            # Record metadata elements inside database indices
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute("INSERT INTO video_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (str(uuid.uuid4())[:8], clip_filename, clip_filepath, now_str, 
-                            f"{post_trigger_duration + 15}s", "CRIME_CLIP", incident_id, "00:15", "Auto-generated clip via ShadowPlay engine."))
+                        (str(uuid.uuid4())[:8], clip_filename, clip_filepath, now_str, 
+                         f"{post_trigger_duration + 15}s", "CRIME_CLIP", incident_id, "00:15", "Auto-generated clip via ShadowPlay engine."))
             conn.commit()
             conn.close()
 
@@ -393,7 +397,6 @@ async def get_incidents(userBarangayId: Optional[str] = None, role: Optional[str
         rows = cursor.fetchall()
         conn.close()
         
-        # Intercept and scrub confidential fields on the fly for non-police profiles
         secure_redacted_list = []
         for row in rows:
             record = dict(row)
@@ -437,7 +440,6 @@ async def ai_trigger(data: AiTriggerSchema):
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     now = datetime.now()
     
-    # Process NVIDIA ShadowPlay image slice and capture preview path link
     screenshot_url = recorder_engine.save_shadow_clip(incident_id)
     
     conn = sqlite3.connect(DB_PATH)

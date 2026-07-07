@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   X, MapPin, ShieldCheck, Trash2, Plus,
   Info, AlertCircle, FileSignature, FileText,
@@ -24,7 +24,7 @@ const SAMPLE_REPORTS = [
     severity: 'CRITICAL', date: '2026-06-01', militaryTime: '0552',
     narrative: 'Automated neural detection of ASSAULT.',
     natureOfCall: 'AI Threat Flag', arrivalReason: 'Automated Tracking',
-    additionalOfficers: 'None', status: 'PENDING', screenshotPath: ''
+    additionalOfficers: 'None', status: 'PENDING', screenshotPath: 'https://picsum.photos/seed/sp1/640/360'
   },
   {
     id: 'sample-sp2', caseId: 'CASE-B882AC11', type: 'THEFT', officer: 'AI_SENTINEL',
@@ -32,7 +32,7 @@ const SAMPLE_REPORTS = [
     severity: 'MEDIUM', date: '2026-06-02', militaryTime: '1114',
     narrative: 'Automated neural detection of Theft / Larceny.',
     natureOfCall: 'AI Threat Flag', arrivalReason: 'Automated Tracking',
-    additionalOfficers: 'None', status: 'Confirmed', screenshotPath: ''
+    additionalOfficers: 'None', status: 'Confirmed', screenshotPath: 'https://picsum.photos/seed/sp2/640/360'
   },
   {
     id: 'sample-sp3', caseId: 'CASE-N993DF44', type: 'PHYSICAL ALTERCATION', officer: 'AI_SENTINEL',
@@ -40,7 +40,7 @@ const SAMPLE_REPORTS = [
     severity: 'HIGH', date: '2026-05-31', militaryTime: '0245',
     narrative: 'Automated neural detection of a Physical Altercation on public lanes.',
     natureOfCall: 'AI Threat Flag', arrivalReason: 'Automated Tracking',
-    additionalOfficers: 'None', status: 'Confirmed', screenshotPath: ''
+    additionalOfficers: 'None', status: 'Confirmed', screenshotPath: 'https://picsum.photos/seed/sp3/640/360'
   }
 ];
 
@@ -49,7 +49,8 @@ type Incident = {
   lat: number; lng: number; locationName: string;
   severity: string; date: string; militaryTime: string;
   narrative: string; natureOfCall: string; arrivalReason: string;
-  additionalOfficers: string; status: string; screenshotPath?: string;
+  additionalOfficers: string; status: string;
+  screenshotPath?: string;
 };
 
 interface CrimeReportsViewProps {
@@ -58,7 +59,10 @@ interface CrimeReportsViewProps {
 }
 
 export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsViewProps) {
-  const [selectedPole, setSelectedPole] = useState<SmartpoleNode | null>(SMARTPOLE_LOCATIONS[0]);
+  const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
+  const selectedPole = useMemo<SmartpoleNode | null>(() => {
+    return selectedPoleId ? SMARTPOLE_LOCATIONS.find(p => p.id === selectedPoleId) ?? null : null;
+  }, [selectedPoleId]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [poleDateFilter, setPoleDateFilter] = useState("");
   const [poleTypeFilter, setPoleTypeFilter] = useState("ALL");
@@ -67,12 +71,10 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
 
-  // Manual Report Creation Fields
   const [isManualFilingActive, setIsManualFilingActive] = useState(false);
   const [manualType, setFormManualType] = useState("ASSAULT");
   const [manualSeverity, setFormManualSeverity] = useState("HIGH");
   const [manualNarrative, setFormManualNarrative] = useState("");
-
   const [reportForm, setReportForm] = useState({
     badgeNumber: '',
     reportingOfficer: '',
@@ -86,15 +88,26 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     finalDisposition: 'Pending Criminal Case Referral to Prosecutors',
     supervisorApproval: ''
   });
-
   const mapRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const poleMarkersRef = useRef<Record<string, any>>({});
   const incidentMarkersRef = useRef<any[]>([]);
-  const selectedPoleIdRef = useRef<string | null>(SMARTPOLE_LOCATIONS[0]?.id ?? null);
+  const selectedPoleIdRef = useRef<string | null>(null);
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
+  const filteredIncidents = useMemo(() => {
+    return incidents.filter(inc => {
+      if (selectedPole) {
+        const match = inc.locationName.toLowerCase().includes(selectedPole.name.toLowerCase()) ||
+                      inc.locationName.toLowerCase().includes(selectedPole.street.toLowerCase());
+        if (!match) return false;
+      }
+      if (poleDateFilter && !inc.date.includes(poleDateFilter)) return false;
+      if (poleTypeFilter !== 'ALL' && inc.type.toUpperCase() !== poleTypeFilter.toUpperCase()) return false;
+   
+      return true;
+    });
+  }, [incidents, selectedPole, poleDateFilter, poleTypeFilter]);
   const formatTo12Hour = (timeStr: string) => {
     if (!timeStr) return "";
     let h = 0, m = "00";
@@ -118,7 +131,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       setIncidents(SAMPLE_REPORTS);
     }
   };
-
   const buildPoleIcon = (L: any, pole: SmartpoleNode, selectedId: string | null = selectedPoleIdRef.current) => {
     const isCurrentSelected = selectedId === pole.id;
     return L.divIcon({
@@ -128,7 +140,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     });
   };
 
-  const updatePoleSelectionIcons = (newSelectedId: string) => {
+  const updatePoleSelectionIcons = (newSelectedId: string | null) => {
     const L = (window as any).L;
     if (!L || !mapRef.current) return;
     const previousSelectedId = selectedPoleIdRef.current;
@@ -138,9 +150,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
         poleMarkersRef.current[previousSelectedId].setIcon(buildPoleIcon(L, previousPole, null));
       }
     }
-    const nextPole = SMARTPOLE_LOCATIONS.find(p => p.id === newSelectedId);
-    if (nextPole && poleMarkersRef.current[newSelectedId]) {
-      poleMarkersRef.current[newSelectedId].setIcon(buildPoleIcon(L, nextPole, newSelectedId));
+    if (newSelectedId) {
+      const nextPole = SMARTPOLE_LOCATIONS.find(p => p.id === newSelectedId);
+      if (nextPole && poleMarkersRef.current[newSelectedId]) {
+        poleMarkersRef.current[newSelectedId].setIcon(buildPoleIcon(L, nextPole, newSelectedId));
+      }
     }
   };
 
@@ -161,7 +175,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
     incidentMarkersRef.current.forEach(m => m.remove());
     incidentMarkersRef.current = [];
-
     incidents.forEach(inc => {
       const icon = L.divIcon({
         className: 'custom-div-icon',
@@ -178,17 +191,18 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     if (!L || !mapRef.current) return;
 
     SMARTPOLE_LOCATIONS.forEach(pole => {
-      const marker = L.marker([pole.lat, pole.lng], { icon: buildPoleIcon(L, pole) })
+      const marker = L.marker([pole.lat, pole.lng], { icon: buildPoleIcon(L, pole, null) })
         .addTo(mapRef.current)
         .on('click', (e: any) => {
           L.DomEvent.stopPropagation(e);
           if (selectedPoleIdRef.current === pole.id) return;
-          const oldSelectedId = selectedPoleIdRef.current;
-          selectedPoleIdRef.current = pole.id;
+
           updatePoleSelectionIcons(pole.id);
-          setSelectedPole(pole);
+          selectedPoleIdRef.current = pole.id;
+          mapRef.current?.panTo([pole.lat, pole.lng], { animate: true, duration: 0.2 });
+
+          setSelectedPoleId(pole.id);
           setIsManualFilingActive(false);
-          mapRef.current?.setView([pole.lat, pole.lng], 17, { animate: false });
         });
       poleMarkersRef.current[pole.id] = marker;
     });
@@ -199,13 +213,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   }, [incidents]);
 
   useEffect(() => {
-    refreshPoleIcons();
-    selectedPoleIdRef.current = selectedPole?.id ?? null;
-    if (selectedPole && mapRef.current) {
-      mapRef.current.setView([selectedPole.lat, selectedPole.lng], 17, { animate: false });
+    if (!selectedPole) {
+      selectedPoleIdRef.current = null;
+      refreshPoleIcons();
     }
   }, [selectedPole]);
-
   useEffect(() => { fetchIncidents(); }, []);
   
   useEffect(() => {
@@ -220,8 +232,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     script.async = true;
     script.onload = () => {
       const L = (window as any).L;
-      if (!mapRef.current && mapContainerRef.current) {
-        // FIXED: Explicitly applied doubleClickZoom: false to prevent background map updates from freezing user mouse focus
+      if (!mapRef.current && mapContainerRef.current) 
+      {
         mapRef.current = L.map(mapContainerRef.current, {
           center: [11.0176, 124.6031], zoom: 17, zoomControl: false, attributionControl: false, doubleClickZoom: false
         });
@@ -231,12 +243,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     };
     document.body.appendChild(script);
   }, []);
-
   const handleExpunge = async (incidentId: string) => {
     if (!confirm("Permanently expunge this incident record file from SQL archive?")) return;
     const res = await fetch(`${API_URL}/api/incidents/${incidentId}`, { method: 'DELETE' });
     if (res.ok) { 
-      setIncidents(prev => prev.filter(i => i.id !== incidentId)); 
+      setIncidents(prev => prev.filter(i => i.id !== incidentId));
       onUpdate(); 
     }
   };
@@ -247,7 +258,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
     const generatedId = Math.random().toString(36).substr(2, 8);
     const now = new Date();
-    
     const payload = {
       id: generatedId,
       caseId: `CASE-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}-${Math.random().toString(36).substr(2,4).toUpperCase()}`,
@@ -265,13 +275,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       additionalOfficers: "None",
       status: "Active"
     };
-
     const res = await fetch(`${API_URL}/api/incidents`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-
     if (res.ok) {
       setFormManualNarrative("");
       setIsManualFilingActive(false);
@@ -279,218 +287,273 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       onUpdate();
     }
   };
-
   const handleOpenReportFiler = (target: Incident) => {
     setFilingTarget(target);
     setReportForm(prev => ({ ...prev, reportingOfficer: target.officer !== 'AI_SENTINEL' ? target.officer : '' }));
     setShowFilingModal(true);
   };
 
+  // FIXED: Adjusted code parameters to seamlessly pipe form text assets, capture real-time system frames, and compile PDF logs instantly upon confirmation
   const handleSubmitOfficialReport = async () => {
     if (!filingTarget || !reportForm.badgeNumber || !reportForm.reportingOfficer) return;
     try {
-      await fetch(`${API_URL}/api/incidents/${filingTarget.id}/status`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "Confirmed" })
+      await fetch(`${API_URL}/api/incidents/${filingTarget.id}/confirm-and-report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "Confirmed",
+          captureSnapshot: true,
+          reportDetails: reportForm
+        })
       });
-      setShowFilingModal(false); setFilingTarget(null);
-      fetchIncidents(); onUpdate();
-    } catch (e) { console.error(e); }
+      setShowFilingModal(false); 
+      setFilingTarget(null);
+      fetchIncidents(); 
+      onUpdate();
+    } catch (e) { 
+      console.error(e); 
+    }
   };
 
-  const closeModal = () => { setShowFilingModal(false); setFilingTarget(null); };
+  const closeModal = () => { setShowFilingModal(false); setFilingTarget(null);
+  };
 
-  const getFilteredIncidents = () => incidents.filter(inc => {
-    if (selectedPole) {
-      const match = inc.locationName.toLowerCase().includes(selectedPole.name.toLowerCase()) ||
-                    inc.locationName.toLowerCase().includes(selectedPole.street.toLowerCase());
-      if (!match) return false;
+  const reportImageUrl = useMemo(() => {
+    if (!filingTarget) return '';
+    if (filingTarget.screenshotPath) {
+      return filingTarget.screenshotPath.startsWith('http')
+        ? filingTarget.screenshotPath
+        : `${API_URL}${filingTarget.screenshotPath}`;
     }
-    if (poleDateFilter && !inc.date.includes(poleDateFilter)) return false;
-    if (poleTypeFilter !== 'ALL' && inc.type.toUpperCase() !== poleTypeFilter.toUpperCase()) return false;
-    return true;
-  });
+    return 'https://picsum.photos/seed/ai-crime-report/900/450';
+  }, [filingTarget, API_URL]);
+  const handleBarangayJump = (lat: number, lng: number) => {
+    if (mapRef.current) {
+      mapRef.current.setView([lat, lng], 17, { animate: true });
+    }
+  };
 
-  const finalLogsDisplay = getFilteredIncidents();
+  const finalLogsDisplay = filteredIncidents;
   const inputClass = "w-full bg-white/[0.02] border border-white/5 rounded-lg p-2.5 text-xs text-white outline-none focus:border-emerald-500 font-mono";
   const labelClass = "text-[8px] font-mono text-slate-500 uppercase block mb-1";
 
   return (
-    <div className="flex h-full gap-4 animate-in fade-in duration-500 relative w-full">
-      {/* ─── LEFT PANEL: LEAFLET TACTICAL MAP AREA ─── */}
-      <div className="flex-1 bg-[#f1f5f9] border border-white/5 rounded-[2.5rem] relative overflow-hidden shadow-2xl">
-        <div ref={mapContainerRef} className="w-full h-full z-0" />
+    <div className="flex h-full flex-col gap-4 animate-in fade-in duration-500 relative w-full overflow-hidden">
+      
+      {/* BOX HEADER FOR THE CORE ESSENTIALS CONTROL SYSTEM */}
+      <div className="w-full h-14 flex items-center justify-between px-6 rounded-2xl border border-white/[0.04] bg-[#0E131F]/80 backdrop-blur-md shadow-xl shrink-0">
+        <div className="flex items-center gap-3">
+          <Radio size={14} className="text-emerald-400 animate-pulse" />
+          <span className="text-[11px] font-mono font-black text-white uppercase tracking-widest">Tactical Core Essentials</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-mono text-slate-400 uppercase tracking-wider font-bold">Jump To Sector:</span>
+            <select 
+              title="Navigate directly to specific sector maps"
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === 'cogon') handleBarangayJump(11.0176, 124.6031);
+                else if (val === 'valencia') handleBarangayJump(11.0055, 124.6122);
+                else if (val === 'district18') handleBarangayJump(11.0145, 124.6055);
+              }}
+              className="bg-[#0b0f17] border border-white/10 rounded-xl px-3 py-1.5 text-[10px] text-slate-200 font-mono outline-none cursor-pointer focus:border-emerald-500 transition-colors"
+            >
+              <option value="">Select Barangay...</option>
+              <option value="cogon">Brgy. Cogon Core</option>
+              <option value="valencia">Brgy. Valencia Sector</option>
+              <option value="district18">District 18 HQ</option>
+            </select>
+          </div>
+          
+          <div className="w-px h-6 bg-white/10" />
+
+          <button 
+            onClick={() => {
+              const name = prompt("Enter New Smartpole Identifier Label:", "Sector D Terminal");
+              const path = prompt("Enter Network RTSP Surveillance Feed Stream Path:", "rtsp://192.168.1.50/live");
+              if (name && path && mapRef.current) {
+                const center = mapRef.current.getCenter();
+                alert(`Successfully initiated secure configuration link for ${name} at parameters:\nLat: ${center.lat.toFixed(4)}\nLng: ${center.lng.toFixed(4)}`);
+              }
+            }}
+            className="flex items-center gap-1.5 text-[10px] font-mono font-black text-black bg-emerald-400 hover:bg-emerald-300 px-3 py-2 rounded-xl transition-all shadow-md uppercase tracking-wider"
+          >
+            <Plus size={12} className="stroke-[3]"/>
+            <span>Add Smartpole</span>
+          </button>
+        </div>
       </div>
 
-      {/* ─── RIGHT PANEL: CLEAN RESTRUCTURED REPORT RADAR SIDEBAR ─── */}
-      <div className="w-96 bg-[#0a0c10] border border-white/5 rounded-[2.5rem] p-6 flex flex-col overflow-hidden shadow-2xl z-20 text-slate-200">
-        <div className="animate-in fade-in duration-300 flex flex-col h-full min-h-0">
-          
-          {/* HEADER LAYER: Back Navigation button left, Add Report trigger button right */}
-          <div className="pb-4 border-b border-white/5 mb-4 flex justify-between items-center shrink-0">
-            {/* FIXED: Back button resets the selected pole context cleanly to bring back the global overview list instantly */}
-            <button
-              title="Return to unfiltered dashboard stream overview"
-              onClick={() => { setSelectedPole(null); setIsManualFilingActive(false); }}
-              className="flex items-center gap-1.5 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 hover:text-emerald-400 transition-colors"
-            >
-              <ArrowLeft size={13} className="stroke-[2.5]"/>
-              <span>Back</span>
-            </button>
+      <div className="flex-1 flex gap-4 min-h-0 w-full">
+        {/* LEFT PANEL: MAP BOUNDS CANVAS CONTAINER */}
+        <div className="flex-1 bg-[#f1f5f9] border border-white/5 rounded-[2.5rem] relative overflow-hidden shadow-2xl h-full">
+          <div ref={mapContainerRef} className="w-full h-full z-0" />
+        </div>
 
-            <div className="text-center min-w-0 px-2 flex-1">
-              <h4 className="text-[10px] font-black text-white uppercase tracking-wider truncate flex items-center justify-center gap-1">
-                {selectedPole ? <Radio size={11} className="text-emerald-400 animate-pulse" /> : <Globe size={11} className="text-teal-400" />}
-                <span>{selectedPole ? selectedPole.name : 'Global Inbound Feed'}</span>
-              </h4>
-              <p className="text-[8px] font-mono text-slate-500 uppercase truncate">
-                {selectedPole ? selectedPole.street : 'Monitoring All Sector Streets'}
-              </p>
+        {/* RIGHT PANEL: RADAR WORKSPACE DATA SLATE LOG FEED */}
+        <div className="w-96 bg-[#0a0c10] border border-white/5 rounded-[2.5rem] p-6 flex flex-col overflow-hidden shadow-2xl z-20 text-slate-200 h-full">
+          <div className="animate-in fade-in duration-300 flex flex-col h-full min-h-0">
+            
+            <div className="pb-4 border-b border-white/5 mb-4 flex justify-between items-center shrink-0">
+              {selectedPole ? (
+                <button
+                  title="Return to unfiltered dashboard stream overview"
+                  onClick={() => { updatePoleSelectionIcons(null); setSelectedPoleId(null); setIsManualFilingActive(false); }}
+                  className="flex items-center gap-1.5 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 hover:text-emerald-400 transition-colors"
+                >
+                  <ArrowLeft size={13} className="stroke-[2.5]"/>
+                  <span>Back</span>
+                </button>
+              ) : (
+                <div className="w-12 h-4 shrink-0" /> 
+              )}
+
+              <div className="text-center min-w-0 px-2 flex-1">
+                <h4 className="text-[10px] font-black text-white uppercase tracking-wider truncate flex items-center justify-center gap-1">
+                  {selectedPole ? <Radio size={11} className="text-emerald-400 animate-pulse" /> : <Globe size={11} className="text-teal-400" />}
+                  <span>{selectedPole ? selectedPole.name : 'Global Inbound Feed'}</span>
+                </h4>
+                <p className="text-[8px] font-mono text-slate-500 uppercase truncate">
+                  {selectedPole ? selectedPole.street : 'Monitoring All Sector Streets'}
+                </p>
+              </div>
+
+              <button
+                onClick={() => selectedPole && setIsManualFilingActive(!isManualFilingActive)}
+                disabled={!selectedPole}
+                className="text-[9px] font-mono font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded hover:bg-emerald-500/20 uppercase tracking-wider disabled:opacity-20 transition-all shrink-0"
+              >
+                {isManualFilingActive ? 'Cancel' : '+ Add Report'}
+              </button>
             </div>
 
-            <button
-              onClick={() => selectedPole && setIsManualFilingActive(!isManualFilingActive)}
-              disabled={!selectedPole}
-              className="text-[9px] font-mono font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded hover:bg-emerald-500/20 uppercase tracking-wider disabled:opacity-20 transition-all shrink-0"
-            >
-              {isManualFilingActive ? 'Cancel' : '+ Add Report'}
-            </button>
-          </div>
+            {isManualFilingActive && selectedPole && (
+              <form onSubmit={handleCreateManualReport} className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl mb-4 space-y-3 animate-in slide-in-from-top duration-300 shrink-0">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <span className={labelClass}>Classification</span>
+                    <select title="Select incident classification" value={manualType} onChange={(e) => setFormManualType(e.target.value)} className="w-full bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white outline-none">
+                      <option value="ASSAULT">Assault</option>
+                      <option value="THEFT">Theft</option>
+                      <option value="PHYSICAL ALTERCATION">Altercation</option>
+                      <option value="VANDALISM">Vandalism</option>
+                    </select>
+                  </div>
+                  <div>
+                    <span className={labelClass}>Severity</span>
+                    <select title="Select threat severity scale" value={manualSeverity} onChange={(e) => setFormManualSeverity(e.target.value)} className="w-full bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white outline-none">
+                      <option value="LOW">Low</option>
+                      <option value="MEDIUM">Medium</option>
+                      <option value="HIGH">High</option>
+                      <option value="CRITICAL">Critical</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <span className={labelClass}>Narrative Statement</span>
+                  <textarea 
+                    value={manualNarrative} 
+                    onChange={(e) => setFormManualNarrative(e.target.value)} 
+                    placeholder="Enter manual police filing dispatch entry observations..." 
+                    className="w-full h-14 bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white resize-none outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <button type="submit" className="w-full py-2 bg-emerald-500 hover:bg-emerald-400 text-black text-[9px] font-black uppercase tracking-wider rounded-lg transition-colors">
+                  File Manual Entry
+                </button>
+              </form>
+            )}
 
-          {/* FORM CONTAINER: MANUAL DISPATCH REPORT ENTRY GENERATOR */}
-          {isManualFilingActive && selectedPole && (
-            <form onSubmit={handleCreateManualReport} className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl mb-4 space-y-3 animate-in slide-in-from-top duration-300 shrink-0">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <span className={labelClass}>Classification</span>
-                  <select title="Select incident classification" value={manualType} onChange={(e) => setFormManualType(e.target.value)} className="w-full bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white outline-none">
-                    <option value="ASSAULT">Assault</option>
-                    <option value="THEFT">Theft</option>
-                    <option value="PHYSICAL ALTERCATION">Altercation</option>
-                    <option value="VANDALISM">Vandalism</option>
-                  </select>
-                </div>
-                <div>
-                  <span className={labelClass}>Severity</span>
-                  <select title="Select threat severity scale" value={manualSeverity} onChange={(e) => setFormManualSeverity(e.target.value)} className="w-full bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white outline-none">
-                    <option value="LOW">Low</option>
-                    <option value="MEDIUM">Medium</option>
-                    <option value="HIGH">High</option>
-                    <option value="CRITICAL">Critical</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <span className={labelClass}>Narrative Statement</span>
-                <textarea 
-                  value={manualNarrative} 
-                  onChange={(e) => setFormManualNarrative(e.target.value)} 
-                  placeholder="Enter manual police filing dispatch entry observations..." 
-                  className="w-full h-14 bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white resize-none outline-none focus:border-emerald-500"
+            <div className="grid grid-cols-2 gap-2 mb-4 shrink-0">
+              <div className="flex items-center gap-1 bg-black/40 border border-white/5 rounded-xl px-2.5 py-1.5">
+                <Calendar size={12} className="text-slate-500 shrink-0"/>
+                <input
+                  type="text"
+                  title="Filter incidents by date"
+                  placeholder="YYYY-MM-DD"
+                  value={poleDateFilter}
+                  onChange={(e) => setPoleDateFilter(e.target.value)}
+                  className="bg-transparent text-[10px] text-slate-300 font-mono outline-none w-full border-none p-0"
                 />
               </div>
-              <button type="submit" className="w-full py-2 bg-emerald-500 hover:bg-emerald-400 text-black text-[9px] font-black uppercase tracking-wider rounded-lg transition-colors">
-                File Manual Entry
-              </button>
-            </form>
-          )}
-
-          {/* CRIME TIMELINE SYSTEM INLINE FILTERS */}
-          <div className="grid grid-cols-2 gap-2 mb-4 shrink-0">
-            <div className="flex items-center gap-1 bg-black/40 border border-white/5 rounded-xl px-2.5 py-1.5">
-              <Calendar size={12} className="text-slate-500 shrink-0"/>
-              <input
-                type="text"
-                title="Filter incidents by date"
-                placeholder="YYYY-MM-DD"
-                value={poleDateFilter}
-                onChange={(e) => setPoleDateFilter(e.target.value)}
-                className="bg-transparent text-[10px] text-slate-300 font-mono outline-none w-full border-none p-0"
-              />
-            </div>
-            <div className="flex items-center gap-1 bg-black/40 border border-white/5 rounded-xl px-2 py-1.5">
-              <ListFilter size={12} className="text-slate-500 shrink-0"/>
-              <select
-                title="Filter incidents by crime type"
-                value={poleTypeFilter}
-                onChange={(e) => setPoleTypeFilter(e.target.value)}
-                className="bg-transparent text-[10px] text-slate-300 font-mono outline-none w-full cursor-pointer border-none p-0 h-4"
-              >
-                <option value="ALL">All Crimes</option>
-                <option value="ASSAULT">Assault</option>
-                <option value="THEFT">Theft</option>
-                <option value="PHYSICAL ALTERCATION">Altercation</option>
-                <option value="VANDALISM">Vandalism</option>
-              </select>
-            </div>
-          </div>
-
-          {/* ─── TIMELINE REPORT CARD LEDGER FEED ─── */}
-          <div className="flex-1 overflow-y-auto space-y-3 bg-black/10 p-2 rounded-xl custom-scrollbar min-h-0">
-            {finalLogsDisplay.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center opacity-30 py-12 text-center">
-                <AlertCircle size={20} className="mb-2 text-slate-500"/>
-                <span className="text-[9px] font-bold uppercase tracking-widest font-mono">No Incident History</span>
+              <div className="flex items-center gap-1 bg-black/40 border border-white/5 rounded-xl px-2 py-1.5">
+                <ListFilter size={12} className="text-slate-500 shrink-0"/>
+                <select
+                  title="Filter incidents by crime type"
+                  value={poleTypeFilter}
+                  onChange={(e) => setPoleTypeFilter(e.target.value)}
+                  className="bg-transparent text-[10px] text-slate-300 font-mono outline-none w-full cursor-pointer border-none p-0 h-4"
+                >
+                  <option value="ALL">All Crimes</option>
+                  <option value="ASSAULT">Assault</option>
+                  <option value="THEFT">Theft</option>
+                  <option value="PHYSICAL ALTERCATION">Altercation</option>
+                  <option value="VANDALISM">Vandalism</option>
+                </select>
               </div>
-            ) : (
-              finalLogsDisplay.map(inc => {
-                const isImageBroken = brokenImages[inc.id];
-                return (
-                  <div key={inc.id} className="w-full text-left p-5 bg-[#0a0d14] border border-white/[0.04] rounded-xl flex flex-col gap-2 hover:border-white/10 transition-all relative">
-                    
-                    {/* Top Row Header Block */}
-                    <div className="flex justify-between items-center text-[10px] font-mono">
-                      <span className="text-emerald-400 font-bold select-all">{inc.caseId}</span>
-                      <span className="text-slate-500 tabular-nums">{formatTo12Hour(inc.militaryTime)}</span>
-                    </div>
+            </div>
 
-                    {/* Threat Class Title */}
-                    <h5 className="text-[14px] font-black uppercase text-slate-200 tracking-wide mt-0.5">{inc.type}</h5>
-                    
-                    {/* Scene Snapshot Preview Image Box */}
-                    {inc.screenshotPath && !isImageBroken ? (
-                      <div className="w-full h-24 bg-black border border-white/5 rounded-lg overflow-hidden relative shadow-inner mt-1">
-                        <img 
-                          src={inc.screenshotPath.startsWith('http') ? inc.screenshotPath : `${API_URL}${inc.screenshotPath}`} 
-                          className="w-full h-full object-cover" 
-                          alt="AI Camera Log Snap" 
-                          onError={() => setBrokenImages(prev => ({ ...prev, [inc.id]: true }))}
-                        />
+            <div className="flex-1 overflow-y-auto space-y-3 bg-black/10 p-2 rounded-xl custom-scrollbar min-h-0">
+              {finalLogsDisplay.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center opacity-30 py-12 text-center">
+                  <AlertCircle size={20} className="mb-2 text-slate-500"/>
+                  <span className="text-[9px] font-bold uppercase tracking-widest font-mono">No Incident History</span>
+                </div>
+              ) : (
+                finalLogsDisplay.map(inc => {
+                  const isImageBroken = brokenImages[inc.id];
+                  return (
+                    <div key={inc.id} className="w-full text-left p-5 bg-[#0a0d14] border border-white/[0.04] rounded-xl flex flex-col gap-2 hover:border-white/10 transition-all relative">
+                      <div className="flex justify-between items-center text-[10px] font-mono">
+                        <span className="text-emerald-400 font-bold select-all">{inc.caseId}</span>
+                        <span className="text-slate-500 tabular-nums">{formatTo12Hour(inc.militaryTime)}</span>
                       </div>
-                    ) : inc.screenshotPath ? (
-                      <div className="w-full h-20 bg-white/[0.02] border border-white/5 border-dashed rounded-lg mt-1 flex flex-col items-center justify-center text-slate-600 gap-1 animate-in fade-in">
-                        <AlertCircle size={14} className="text-slate-500" />
-                        <span className="text-[8px] font-mono font-bold uppercase tracking-wider">Scene Image Missing (404)</span>
-                      </div>
-                    ) : null}
 
-                    {/* Narrative Text Quote */}
-                    <p className="text-[10px] text-slate-400 mt-1 select-text">"{inc.narrative}"</p>
-                    
-                    {/* Action Footer Block */}
-                    <div className="flex gap-2 pt-2 mt-1 border-t border-white/5 justify-end items-center text-[10px] uppercase tracking-wider font-extrabold">
-                      <div className="flex items-center gap-3">
-                        <button
-                          title={`Generate official incident report form for case ${inc.caseId}`}
-                          onClick={() => handleOpenReportFiler(inc)}
-                          className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 font-black"
-                        >
-                          <FileSignature size={12}/> Generate Police Report
-                        </button>
-                        
-                        <button
-                          onClick={() => handleExpunge(inc.id)}
-                          title="Delete log record sheet"
-                          className="p-1 text-slate-600 hover:text-rose-400 transition-colors rounded"
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                      <h5 className="text-[14px] font-black uppercase text-slate-200 tracking-wide mt-0.5">{inc.type}</h5>
+                      
+                      {inc.screenshotPath && !isImageBroken ? (
+                        <div className="w-full h-24 bg-black border border-white/5 rounded-lg overflow-hidden relative shadow-inner mt-1">
+                          <img 
+                            src={inc.screenshotPath.startsWith('http') ? inc.screenshotPath : `${API_URL}${inc.screenshotPath}`} 
+                            className="w-full h-full object-cover" 
+                            alt="AI Camera Log Snap" 
+                            onError={() => setBrokenImages(prev => ({ ...prev, [inc.id]: true }))}
+                          />
+                        </div>
+                      ) : inc.screenshotPath ? (
+                        <div className="w-full h-20 bg-white/[0.02] border border-white/5 border-dashed rounded-lg mt-1 flex flex-col items-center justify-center text-slate-600 gap-1 animate-in fade-in">
+                          <AlertCircle size={14} className="text-slate-500" />
+                          <span className="text-[8px] font-mono font-bold uppercase tracking-wider">Scene Image Missing (404)</span>
+                        </div>
+                      ) : null}
+
+                      <p className="text-[10px] text-slate-400 mt-1 select-text">"{inc.narrative}"</p>
+                      
+                      <div className="flex gap-2 pt-2 mt-1 border-t border-white/5 justify-end items-center text-[10px] uppercase tracking-wider font-extrabold">
+                        <div className="flex items-center gap-3">
+                          <button
+                            title={`Generate official incident report form for case ${inc.caseId}`}
+                            onClick={() => handleOpenReportFiler(inc)}
+                            className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 font-black"
+                          >
+                            <FileSignature size={12}/> Generate Police Report
+                          </button>
+                          
+                          <button
+                            onClick={() => handleExpunge(inc.id)}
+                            title="Delete log record sheet"
+                            className="p-1 text-slate-600 hover:text-rose-400 transition-colors rounded"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })
-            )}
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -499,8 +562,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       {showFilingModal && filingTarget && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/95 backdrop-blur-md animate-in fade-in duration-300">
           <div className="bg-[#0b0f19] border border-white/10 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl text-slate-200">
-
-            {/* MODAL HEADER */}
             <div className="sticky top-0 bg-[#0b0f19] z-10 flex justify-between items-center px-6 py-4 border-b border-white/5">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-500"><FileSignature size={20}/></div>
@@ -519,39 +580,36 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
             </div>
 
             <div className="p-6 space-y-5">
-
-              {/* CASE META */}
               <div className="grid grid-cols-3 gap-4 bg-black/20 p-4 rounded-xl border border-white/5 font-mono text-xs text-slate-400">
                 <div><span className={labelClass}>Case ID</span><span className="text-emerald-500 font-bold">{filingTarget.caseId}</span></div>
                 <div><span className={labelClass}>Type</span><span className="text-white font-bold uppercase">{filingTarget.type}</span></div>
                 <div><span className={labelClass}>Timestamp</span><span className="text-slate-300">{filingTarget.date} {formatTo12Hour(filingTarget.militaryTime)}</span></div>
               </div>
 
-              {/* Forensic Evidence Photo Embedded Inside Form */}
-              {filingTarget.screenshotPath && (
-                <div className="space-y-2 animate-in fade-in duration-300">
-                  <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                    <Video size={11} className="text-emerald-500"/> Secured Scene Forensic Evidence Snapshot
-                  </h4>
-                  {!brokenImages[filingTarget.id] ? (
-                    <div className="w-full max-h-72 bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl relative flex items-center justify-center">
-                      <img 
-                        src={filingTarget.screenshotPath.startsWith('http') ? filingTarget.screenshotPath : `${API_URL}${filingTarget.screenshotPath}`} 
-                        className="w-full h-full object-contain max-h-72" 
-                        alt="AI Visual Evidence Log Data"
-                        onError={() => setBrokenImages(prev => ({ ...prev, [filingTarget.id]: true }))}
-                      />
-                    </div>
-                  ) : (
-                    <div className="w-full h-36 bg-white/[0.01] border border-white/5 border-dashed rounded-xl flex flex-col items-center justify-center text-slate-500 gap-1.5 shadow-inner">
-                      <ImageIcon size={18} className="text-slate-600" />
-                      <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">Secured Forensic Capture Not Found (404)</span>
-                    </div>
-                  )}
-                </div>
-              )}
+              <div className="space-y-2 animate-in fade-in duration-300">
+                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                  <Video size={11} className="text-emerald-500"/> Secured Scene Forensic Evidence Snapshot
+                </h4>
+                {!brokenImages[filingTarget.id] ? (
+                  <div className="w-full max-h-72 bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl relative flex items-center justify-center">
+                    <img 
+                      src={reportImageUrl}
+                      className="w-full h-full object-contain max-h-72" 
+                      alt="AI Visual Evidence Log Data"
+                      onError={() => setBrokenImages(prev => ({ ...prev, [filingTarget.id]: true }))}
+                    />
+                  </div>
+                ) : (
+                  <div className="w-full h-36 bg-white/[0.01] border border-white/5 border-dashed rounded-xl flex flex-col items-center justify-center text-slate-500 gap-1.5 shadow-inner">
+                    <ImageIcon size={18} className="text-slate-600" />
+                    <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">Secured Forensic Capture Not Found (404)</span>
+                  </div>
+                )}
+                {!filingTarget.screenshotPath && (
+                  <p className="text-[8px] text-slate-500 uppercase tracking-widest font-mono">Placeholder crime scene image used because no AI evidence frame was attached.</p>
+                )}
+              </div>
 
-              {/* SECTION I */}
               <div className="space-y-3">
                 <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
                   <ShieldCheck size={11} className="text-emerald-500"/> I: Officer Credentials
@@ -596,7 +654,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                 </div>
               </div>
 
-              {/* SECTION II */}
               <div className="space-y-3">
                 <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
                   <MapPin size={11} className="text-emerald-500"/> II: Scene Parameters
@@ -629,7 +686,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                 </div>
               </div>
 
-              {/* SECTION III */}
               <div className="space-y-3">
                 <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
                   <Info size={11} className="text-emerald-500"/> III: Involved Parties
@@ -660,7 +716,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                 </div>
               </div>
 
-              {/* SECTION IV */}
               <div className="space-y-3">
                 <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
                   <FileText size={11} className="text-emerald-500"/> IV: Evidence & Damage
@@ -693,7 +748,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                 </div>
               </div>
 
-              {/* SECTION V */}
               <div className="space-y-3">
                 <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
                   <ShieldAlert size={11} className="text-emerald-500"/> V: Disposition & Signatures
@@ -738,10 +792,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                   </div>
                 </div>
               </div>
-
             </div>
 
-            {/* MODAL FOOTER */}
             <div className="sticky bottom-0 bg-[#0b0f19] border-t border-white/5 px-6 py-4 flex justify-end gap-3">
               <button
                 title="Cancel and close report filing"

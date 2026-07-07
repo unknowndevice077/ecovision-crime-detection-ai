@@ -11,7 +11,8 @@
     "lint": "next lint",
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",
-    "desktop": "electron ."
+    "desktop": "electron .",
+    "app:build": "next build && electron-builder"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.4",
@@ -48,6 +49,31 @@
     "npm": ">=8.0.0"
   },
   "devDependencies": {
-    "electron": "^42.5.0"
+    "electron": "^42.5.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.ecovision.sentinel",
+    "productName": "EcoVisionSentinel",
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true
+    },
+    "files": [
+      "**/*",
+      "!dist/**/*",
+      "!build/**/*",
+      "!.next/**/*"
+    ],
+    "extraFiles": [
+      ".venv/**/*",
+      "maincode/**/*",
+      "weights/**/*",
+      "config.json"
+    ]
   }
 }

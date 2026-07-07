@@ -90,12 +90,14 @@ def gather_all_clips_EXACT_TRAINING_LOGIC(roots: list) -> list:
 def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> dict:
     cap = cv2.VideoCapture(str(video_path))
     frame_count = 0
+    frames_with_pose = 0
     any_violence_detected = False
     max_confidence_seen = 0.0
 
     x3d_detector._frame_buffers.clear()
     x3d_detector._last_check_frame.clear()
     x3d_detector._cached_result.clear()
+    x3d_detector._real_inference_count.clear()
 
     while True:
         ret, frame = cap.read()
@@ -108,19 +110,45 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
             continue
         if not (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None):
             continue
-            
+        frames_with_pose += 1
         ids = pose_res[0].boxes.id.int().cpu().tolist()
         boxes = pose_res[0].boxes.xyxy.cpu().numpy()
-        
         for tid, p_box in zip(ids, boxes):
-            # FIXED: Added all_boxes=boxes argument configuration constraint sync
             is_violent, conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
             max_confidence_seen = max(max_confidence_seen, conf)
             if is_violent:
                 any_violence_detected = True
 
     cap.release()
-    return {"detected": any_violence_detected, "max_confidence": max_confidence_seen, "frame_count": frame_count}
+
+    # Flush -- force one real inference on any track that NEVER got a real
+    # inference during the clip (get_inference_count == 0 is unambiguous now,
+    # driven by a counter incremented ONLY inside _run_inference itself, not
+    # inferred from dict state changes -- that comparison was the actual bug
+    # that made every previous run's force-flush silently never fire).
+    forced_flush = False
+    had_any_buffer = len(x3d_detector._frame_buffers) > 0
+    total_real_inferences = sum(x3d_detector._real_inference_count.values())
+
+    for tid in list(x3d_detector._frame_buffers.keys()):
+        if x3d_detector.get_inference_count(tid) == 0:
+            forced_flush = True
+            is_violent, conf = x3d_detector.force_inference(tid)
+            max_confidence_seen = max(max_confidence_seen, conf)
+            if is_violent:
+                any_violence_detected = True
+
+    pose_rate = frames_with_pose / frame_count if frame_count > 0 else 0
+    return {
+        "detected": any_violence_detected,
+        "max_confidence": max_confidence_seen,
+        "frame_count": frame_count,
+        "frames_with_pose": frames_with_pose,
+        "had_any_buffer": had_any_buffer,
+        "forced_flush": forced_flush,
+        "pose_detection_rate": round(pose_rate, 3),
+        "real_inference_count": total_real_inferences,
+    }
 
 
 def run_test(roots: list, device: str):
@@ -141,11 +169,8 @@ def run_test(roots: list, device: str):
 
     print(f"\nLoading pose model on {device}...")
     pose_model = YOLO(POSE_MODEL_PATH)
-    
     print("Loading X3D-XS detector...")
-    # FIXED: Re-engineered device allocation map context to satisfy PyTorch runtime signatures
-    x3d_device = f"cuda:{device}" if device.isdigit() else device
-    x3d_detector = X3DViolenceDetector(device=x3d_device)
+    x3d_detector = X3DViolenceDetector(device=device)
 
     results = []
     confusion = defaultdict(int)
@@ -171,11 +196,18 @@ def run_test(roots: list, device: str):
             "outcome": outcome,
             "max_confidence": round(result["max_confidence"], 3),
             "frame_count": result["frame_count"],
+            "frames_with_pose": result.get("frames_with_pose", "n/a"),
+            "pose_detection_rate": result.get("pose_detection_rate", "n/a"),
+            "real_inference_count": result.get("real_inference_count", "n/a"),
+            "had_any_buffer": result.get("had_any_buffer", "n/a"),
+            "forced_flush": result.get("forced_flush", "n/a"),
         })
         print(f"[{i+1}/{len(val_clips)}] {video_path.name}: "
               f"truth={'violent' if ground_truth_violent else 'normal'} "
               f"pred={'violent' if predicted_violent else 'normal'} ({outcome}) "
-              f"conf={result['max_confidence']:.2f}")
+              f"conf={result['max_confidence']:.2f} "
+              f"pose_seen={result.get('had_any_buffer')} "
+              f"forced={result.get('forced_flush')}")
 
     with open(OUTPUT_CSV, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
