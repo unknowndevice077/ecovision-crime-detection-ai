@@ -91,10 +91,15 @@ class RobberyTracker:
         """
         active_pairs = set()
 
+        # Build tid -> box once per frame instead of calling ids.index(tid)
+        # inside the O(n^2) pair loop below (that was an O(n^3) hot path
+        # for scenes with many people in frame).
+        box_by_tid = {tid: box for tid, box in zip(ids, boxes)}
+
         for i, tid_a in enumerate(ids):
             for tid_b in ids[i + 1:]:
-                box_a = boxes[ids.index(tid_a)]
-                box_b = boxes[ids.index(tid_b)]
+                box_a = box_by_tid[tid_a]
+                box_b = box_by_tid[tid_b]
                 dist = _person_distance(box_a, box_b)
 
                 pair_key = self._pair_key(tid_a, tid_b)
@@ -150,6 +155,13 @@ def score_vandalism(tid, joints, prev_joints_dict, sweep_history_dict,
                      static_targets, all_person_boxes, my_box):
     """
     Returns (is_vandalizing: bool, target_box_or_None).
+
+    IMPORTANT (caller contract): `prev_joints_dict` must hold each track's
+    wrist positions from the PREVIOUS frame, not the current one. In
+    main.py this means snapshotting `prev_joints` BEFORE the per-track
+    loop that writes this frame's wrist positions into it, and passing
+    that snapshot in here -- otherwise wrists_now == wrists_prev every
+    call, velocity is always ~0, and Vandalism can never trigger.
 
     static_targets: list of Sign/Wall bboxes detected this frame (from YOLO)
     all_person_boxes: list of ALL other person bboxes this frame (for the
@@ -265,10 +277,17 @@ Add near the other per-track stores (alongside track_states, prev_joints, etc.):
     vandal_states: dict[int, VandalismTrackState] = {}
     vandal_sweep_history: dict[int, deque] = {}
 
-Inside the main loop, AFTER the existing per-person Armed/Violence loop has
-run (so you have armed_states and violence_states populated for every tid):
+Inside the main loop, BEFORE the per-track loop that overwrites
+prev_joints[tid] with this frame's wrist positions, snapshot it:
 
-    # Collect this frame's flags from the existing per-person loop
+    prev_joints_snapshot = dict(prev_joints)
+
+... run the existing Armed/Violence per-person loop as normal (it's the
+one that does `prev_joints[tid] = joints[[9, 10]].copy()`) ...
+
+Then, AFTER that loop (so you have armed_states and violence_states
+populated for every tid):
+
     armed_states = {tid: (track_states[tid].state == "ARMED") for tid in ids if tid in track_states}
     violence_states = {tid: (track_states[tid].state == "ASSAULT") for tid in ids if tid in track_states}
 
@@ -287,7 +306,7 @@ run (so you have armed_states and violence_states populated for every tid):
             vandal_states[tid] = VandalismTrackState()
 
         is_vandal, target = score_vandalism(
-            tid, joints, prev_joints, vandal_sweep_history,
+            tid, joints, prev_joints_snapshot, vandal_sweep_history,
             static_targets=sign_boxes, all_person_boxes=boxes, my_box=p_box,
         )
         v_state = vandal_states[tid].update(is_vandal)

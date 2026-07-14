@@ -1,0 +1,68 @@
+name: Build EcoVision Sentinel Installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          lfs: true   # needed if weights/*.pt is tracked via Git LFS
+
+      # ---------------------------------------------------------------
+      # 1. PYTHON SIDE -- build a real venv that gets shipped as-is
+      #    (this matches your package.json's extraFiles: ".venv/**/*")
+      # ---------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create venv and install dependencies
+        run: |
+          python -m venv .venv
+          .venv\Scripts\pip install --upgrade pip
+          .venv\Scripts\pip install -r requirements.txt
+
+      # ---------------------------------------------------------------
+      # 2. FRONTEND SIDE -- Next.js production build (served via `next start`
+      #    inside Electron, not a static export -- see electron/main.js)
+      # ---------------------------------------------------------------
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Next.js app
+        run: npm run build   # emits .next/
+
+      # ---------------------------------------------------------------
+      # 3. ELECTRON -- package .next, node_modules, .venv, maincode,
+      #    weights, and config.json into one NSIS installer
+      # ---------------------------------------------------------------
+      - name: Build Windows installer
+        run: npm run app:build   # next build && electron-builder (build already ran above, safe to rerun)
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EcoVisionSentinel-Setup
+          path: dist/*.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

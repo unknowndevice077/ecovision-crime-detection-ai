@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "Advanced Real-Time Security Monitoring & Threat Detection System",
   "private": true,
-  "main": "electron-main.js",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -64,16 +64,18 @@
       "createDesktopShortcut": true
     },
     "files": [
-      "**/*",
-      "!dist/**/*",
-      "!build/**/*",
-      "!.next/**/*"
+      "electron/**/*",
+      ".next/**/*",
+      "node_modules/**/*",
+      "public/**/*",
+      "next.config.*",
+      "package.json"
     ],
     "extraFiles": [
-      ".venv/**/*",
-      "maincode/**/*",
-      "weights/**/*",
-      "config.json"
+      { "from": ".venv", "to": ".venv" },
+      { "from": "maincode", "to": "maincode" },
+      { "from": "weights", "to": "weights" },
+      { "from": "config.json", "to": "config.json" }
     ]
   }
 }

@@ -36,6 +36,12 @@ SCREENSHOTS_DIR = os.path.join(BASE_DIR, "static", "screenshots")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
+# main.py runs its lightweight stream/capture server on port 8001, on the
+# same machine as this backend in this deployment. "localhost" is used here
+# deliberately rather than sys_config["backend"]["host"] -- that key is a
+# BIND address (often "0.0.0.0"), not something a client can connect to.
+AI_PIPELINE_CAPTURE_URL = "http://localhost:8001/panic_capture"
+
 app = FastAPI(
     title=sys_config["system"]["name"],
     version=sys_config["system"]["version"]
@@ -121,6 +127,14 @@ def init_db():
     if "barangayId" not in columns:
         print("💾 [DATABASE MIGRATION] Appending missing column 'barangayId' to table structure...")
         cursor.execute("ALTER TABLE incidents ADD COLUMN barangayId TEXT DEFAULT 'cogon'")
+
+    # "Expunge" in the Map/Crime Reports view must NOT remove the row from
+    # the incidents table -- Crime History reads that same table and is
+    # supposed to be the permanent, un-deletable record. mapHidden lets the
+    # Map view hide a case from itself without touching History at all.
+    if "mapHidden" not in columns:
+        print("💾 [DATABASE MIGRATION] Appending missing column 'mapHidden' to table structure...")
+        cursor.execute("ALTER TABLE incidents ADD COLUMN mapHidden INTEGER DEFAULT 0")
 
     cursor.execute("SELECT COUNT(*) FROM cameras")
     if cursor.fetchone()[0] == 0:
@@ -268,11 +282,17 @@ class AiTriggerSchema(BaseModel):
     event: str
     confidence: float
     barangayId: Optional[str] = "cogon"
+    screenshotPath: Optional[str] = None
 
 class PanicSchema(BaseModel):
     event: str
     device: str
     barangayId: Optional[str] = "cogon"
+
+class ConfirmAndReportSchema(BaseModel):
+    status: str
+    captureSnapshot: Optional[bool] = False
+    reportDetails: Optional[dict] = None
 
 class ManualClipSchema(BaseModel):
     filename: str
@@ -280,6 +300,7 @@ class ManualClipSchema(BaseModel):
     type: str
     crimeTimeMarker: str
     notes: str
+    associatedCrimeId: Optional[str] = None
 
 # --- PERSISTENT CAMERA ROUTINES ---
 @app.get("/api/cameras")
@@ -321,6 +342,87 @@ async def delete_camera(cam_id: str):
     conn.close()
     return {"status": "deleted"}
 
+@app.patch("/api/incidents/{incident_id}/status")
+async def update_incident_status(incident_id: str, data: StatusUpdateSchema):
+    """Used by page.tsx's confirm/dismiss actions."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
+    conn.commit()
+    updated = cursor.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return {"status": "updated", "id": incident_id, "new_status": data.status}
+
+@app.delete("/api/incidents/{incident_id}")
+async def delete_incident(incident_id: str):
+    """DEPRECATED for CrimeReportsView.tsx's handleExpunge -- that now calls
+    /archive instead so Crime History (which reads this same table) keeps
+    the permanent record. This hard-delete route is kept only for a genuine
+    admin/data-hygiene purge, not for routine map cleanup."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
+    conn.commit()
+    deleted = cursor.rowcount
+    conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return {"status": "deleted"}
+
+@app.patch("/api/incidents/{incident_id}/archive")
+async def archive_incident(incident_id: str):
+    """Used by CrimeReportsView.tsx's handleExpunge. Hides the case from the
+    Map/Crime Reports view only -- the row stays in the incidents table so
+    Crime History (the full, permanent record) is unaffected."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE incidents SET mapHidden = 1 WHERE id = ?", (incident_id,))
+    conn.commit()
+    updated = cursor.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return {"status": "archived_from_map", "id": incident_id}
+
+@app.post("/api/incidents/{incident_id}/confirm-and-report")
+async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema):
+    """Used by CrimeReportsView.tsx's handleSubmitOfficialReport."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    officer = (data.reportDetails or {}).get("reportingOfficer")
+    if officer:
+        cursor.execute("UPDATE incidents SET status = ?, officer = ? WHERE id = ?", (data.status, officer, incident_id))
+    else:
+        cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
+    conn.commit()
+    updated = cursor.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return {"status": "confirmed_and_reported", "id": incident_id}
+
+@app.post("/siren/activate")
+async def siren_activate():
+    """Used by page.tsx's handleConfirmCrime. ESP32_IP was defined but
+    never actually wired to a route -- fire-and-forget, must not block
+    the confirm flow if the pole is unreachable."""
+    try:
+        requests.post(f"http://{ESP32_IP}/siren/on", timeout=2.0)
+    except Exception as e:
+        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+    return {"status": "activate_sent"}
+
+@app.post("/siren/deactivate")
+async def siren_deactivate():
+    """Used by page.tsx's handleDismissCrime."""
+    try:
+        requests.post(f"http://{ESP32_IP}/siren/off", timeout=2.0)
+    except Exception as e:
+        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+    return {"status": "deactivate_sent"}
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
@@ -350,13 +452,29 @@ async def register_clip(data: ManualClipSchema):
     fpath = os.path.join(RECORDINGS_DIR, data.filename)
     try:
         cursor.execute("INSERT INTO video_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                       (rid, data.filename, fpath, now_str, data.duration, data.type, "", data.crimeTimeMarker, data.notes))
+                       (rid, data.filename, fpath, now_str, data.duration, data.type, data.associatedCrimeId or "", data.crimeTimeMarker, data.notes))
         conn.commit()
         return {"status": "registered", "id": rid}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Metadata write collision: {e}")
     finally:
         conn.close()
+
+class RecordNotesSchema(BaseModel):
+    notes: str
+
+@app.patch("/api/records/{record_id}/notes")
+async def update_record_notes(record_id: str, data: RecordNotesSchema):
+    """Used by RecordsView.tsx's handleUpdateNotes."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE video_records SET notes = ? WHERE id = ?", (data.notes, record_id))
+    conn.commit()
+    updated = cursor.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Record not found")
+    return {"status": "updated", "id": record_id}
 
 # --- AUTH SECTOR CORES ---
 @app.post("/api/signup")
@@ -440,7 +558,7 @@ async def ai_trigger(data: AiTriggerSchema):
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     now = datetime.now()
     
-    screenshot_url = recorder_engine.save_shadow_clip(incident_id)
+    screenshot_url = data.screenshotPath or ""
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -464,8 +582,19 @@ async def panic_trigger(data: PanicSchema):
     incident_id = str(uuid.uuid4())[:8]
     case_id = f"PANIC-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     now = datetime.now()
-    
-    screenshot_url = recorder_engine.save_shadow_clip(incident_id)
+
+    # Ask the live AI pipeline for a real screenshot + clip, keyed to this
+    # SAME incident_id, so the evidence lands correctly associated. This
+    # must never block or fail the panic report itself -- a hardware panic
+    # button press has to get through even if the camera pipeline is down.
+    screenshot_url = ""
+    try:
+        cap_res = requests.post(AI_PIPELINE_CAPTURE_URL, json={"incident_id": incident_id}, timeout=2.0)
+        if cap_res.ok:
+            screenshot_url = cap_res.json().get("screenshotPath") or ""
+            print(f"🚨 [PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
+    except Exception as e:
+        print(f"⚠️  [PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

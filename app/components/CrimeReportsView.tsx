@@ -51,6 +51,7 @@ type Incident = {
   narrative: string; natureOfCall: string; arrivalReason: string;
   additionalOfficers: string; status: string;
   screenshotPath?: string;
+  mapHidden?: number | boolean;
 };
 
 interface CrimeReportsViewProps {
@@ -67,6 +68,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   const [poleDateFilter, setPoleDateFilter] = useState("");
   const [poleTypeFilter, setPoleTypeFilter] = useState("ALL");
   const [showFilingModal, setShowFilingModal] = useState(false);
+  const [expungeTargetId, setExpungeTargetId] = useState<string | null>(null);
   const [filingTarget, setFilingTarget] = useState<Incident | null>(null);
   
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
@@ -97,6 +99,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   const filteredIncidents = useMemo(() => {
     return incidents.filter(inc => {
+      // Expunged from this view only -- Crime History still has it.
+      if (inc.mapHidden === 1 || inc.mapHidden === true) return false;
       if (selectedPole) {
         const match = inc.locationName.toLowerCase().includes(selectedPole.name.toLowerCase()) ||
                       inc.locationName.toLowerCase().includes(selectedPole.street.toLowerCase());
@@ -175,15 +179,26 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
     incidentMarkersRef.current.forEach(m => m.remove());
     incidentMarkersRef.current = [];
-    incidents.forEach(inc => {
-      const icon = L.divIcon({
-        className: 'custom-div-icon',
-        html: `<div class="w-6 h-6 bg-[#1e293b] rounded-full border-2 border-red-500 shadow-xl flex items-center justify-center text-[10px] text-red-400 font-extrabold">!</div>`,
-        iconSize: [24, 24], iconAnchor: [12, 12]
+    // Dismissed incidents are cleared from the map -- otherwise every pin
+    // you ever "Ignore"'d stays glued to the map forever, and it also sits
+    // on top of pole markers (same coords) permanently eating their clicks.
+    incidents
+      .filter(inc => (inc.status || '').toLowerCase() !== 'dismissed')
+      .filter(inc => inc.mapHidden !== 1 && inc.mapHidden !== true)
+      .forEach(inc => {
+        const isConfirmed = (inc.status || '').toLowerCase() === 'confirmed';
+        const ringColor = isConfirmed ? 'border-emerald-500' : 'border-red-500';
+        const textColor = isConfirmed ? 'text-emerald-400' : 'text-red-400';
+        const icon = L.divIcon({
+          className: 'custom-div-icon',
+          html: `<div class="w-6 h-6 bg-[#1e293b] rounded-full border-2 ${ringColor} shadow-xl flex items-center justify-center text-[10px] ${textColor} font-extrabold">!</div>`,
+          iconSize: [24, 24], iconAnchor: [12, 12]
+        });
+        // interactive: false + a negative zIndexOffset keeps these purely
+        // visual so they never steal clicks meant for a pole underneath.
+        const m = L.marker([inc.lat, inc.lng], { icon, interactive: false, zIndexOffset: -1000 }).addTo(mapRef.current);
+        incidentMarkersRef.current.push(m);
       });
-      const m = L.marker([inc.lat, inc.lng], { icon }).addTo(mapRef.current);
-      incidentMarkersRef.current.push(m);
-    });
   };
 
   const createPoleMarkers = () => {
@@ -191,7 +206,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     if (!L || !mapRef.current) return;
 
     SMARTPOLE_LOCATIONS.forEach(pole => {
-      const marker = L.marker([pole.lat, pole.lng], { icon: buildPoleIcon(L, pole, null) })
+      const marker = L.marker([pole.lat, pole.lng], { icon: buildPoleIcon(L, pole, null), zIndexOffset: 1000 })
         .addTo(mapRef.current)
         .on('click', (e: any) => {
           L.DomEvent.stopPropagation(e);
@@ -218,7 +233,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       refreshPoleIcons();
     }
   }, [selectedPole]);
-  useEffect(() => { fetchIncidents(); }, []);
+  useEffect(() => {
+    fetchIncidents();
+    const interval = setInterval(fetchIncidents, 5000);
+    return () => clearInterval(interval);
+  }, []);
   
   useEffect(() => {
     if (!document.getElementById('leaflet-css')) {
@@ -243,12 +262,20 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     };
     document.body.appendChild(script);
   }, []);
-  const handleExpunge = async (incidentId: string) => {
-    if (!confirm("Permanently expunge this incident record file from SQL archive?")) return;
-    const res = await fetch(`${API_URL}/api/incidents/${incidentId}`, { method: 'DELETE' });
-    if (res.ok) { 
-      setIncidents(prev => prev.filter(i => i.id !== incidentId));
-      onUpdate(); 
+  const handleExpunge = (incidentId: string) => {
+    setExpungeTargetId(incidentId);
+  };
+
+  const confirmExpunge = async () => {
+    if (!expungeTargetId) return;
+    const incidentId = expungeTargetId;
+    setExpungeTargetId(null);
+    // Archive, not delete -- Crime History reads the same incidents table
+    // and must keep the permanent record even after this view "removes" it.
+    const res = await fetch(`${API_URL}/api/incidents/${incidentId}/archive`, { method: 'PATCH' });
+    if (res.ok) {
+      setIncidents(prev => prev.map(i => i.id === incidentId ? { ...i, mapHidden: 1 } : i));
+      onUpdate();
     }
   };
 
@@ -557,6 +584,37 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
           </div>
         </div>
       </div>
+
+      {/* EXPUNGE CONFIRM POPUP */}
+      {expungeTargetId && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#11141b] border border-white/10 rounded-2xl w-full max-w-sm shadow-2xl text-slate-200 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2.5 rounded-xl bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                <Trash2 size={18} />
+              </div>
+              <h3 className="text-sm font-bold uppercase tracking-wide text-white">Remove From Map</h3>
+            </div>
+            <p className="text-[12px] text-slate-400 leading-relaxed mb-6">
+              This case will be removed from the Map / Crime Reports view. It stays in Crime History permanently.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setExpungeTargetId(null)}
+                className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider text-slate-400 border border-white/10 hover:bg-white/5 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmExpunge}
+                className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider bg-rose-500 text-black hover:bg-rose-400 transition-all"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* FILING MODAL */}
       {showFilingModal && filingTarget && (

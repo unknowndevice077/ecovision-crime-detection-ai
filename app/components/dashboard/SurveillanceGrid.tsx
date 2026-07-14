@@ -47,13 +47,13 @@ export default function SurveillanceGrid({ cameras, selectedCam, setSelectedCam,
         <div className="flex-1 min-h-0">
           {selectedCam ? (
             <div className="w-full h-full bg-black rounded-2xl border border-emerald-500/10 overflow-hidden shadow-inner">
-              <img src={`http://localhost:8000/video_feed/${selectedCam.id}`} className="w-full h-full object-cover" alt="Focused" />
+              <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover" alt="Focused" />
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-4 h-full">
               {cameras.map(cam => (
                 <button key={cam.id} onClick={() => setSelectedCam(cam)} className="bg-black rounded-2xl border border-white/5 relative group hover:border-emerald-500/40 transition-all overflow-hidden shadow-md">
-                  <img src={`http://localhost:8000/video_feed/${cam.id}`} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-500" alt="stream" />
+                  <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-500" alt="stream" />
                   <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-60" />
                   <span className="absolute bottom-4 left-4 text-[9px] font-bold uppercase text-white tracking-widest bg-black/40 px-3 py-1 rounded border border-white/5 font-mono">{cam.name}</span>
                 </button>

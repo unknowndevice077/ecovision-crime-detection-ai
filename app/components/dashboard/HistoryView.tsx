@@ -35,6 +35,8 @@ export default function HistoryView() {
       }
     };
     loadLogs();
+    const interval = setInterval(loadLogs, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const processedData = historyRecords

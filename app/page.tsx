@@ -243,6 +243,7 @@ const fetchCameras = async (userObj: any) => {
         body: JSON.stringify({ status: "Confirmed" })
       });
       fetchStats();
+      fetchActiveAlertCache();
     } catch (e) { console.error(e); }
   };
 
@@ -250,12 +251,16 @@ const fetchCameras = async (userObj: any) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
     try {
       fetch("http://localhost:8000/siren/deactivate", { method: "POST" }).catch(e => console.error(e));
-      await fetch(`http://localhost:8000/api/incidents/${id}/status`, {
+      const res = await fetch(`http://localhost:8000/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "Dismissed" })
       });
+      if (!res.ok) {
+        console.error("Dismiss PATCH failed with status", res.status, "-- incident will reappear on next poll since backend never updated.");
+      }
       fetchStats();
+      fetchActiveAlertCache();
     } catch (e) { console.error(e); }
   };
 

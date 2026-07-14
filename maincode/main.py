@@ -34,6 +34,8 @@ import torch
 try:
     from fastapi import FastAPI
     from fastapi.responses import StreamingResponse
+    from pydantic import BaseModel
+    from typing import Optional
     import uvicorn
 except ImportError:
     sys.exit("❌ Missing libs. Run: pip install fastapi uvicorn")
@@ -77,7 +79,13 @@ WEAPON_CONF         = sys_config["detection"].get("confidence_threshold", 0.38)
 POSE_CONF           = 0.30
 DETECTION_INTERVAL  = sys_config["detection"].get("detection_interval", 5)
 
-WEAPON_CLASSES   = {"gun", "knife", "pistol", "firearm", "handgun", "rifle", "phone"}
+# NOTE: "phone" removed from WEAPON_CLASSES / CONF_BY_CLASS below.
+# The deployed weapon_signs model only outputs Gun/Knife/Sign right now.
+# "phone" was dead-code leftover from planning for the deferred
+# Phone/Wallet/SprayCan class decision -- re-add it here ONLY once it's
+# actually a trained class in weapon_signs.pt, otherwise it's a silent
+# no-op class name that can never match a real detection.
+WEAPON_CLASSES   = {"gun", "knife", "pistol", "firearm", "handgun", "rifle"}
 VIOLENCE_CLASSES = {"violence", "fight", "assault"}
 SIGN_CLASSES     = {"sign"}   
 
@@ -91,7 +99,6 @@ CONF_BY_CLASS = {
     "violence": 0.40,
     "fight":    0.40,
     "assault":  0.40,
-    "phone":    0.38,
     "sign":     0.40,   
 }
 WEAPON_CONF_GUN_SUSTAINED = 0.35
@@ -192,7 +199,17 @@ print(f"📡 Dynamic Stream server live → http://localhost:8001/video_feed")
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "weights")
-SCREENSHOTS_DIR = os.path.join(CURRENT_DIR, "static", "screenshots")
+
+# IMPORTANT: these must resolve to the EXACT same physical folders that
+# backend.py serves via StaticFiles, or the frontend gets 404s on every
+# screenshot/clip no matter how correctly the URLs are built.
+# backend.py computes: BASE_DIR = dirname(dirname(backend.py))  -> project root
+#   SCREENSHOTS_DIR = BASE_DIR/static/screenshots
+#   RECORDINGS_DIR  = BASE_DIR/<config.database.recordings_subdir, default "recordings">
+# main.py's PROJECT_ROOT (dirname of this file's folder) IS that same project
+# root, so anchor on PROJECT_ROOT here too -- NOT on CURRENT_DIR (which is
+# main.py's own subfolder, one level too deep).
+SCREENSHOTS_DIR = os.path.join(PROJECT_ROOT, "static", "screenshots")
 
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
@@ -421,15 +438,22 @@ def _vbox_overlap_ratio(p_box, vb):
     p_area = max((p_box[2]-p_box[0]) * (p_box[3]-p_box[1]), 1)
     return inter / p_area
 
-def _post_alert(incident_id, conf: float, event: str = "ASSAULT"):
+def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_path: str = None):
     print(f"🔥 [ALERT] Posting {event} event | case_id={incident_id} | conf={conf:.2f}")
     try:
-        r = requests.post(BACKEND_URL, json={
-            "id": str(incident_id), 
-            "event": event, 
+        payload = {
+            "id": str(incident_id),
+            "event": event,
             "confidence": round(conf, 4),
-            "barangayId": "cogon"
-        }, timeout=2.0)
+            "barangayId": "cogon",
+        }
+        # screenshot_path is a URL-relative path like "/static/screenshots/snap_XXXX.jpg" --
+        # the backend needs to persist this on the incident record so CrimeReportsView.tsx's
+        # `inc.screenshotPath` (and the report-filing modal's `reportImageUrl`) have something
+        # real to render instead of falling back to the picsum placeholder.
+        if screenshot_path:
+            payload["screenshotPath"] = screenshot_path
+        r = requests.post(BACKEND_URL, json=payload, timeout=2.0)
         print(f"   ✅ Backend {r.status_code}: {r.text[:120]}")
     except Exception as e:
         print(f"   ❌ Backend unreachable: {e}")
@@ -560,6 +584,163 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 14.1 CAMERA RECONNECT HELPER
+# ──────────────────────────────────────────────────────────────────────────────
+def _reopen_camera():
+    """Attempts to fully reinitialize the capture device after a drop."""
+    global cap
+    try:
+        cap.release()
+    except Exception:
+        pass
+    new_cap = cv2.VideoCapture(camera_idx)
+    new_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  res_w)
+    new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+    new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap = new_cap
+    return cap.isOpened()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 15.1 RAW-FRAME RING BUFFER + EVENT CLIP CAPTURE
+# ──────────────────────────────────────────────────────────────────────────────
+# When ANY alert fires (ASSAULT / ARMED THREAT / ROBBERY / VANDALISM), this
+# captures a short MP4 spanning CLIP_PRE_SECONDS before the trigger to
+# CLIP_POST_SECONDS after it, using the SAME fully-annotated frame that's
+# already being drawn each iteration (overlays, PiP, HUD included) -- so the
+# clip shows exactly what the operator/AI saw on screen, same idea as the
+# existing screenshot snapshot, just extended across time.
+RECORDINGS_DIR = os.path.join(PROJECT_ROOT, "recordings")
+os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+CLIP_PRE_SECONDS  = 5
+CLIP_POST_SECONDS = 5
+CLIP_NOMINAL_FPS  = sys_config["camera"].get("fps", 15)   # sizes the ring buffer + used as encode-fps fallback
+CLIP_PRE_FRAMES   = max(1, int(CLIP_NOMINAL_FPS * CLIP_PRE_SECONDS))
+
+_clip_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clip")
+
+# Guards _raw_frame_ring and _pending_clips below. Needed because the main
+# detection loop mutates these every frame, and (as of the panic-button
+# integration) the /panic_capture route on stream_app can ALSO start a new
+# pending clip from a different thread (uvicorn's) at any moment.
+_clip_state_lock = threading.Lock()
+
+# Always-on rolling buffer of (timestamp, annotated_frame) -- topped up every
+# frame regardless of whether anything is currently flagged.
+_raw_frame_ring: deque = deque(maxlen=CLIP_PRE_FRAMES)
+
+# In-flight clips still accumulating their post-event frames. Each entry is
+# handed off to _clip_exec once it reaches its target length.
+_pending_clips: list = []
+
+
+def _start_pending_clip(incident_id: str, event: str, conf: float):
+    """Called the instant an alert (or a panic-button press) fires.
+    Snapshots the existing pre-event ring buffer and starts accumulating
+    post-event frames going forward. Thread-safe -- callable from the main
+    detection loop OR from the /panic_capture route handler."""
+    with _clip_state_lock:
+        pre_frames = [f for _, f in _raw_frame_ring]
+        _pending_clips.append({
+            "incident_id":   incident_id,
+            "event":         event,
+            "conf":          conf,
+            "frames":        pre_frames,        # grows with post-event frames each iteration
+            "trigger_index": len(pre_frames),   # frame index within `frames` where the alert fired
+            "target_len":    len(pre_frames) + int(CLIP_NOMINAL_FPS * CLIP_POST_SECONDS),
+            "start_ts":      time.perf_counter(),
+        })
+
+
+def _feed_pending_clips(annotated_frame):
+    """Called once per main-loop iteration with the latest annotated frame.
+    Appends it to every in-flight clip and ships out any that are complete."""
+    with _clip_state_lock:
+        if not _pending_clips:
+            return
+        still_pending = []
+        for clip in _pending_clips:
+            clip["frames"].append(annotated_frame)
+            if len(clip["frames"]) >= clip["target_len"]:
+                _clip_exec.submit(_finalize_and_register_clip, clip)
+            else:
+                still_pending.append(clip)
+        _pending_clips[:] = still_pending
+
+
+def _finalize_and_register_clip(clip: dict):
+    """Background-thread work: encode buffered frames to MP4 and register
+    the clip against the incident via the backend's records endpoint."""
+    incident_id = clip["incident_id"]
+    frames      = clip["frames"]
+    if not frames:
+        return
+
+    elapsed    = max(time.perf_counter() - clip["start_ts"], 0.1)
+    encode_fps = max(1.0, len(frames) / (elapsed + CLIP_PRE_SECONDS))  # rough, but keeps playback pacing sane
+
+    safe_event = clip["event"].replace(" ", "_")
+    filename   = f"AUTO_{safe_event}_{incident_id}.mp4"
+    file_path  = os.path.join(RECORDINGS_DIR, filename)
+
+    h, w = frames[0].shape[:2]
+    writer = cv2.VideoWriter(file_path, cv2.VideoWriter_fourcc(*"mp4v"), encode_fps, (w, h))
+    try:
+        for f in frames:
+            writer.write(f)
+    finally:
+        writer.release()
+
+    trigger_seconds = clip["trigger_index"] / encode_fps
+    marker          = f"{int(trigger_seconds // 60):02d}:{int(trigger_seconds % 60):02d}"
+    total_seconds   = len(frames) / encode_fps
+
+    print(f"🎬 [CLIP] Saved {filename} ({total_seconds:.1f}s, marker@{marker}) for case {incident_id}")
+
+    try:
+        r = requests.post(f"{sys_config['networking']['api_url'].rstrip('/')}/api/records/register_clip", json={
+            "filename":          filename,
+            "duration":          f"{total_seconds:.1f}s",
+            "type":              "CLIP",
+            "associatedCrimeId": incident_id,
+            "crimeTimeMarker":   marker,
+            "notes":             f"Auto-captured by AI Sentinel on {clip['event']} detection (conf={clip['conf']:.2f}).",
+        }, timeout=3.0)
+        print(f"   ✅ Records backend {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        print(f"   ❌ Records backend unreachable: {e}")
+
+
+class PanicCaptureRequest(BaseModel):
+    incident_id: str
+
+
+@stream_app.post("/panic_capture")
+def panic_capture(payload: PanicCaptureRequest):
+    """Hit by backend.py's /api/panic_trigger the instant the hardware panic
+    button fires. Grabs the latest real annotated frame for a screenshot and
+    kicks off the same pre/post-event clip pipeline used for AI alerts --
+    keyed to the SAME incident_id the backend already generated, so the clip
+    lands correctly associated once it finishes encoding."""
+    incident_id = payload.incident_id
+
+    with _clip_state_lock:
+        if not _raw_frame_ring:
+            return {"status": "no_frame_available", "screenshotPath": None}
+        latest_frame = _raw_frame_ring[-1][1]
+
+    snap_filename = f"snap_{incident_id}.jpg"
+    snap_path = os.path.join(SCREENSHOTS_DIR, snap_filename)
+    cv2.imwrite(snap_path, latest_frame)
+
+    _start_pending_clip(incident_id, "HARDWARE_PANIC_INTERRUPT", 1.0)
+
+    screenshot_url_path = f"/static/screenshots/{snap_filename}"
+    print(f"🚨 [PANIC] Captured screenshot + started clip for case {incident_id}")
+    return {"status": "captured", "screenshotPath": screenshot_url_path}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 15. PER-TRACK STORES
 # ──────────────────────────────────────────────────────────────────────────────
 track_states, prev_joints, vel_history, id_last_seen = {}, {}, {}, {}
@@ -580,13 +761,26 @@ signal.signal(signal.SIGINT, _shutdown)
 signal.signal(signal.SIGTERM, _shutdown)
 
 frame_count, fps_timer, fps_display, fps_frame_count = 0, time.perf_counter(), 0.0, 0
+_camera_fail_streak = 0
 print("🚀 Sentinel v16.0 — Portable dynamic deployment runtime context pipeline engaged.")
 
 while _running:
     ret, frame = cap.read()
     if not ret or frame is None:
+        _camera_fail_streak += 1
+        # After ~2s of consecutive failures, try to hard-reopen the device
+        # instead of spinning forever on a dead handle.
+        if _camera_fail_streak >= 200:
+            print("⚠️  Camera read failing repeatedly — attempting reconnect...")
+            if _reopen_camera():
+                print("✅ Camera reconnected.")
+            else:
+                print("❌ Camera reconnect failed, retrying in 1s...")
+                time.sleep(1.0)
+            _camera_fail_streak = 0
         time.sleep(0.01)
         continue
+    _camera_fail_streak = 0
 
     frame_count += 1
     fps_frame_count += 1
@@ -633,6 +827,15 @@ while _running:
 
         weapon_only = [w for w in tracked_weapons if w["name"] not in SIGN_CLASSES]
         weapon_assigns = _assign_weapons(weapon_only, ids, kpts, boxes)
+
+        # ── FIX: snapshot prev_joints BEFORE the per-track loop below
+        # overwrites it with this frame's wrist positions. Vandalism scoring
+        # runs later in this same frame and needs the *previous* frame's
+        # wrist positions to compute velocity -- without this snapshot,
+        # score_vandalism() was comparing this frame's wrists to
+        # themselves, so wrist velocity was always ~0 and Vandalism could
+        # never enter its "sweep band" and would never fire.
+        prev_joints_snapshot = dict(prev_joints)
 
         for tid, joints, p_box in zip(ids, kpts, boxes):
             if tid not in victims:
@@ -701,9 +904,11 @@ while _running:
             if tid not in vandal_states:
                 vandal_states[tid] = VandalismTrackState()
             sweep_hist = vandal_sweep_history.setdefault(tid, deque(maxlen=45))
-            
+
+            # Use the PRE-overwrite snapshot, not the live `prev_joints`
+            # dict (which now holds this frame's wrist positions).
             is_vandal, target = score_vandalism(
-                tid, joints, prev_joints, sweep_hist,
+                tid, joints, prev_joints_snapshot, sweep_hist,
                 static_targets=sign_boxes, all_person_boxes=boxes, my_box=p_box
             )
             v_state_res = vandal_states[tid].update(is_vandal)
@@ -735,9 +940,21 @@ while _running:
 
     # ─── SECURE POST-RENDER ANNOTATION SNAPSHOT FLUSH ───
     for alert in triggered_alerts_this_frame:
-        snap_path = os.path.join(SCREENSHOTS_DIR, f"snap_{alert['id']}.jpg")
-        cv2.imwrite(snap_path, frame) 
-        _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'])
+        snap_filename = f"snap_{alert['id']}.jpg"
+        snap_path = os.path.join(SCREENSHOTS_DIR, snap_filename)
+        cv2.imwrite(snap_path, frame)
+        screenshot_url_path = f"/static/screenshots/{snap_filename}"
+        _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path)
+        _start_pending_clip(alert['id'], alert['event'], alert['conf'])
+
+    # Keep the raw-frame ring buffer topped up every frame (not just alert
+    # frames) and feed any in-flight clips their next frame. One copy is
+    # shared between the ring buffer and any pending clips since nothing
+    # downstream mutates it.
+    annotated_snapshot = frame.copy()
+    with _clip_state_lock:
+        _raw_frame_ring.append((time.perf_counter(), annotated_snapshot))
+    _feed_pending_clips(annotated_snapshot)
 
     if _encode_future is None or _encode_future.done():
         def _encode_and_push(f=frame.copy()):
@@ -753,4 +970,5 @@ cv2.destroyAllWindows()
 _weapon_exec.shutdown(wait=False, cancel_futures=True)
 _encode_exec.shutdown(wait=False, cancel_futures=True)
 _alert_exec.shutdown(wait=True)
+_clip_exec.shutdown(wait=True)   # let any in-progress clip finish encoding/uploading before exit
 print("Portable Sentinel shutdown complete.")

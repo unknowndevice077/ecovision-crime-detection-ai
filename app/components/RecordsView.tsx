@@ -51,6 +51,8 @@ export default function RecordsView() {
 
   useEffect(() => {
     fetchRecordsAndCrimes();
+    const interval = setInterval(fetchRecordsAndCrimes, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleUpdateNotes = async (id: string) => {
