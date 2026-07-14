@@ -1,0 +1,76 @@
+# CI-only trimmed dependency list, used by .github/workflows/build-installer.yml
+# instead of the full requirements.txt. Your local requirements.txt is left
+# untouched -- this file only controls what actually ships inside the .venv
+# that gets bundled into the installer.
+#
+# Generated from requirements.txt by removing packages that
+# audit_requirements.py confirmed are not imported anywhere in this repo's
+# .py files, and not required (even transitively) by anything that is.
+# Re-run audit_requirements.py and update this file if you add new imports.
+
+annotated-types==0.7.0
+anyio==4.13.0
+certifi==2026.4.22
+charset-normalizer==3.4.7
+click==8.3.3
+colorama==0.4.6
+contourpy==1.3.3
+cycler==0.12.1
+dxcam==0.3.0
+fastapi==0.136.1
+filelock==3.29.0
+Flask==3.1.3
+fonttools==4.62.1
+fsspec==2026.3.0
+h11==0.16.0
+httptools==0.7.1
+idna==3.7
+itsdangerous==2.2.0
+Jinja2==3.1.6
+kiwisolver==1.5.0
+lap==0.5.13
+MarkupSafe==3.0.3
+matplotlib==3.10.9
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.4.4
+opencv-python==4.13.0.92
+openvino==2026.1.0
+packaging==26.2
+pandas==3.0.3
+pillow==12.2.0
+polars==1.40.1
+polars-runtime-32==1.40.1
+psutil==7.2.2
+pydantic==2.13.3
+pydantic_core==2.46.3
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.27
+PyYAML==6.0.3
+requests==2.33.1
+scipy==1.17.1
+setuptools==81.0.0
+six==1.17.0
+starlette==1.0.0
+sympy==1.14.0
+torch==2.11.0+cu130
+torchvision==0.26.0+cu130
+tqdm==4.67.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2026.2
+ultralytics==8.4.42
+ultralytics-thop==2.0.19
+urllib3==2.6.3
+uvicorn==0.46.0
+watchfiles==1.1.1
+websockets==16.0
+Werkzeug==3.1.8
+
+# TODO: fill in real versions (audit found these ARE imported but missing
+# from requirements.txt entirely -- run `pip show pytorchvideo tensorrt-cu13`
+# in your venv to get the actual versions, then uncomment):
+# pytorchvideo==<version>
+# tensorrt-cu13==<version>

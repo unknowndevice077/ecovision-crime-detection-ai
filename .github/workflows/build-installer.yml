@@ -16,6 +16,26 @@ jobs:
         with:
           lfs: true   # needed if weights/*.pt is tracked via Git LFS
 
+      # windows-latest runners only have ~14GB free by default. A CUDA
+      # torch/torchvision + openvino + ultralytics + roboflow venv, plus a
+      # full node_modules + Electron binary, plus the pip/npm caches, can
+      # blow past that -- and when the disk fills up mid-write, the NSIS
+      # 7z archive gets truncated, which is exactly what "failed creating
+      # mmap" means (it's not a permissions/signing error, it's a corrupt
+      # file). Free up known-safe space before the heavy steps.
+      - name: Free up disk space
+        shell: powershell
+        run: |
+          Write-Host "Disk space BEFORE cleanup:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+          Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Ruby" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "${env:ANDROID_HOME}" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\Android" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\Microsoft SQL Server" -ErrorAction SilentlyContinue
+          Write-Host "Disk space AFTER cleanup:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
       # ---------------------------------------------------------------
       # 1. PYTHON SIDE -- build a real venv that gets shipped as-is
       #    (this matches your package.json's extraFiles: ".venv/**/*")
@@ -36,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\pip\Cache
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.ci.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -44,12 +64,22 @@ jobs:
         run: |
           python -m venv .venv
           .venv\Scripts\pip install --upgrade pip
-          # torch==...+cu130 (and matching torchvision, if pinned the same way)
-          # is a CUDA build hosted on PyTorch's own index, not PyPI -- pip
-          # needs --extra-index-url or it 404s no matter how many times you
-          # rerun it. Adjust the /cu130 path if your pin uses a different
-          # CUDA version (e.g. /cu121, /cu124).
-          .venv\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu130
+          # Uses requirements.ci.txt (trimmed) instead of requirements.txt --
+          # your local requirements.txt stays untouched for dev work, this
+          # file is what actually ships inside the bundled .venv. Re-run
+          # audit_requirements.py after adding new imports and update
+          # requirements.ci.txt to match, or the build will be missing a
+          # package it now actually needs.
+          #
+          # torch==...+cu130 (and torchvision pinned the same way) is a CUDA
+          # build hosted on PyTorch's own index, not PyPI -- pip needs
+          # --extra-index-url or it 404s no matter how many times you rerun
+          # it. Adjust /cu130 if your pin uses a different CUDA version.
+          .venv\Scripts\pip install -r requirements.ci.txt --extra-index-url https://download.pytorch.org/whl/cu130
+
+      - name: Check disk space after venv install
+        shell: powershell
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
       # 2. FRONTEND SIDE -- Next.js production build (served via `next start`
@@ -66,6 +96,10 @@ jobs:
 
       - name: Build Next.js app
         run: npm run build   # emits .next/
+
+      - name: Check disk space before packaging
+        shell: powershell
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
       # 3. ELECTRON -- package .next, node_modules, .venv, maincode,
