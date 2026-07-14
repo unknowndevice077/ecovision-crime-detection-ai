@@ -56,13 +56,15 @@
     "appId": "com.ecovision.sentinel",
     "productName": "EcoVisionSentinel",
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": true,
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true
     },
+    "compression": "normal",
     "files": [
       "electron/**/*",
       ".next/**/*",
