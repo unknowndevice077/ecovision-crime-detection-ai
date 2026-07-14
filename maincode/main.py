@@ -600,6 +600,30 @@ def _reopen_camera():
     cap = new_cap
     return cap.isOpened()
 
+
+class CameraIndexRequest(BaseModel):
+    index: int
+
+
+@stream_app.post("/set_camera_index")
+def set_camera_index(payload: CameraIndexRequest):
+    """Lets the Monitor view's camera-index picker swap the live capture
+    device (e.g. OBS Virtual Camera vs. a webcam) without restarting the
+    whole AI process. Persists back to config.json so the choice survives
+    the next launch too."""
+    global camera_idx
+    camera_idx = payload.index
+    ok = _reopen_camera()
+
+    try:
+        sys_config["camera"]["index"] = camera_idx
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(sys_config, f, indent=2)
+    except Exception as e:
+        print(f"⚠️  [CAMERA] Failed to persist index to config.json: {e}")
+
+    return {"status": "reopened" if ok else "failed", "index": camera_idx}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 15.1 RAW-FRAME RING BUFFER + EVENT CLIP CAPTURE
 # ──────────────────────────────────────────────────────────────────────────────

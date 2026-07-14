@@ -29,7 +29,12 @@ jobs:
         run: |
           python -m venv .venv
           .venv\Scripts\pip install --upgrade pip
-          .venv\Scripts\pip install -r requirements.txt
+          # torch==...+cu130 (and matching torchvision, if pinned the same way)
+          # is a CUDA build hosted on PyTorch's own index, not PyPI -- pip
+          # needs --extra-index-url or it 404s no matter how many times you
+          # rerun it. Adjust the /cu130 path if your pin uses a different
+          # CUDA version (e.g. /cu121, /cu124).
+          .venv\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu130
 
       # ---------------------------------------------------------------
       # 2. FRONTEND SIDE -- Next.js production build (served via `next start`
