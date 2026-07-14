@@ -9,6 +9,7 @@ on:
 jobs:
   build-windows-installer:
     runs-on: windows-latest
+    if: github.repository_owner == 'unknowndevice077' && (github.actor == 'unknowndevice077' || github.event_name == 'workflow_dispatch')
 
     steps:
       - name: Checkout repo
@@ -48,9 +49,8 @@ jobs:
           Remove-Item -Recurse -Force "${env:LOCALAPPDATA}\pnpm" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "${env:LOCALAPPDATA}\Yarn" -ErrorAction SilentlyContinue
 
-          # --- Windows temp & driver store (old versions) ---
+          # --- Windows temp ---
           Remove-Item -Recurse -Force "C:\Windows\Temp\*" -ErrorAction SilentlyContinue
-          Clean-MountPoint -ErrorAction SilentlyContinue
 
           Write-Host "=== Disk space AFTER cleanup ==="
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
@@ -68,9 +68,9 @@ jobs:
       # folder -- the venv still gets created fresh every run (has to, it
       # bakes in absolute paths tied to that specific runner), but pip skips
       # re-downloading anything whose wheel is already sitting in this cache.
-      # Key includes requirements.txt's hash, so a real dependency change
+      # Key includes requirements.ci.txt's hash, so a real dependency change
       # still busts the cache and re-downloads; an unrelated code change (or
-      # a new tag with the same requirements.txt) reuses it.
+      # a new tag with the same requirements.ci.txt) reuses it.
       - name: Cache pip downloads
         uses: actions/cache@v4
         with:
@@ -97,7 +97,7 @@ jobs:
           .venv\Scripts\pip install -r requirements.ci.txt --extra-index-url https://download.pytorch.org/whl/cu130
 
       # The CUDA venv is ~7 GB. Strip out everything we don't need at
-      # runtime: __pycache__, tests, docs, .whl files, and the pip/chache
+      # runtime: __pycache__, tests, docs, .whl files, and the pip/cache
       # machinery that's only needed during install. This saves 2-3 GB.
       - name: Prune .venv to minimum size
         shell: powershell
@@ -199,7 +199,7 @@ jobs:
         run: npx electron-builder --win --dir   # emits dist/win-unpacked/
 
       # ---------------------------------------------------------------
-      # 4. COMPRESS -- 7z the whole unpacked folder into a single archive
+      # 4. COMPRESS -- zip the whole unpacked folder into a single archive
       # ---------------------------------------------------------------
       - name: Compress build into zip archive
         shell: powershell
