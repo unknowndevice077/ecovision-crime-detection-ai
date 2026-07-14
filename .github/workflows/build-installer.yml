@@ -64,13 +64,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Caches pip's DOWNLOAD cache (the .whl files themselves), not the venv
-      # folder -- the venv still gets created fresh every run (has to, it
-      # bakes in absolute paths tied to that specific runner), but pip skips
-      # re-downloading anything whose wheel is already sitting in this cache.
-      # Key includes requirements.ci.txt's hash, so a real dependency change
-      # still busts the cache and re-downloads; an unrelated code change (or
-      # a new tag with the same requirements.ci.txt) reuses it.
       - name: Cache pip downloads
         uses: actions/cache@v4
         with:
@@ -83,22 +76,8 @@ jobs:
         run: |
           python -m venv .venv
           .venv\Scripts\pip install --upgrade pip
-          # Uses requirements.ci.txt (trimmed) instead of requirements.txt --
-          # your local requirements.txt stays untouched for dev work, this
-          # file is what actually ships inside the bundled .venv. Re-run
-          # audit_requirements.py after adding new imports and update
-          # requirements.ci.txt to match, or the build will be missing a
-          # package it now actually needs.
-          #
-          # torch==...+cu130 (and torchvision pinned the same way) is a CUDA
-          # build hosted on PyTorch's own index, not PyPI -- pip needs
-          # --extra-index-url or it 404s no matter how many times you rerun
-          # it. Adjust /cu130 if your pin uses a different CUDA version.
           .venv\Scripts\pip install -r requirements.ci.txt --extra-index-url https://download.pytorch.org/whl/cu130
 
-      # The CUDA venv is ~7 GB. Strip out everything we don't need at
-      # runtime: __pycache__, tests, docs, .whl files, and the pip/cache
-      # machinery that's only needed during install. This saves 2-3 GB.
       - name: Prune .venv to minimum size
         shell: powershell
         run: |
@@ -106,35 +85,21 @@ jobs:
           $sizeBefore = (Get-ChildItem ".venv" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
           Write-Host "$([math]::Round($sizeBefore, 2)) GB"
 
-          # Remove pip & setuptools after install (not needed at runtime)
           Remove-Item -Recurse -Force ".venv\Lib\site-packages\pip*" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force ".venv\Scripts\pip*" -ErrorAction SilentlyContinue
 
-          # Remove all __pycache__ dirs
           Get-ChildItem ".venv" -Directory -Filter "__pycache__" -Recurse | Remove-Item -Recurse -Force
-
-          # Remove all .pyc files
           Get-ChildItem ".venv" -Filter "*.pyc" -Recurse | Remove-Item -Force
-
-          # Remove test directories
           Get-ChildItem ".venv" -Directory -Filter "tests" -Recurse | Remove-Item -Recurse -Force
           Get-ChildItem ".venv" -Directory -Filter "test" -Recurse | Remove-Item -Recurse -Force
-
-          # Remove documentation
           Get-ChildItem ".venv" -Directory -Filter "docs" -Recurse | Remove-Item -Recurse -Force
           Get-ChildItem ".venv" -Directory -Filter "doc" -Recurse | Remove-Item -Recurse -Force
           Get-ChildItem ".venv" -Directory -Filter "examples" -Recurse | Remove-Item -Recurse -Force
-
-          # Remove *.whl files that pip left behind
           Get-ChildItem ".venv" -Filter "*.whl" -Recurse | Remove-Item -Force
 
-          # Remove CUDA/HIP/ROCm compiler collateral from torch (libtorch
-          # .dll + .so are kept, but the fatbin / source / headers are not)
           Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\include" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\share" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\lib\*.h" -ErrorAction SilentlyContinue
-
-          # Remove nvcc / CUDA toolkit headers shipped inside torch
           Get-ChildItem ".venv\Lib\site-packages" -Directory -Filter "nvcc" -Recurse | Remove-Item -Recurse -Force
 
           Write-Host "=== .venv size AFTER pruning ==="
@@ -144,33 +109,28 @@ jobs:
       - name: Check disk space after venv install
         shell: powershell
         run: |
-          # Free pip's download cache (no longer needed after install)
           Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pip\Cache" -ErrorAction SilentlyContinue
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
-      # 2. FRONTEND SIDE -- Next.js production build (served via `next start`
-      #    inside Electron, not a static export -- see electron/main.js)
+      # 2. FRONTEND SIDE
       # ---------------------------------------------------------------
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"   # caches ~/.npm keyed on package-lock.json automatically
+          cache: "npm"
 
       - name: Install Node dependencies
         run: npm ci
 
       - name: Build Next.js app
-        run: npm run build   # emits .next/
+        run: npm run build
 
       - name: Check disk space before packaging
         shell: powershell
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
-      # After Next.js has built, we only need runtime deps for the Electron
-      # shell. Strip docs/tests from node_modules (but keep all packages
-      # including electron and electron-builder in place).
       - name: Prune node_modules for packaging
         shell: powershell
         run: |
@@ -178,7 +138,6 @@ jobs:
           $sizeBefore = (Get-ChildItem "node_modules" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB
           Write-Host "$([math]::Round($sizeBefore, 2)) GB"
 
-          # Remove extraneous large dirs from all remaining packages
           Get-ChildItem "node_modules" -Directory -Filter "docs" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
           Get-ChildItem "node_modules" -Directory -Filter "doc" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
           Get-ChildItem "node_modules" -Directory -Filter "test" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
@@ -192,14 +151,13 @@ jobs:
           Write-Host "$([math]::Round($sizeAfter, 2)) GB"
 
       # ---------------------------------------------------------------
-      # 3. ELECTRON -- package .next, node_modules, .venv, maincode,
-      #    weights, and config.json into a portable win-unpacked folder
+      # 3. ELECTRON -- package into a portable win-unpacked folder
       # ---------------------------------------------------------------
       - name: Package Electron app (portable)
-        run: npx electron-builder --win --dir   # emits dist/win-unpacked/
+        run: npx electron-builder --win --dir
 
       # ---------------------------------------------------------------
-      # 4. COMPRESS -- zip the whole unpacked folder into a single archive
+      # 4. COMPRESS
       # ---------------------------------------------------------------
       - name: Compress build into zip archive
         shell: powershell
@@ -209,16 +167,13 @@ jobs:
           $zipSize = (Get-Item "dist\EcoVisionSentinel-2.0.0-win64.zip").Length / 1GB
           Write-Host "Zip size: $([math]::Round($zipSize, 2)) GB"
 
+      # ---------------------------------------------------------------
+      # 5. ARTIFACT ONLY -- no auto-release. Download the zip from this
+      #    run's Artifacts tab and create/attach the GitHub Release
+      #    yourself, on your own schedule, with your own notes.
+      # ---------------------------------------------------------------
       - name: Upload portable build artifact
         uses: actions/upload-artifact@v4
         with:
           name: EcoVisionSentinel-Portable
           path: dist/EcoVisionSentinel-*.zip
-
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/EcoVisionSentinel-*.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
