@@ -12,23 +12,15 @@
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",
     "desktop": "electron .",
-    "app:build": "next build && electron-builder"
+    "app:build": "next build && electron-builder --dir"
   },
   "dependencies": {
-    "@tailwindcss/postcss": "^4.2.4",
-    "@types/node": "^25.6.0",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "autoprefixer": "^10.5.0",
     "axios": "^1.6.2",
     "date-fns": "^2.30.0",
     "lucide-react": "^1.12.0",
     "next": "^16.2.4",
-    "postcss": "^8.5.12",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5",
-    "tailwindcss": "^4.2.4",
-    "typescript": "^6.0.3"
+    "react-dom": "^19.2.5"
   },
   "keywords": [
     "security",
@@ -49,28 +41,29 @@
     "npm": ">=8.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.4",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.5.0",
     "electron": "^42.5.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.5.12",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^6.0.3"
   },
   "build": {
     "appId": "com.ecovision.sentinel",
     "productName": "EcoVisionSentinel",
     "win": {
-      "target": "nsis",
+      "target": "dir",
       "signAndEditExecutable": false
     },
-    "nsis": {
-      "oneClick": true,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true
-    },
-    "compression": "normal",
     "files": [
       "electron/**/*",
       ".next/**/*",
       "node_modules/**/*",
       "public/**/*",
-      "next.config.*",
       "package.json"
     ],
     "extraFiles": [

@@ -22,18 +22,37 @@ jobs:
       # blow past that -- and when the disk fills up mid-write, the NSIS
       # 7z archive gets truncated, which is exactly what "failed creating
       # mmap" means (it's not a permissions/signing error, it's a corrupt
-      # file). Free up known-safe space before the heavy steps.
-      - name: Free up disk space
+      # file). Free up as much known-safe space as possible before the heavy steps.
+      - name: Free up disk space aggressively
         shell: powershell
         run: |
-          Write-Host "Disk space BEFORE cleanup:"
+          Write-Host "=== Disk space BEFORE cleanup ==="
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
+          # --- .NET SDKs (largest savings) ---
           Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
+
+          # --- Browser caches/tools ---
           Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Ruby" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Python" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Java" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Go" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "${env:ANDROID_HOME}" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\Program Files (x86)\Android" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\Program Files\Microsoft SQL Server" -ErrorAction SilentlyContinue
-          Write-Host "Disk space AFTER cleanup:"
+          Remove-Item -Recurse -Force "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions" -ErrorAction SilentlyContinue
+
+          # --- npm/yarn caches ---
+          Remove-Item -Recurse -Force "${env:APPDATA}\npm-cache" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "${env:LOCALAPPDATA}\npm-cache" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "${env:LOCALAPPDATA}\pnpm" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "${env:LOCALAPPDATA}\Yarn" -ErrorAction SilentlyContinue
+
+          # --- Windows temp & driver store (old versions) ---
+          Remove-Item -Recurse -Force "C:\Windows\Temp\*" -ErrorAction SilentlyContinue
+          Clean-MountPoint -ErrorAction SilentlyContinue
+
+          Write-Host "=== Disk space AFTER cleanup ==="
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
@@ -77,9 +96,57 @@ jobs:
           # it. Adjust /cu130 if your pin uses a different CUDA version.
           .venv\Scripts\pip install -r requirements.ci.txt --extra-index-url https://download.pytorch.org/whl/cu130
 
+      # The CUDA venv is ~7 GB. Strip out everything we don't need at
+      # runtime: __pycache__, tests, docs, .whl files, and the pip/chache
+      # machinery that's only needed during install. This saves 2-3 GB.
+      - name: Prune .venv to minimum size
+        shell: powershell
+        run: |
+          Write-Host "=== .venv size BEFORE pruning ==="
+          $sizeBefore = (Get-ChildItem ".venv" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
+          Write-Host "$([math]::Round($sizeBefore, 2)) GB"
+
+          # Remove pip & setuptools after install (not needed at runtime)
+          Remove-Item -Recurse -Force ".venv\Lib\site-packages\pip*" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force ".venv\Scripts\pip*" -ErrorAction SilentlyContinue
+
+          # Remove all __pycache__ dirs
+          Get-ChildItem ".venv" -Directory -Filter "__pycache__" -Recurse | Remove-Item -Recurse -Force
+
+          # Remove all .pyc files
+          Get-ChildItem ".venv" -Filter "*.pyc" -Recurse | Remove-Item -Force
+
+          # Remove test directories
+          Get-ChildItem ".venv" -Directory -Filter "tests" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem ".venv" -Directory -Filter "test" -Recurse | Remove-Item -Recurse -Force
+
+          # Remove documentation
+          Get-ChildItem ".venv" -Directory -Filter "docs" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem ".venv" -Directory -Filter "doc" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem ".venv" -Directory -Filter "examples" -Recurse | Remove-Item -Recurse -Force
+
+          # Remove *.whl files that pip left behind
+          Get-ChildItem ".venv" -Filter "*.whl" -Recurse | Remove-Item -Force
+
+          # Remove CUDA/HIP/ROCm compiler collateral from torch (libtorch
+          # .dll + .so are kept, but the fatbin / source / headers are not)
+          Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\include" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\share" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\lib\*.h" -ErrorAction SilentlyContinue
+
+          # Remove nvcc / CUDA toolkit headers shipped inside torch
+          Get-ChildItem ".venv\Lib\site-packages" -Directory -Filter "nvcc" -Recurse | Remove-Item -Recurse -Force
+
+          Write-Host "=== .venv size AFTER pruning ==="
+          $sizeAfter = (Get-ChildItem ".venv" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
+          Write-Host "$([math]::Round($sizeAfter, 2)) GB"
+
       - name: Check disk space after venv install
         shell: powershell
-        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+        run: |
+          # Free pip's download cache (no longer needed after install)
+          Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pip\Cache" -ErrorAction SilentlyContinue
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
       # 2. FRONTEND SIDE -- Next.js production build (served via `next start`
@@ -101,23 +168,57 @@ jobs:
         shell: powershell
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
+      # After Next.js has built, we only need runtime deps for the Electron
+      # shell. Strip docs/tests from node_modules (but keep all packages
+      # including electron and electron-builder in place).
+      - name: Prune node_modules for packaging
+        shell: powershell
+        run: |
+          Write-Host "=== node_modules size BEFORE pruning ==="
+          $sizeBefore = (Get-ChildItem "node_modules" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB
+          Write-Host "$([math]::Round($sizeBefore, 2)) GB"
+
+          # Remove extraneous large dirs from all remaining packages
+          Get-ChildItem "node_modules" -Directory -Filter "docs" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem "node_modules" -Directory -Filter "doc" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem "node_modules" -Directory -Filter "test" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem "node_modules" -Directory -Filter "tests" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem "node_modules" -Directory -Filter "__pycache__" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem "node_modules" -Directory -Filter "example" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem "node_modules" -Directory -Filter "examples" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+          Write-Host "=== node_modules size AFTER pruning ==="
+          $sizeAfter = (Get-ChildItem "node_modules" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB
+          Write-Host "$([math]::Round($sizeAfter, 2)) GB"
+
       # ---------------------------------------------------------------
       # 3. ELECTRON -- package .next, node_modules, .venv, maincode,
-      #    weights, and config.json into one NSIS installer
+      #    weights, and config.json into a portable win-unpacked folder
       # ---------------------------------------------------------------
-      - name: Build Windows installer
-        run: npm run app:build   # next build && electron-builder (build already ran above, safe to rerun)
+      - name: Package Electron app (portable)
+        run: npx electron-builder --win --dir   # emits dist/win-unpacked/
 
-      - name: Upload installer artifact
+      # ---------------------------------------------------------------
+      # 4. COMPRESS -- 7z the whole unpacked folder into a single archive
+      # ---------------------------------------------------------------
+      - name: Compress build into zip archive
+        shell: powershell
+        run: |
+          Write-Host "=== Compressing win-unpacked into zip ==="
+          Compress-Archive -Path "dist\win-unpacked\*" -DestinationPath "dist\EcoVisionSentinel-2.0.0-win64.zip" -CompressionLevel Optimal
+          $zipSize = (Get-Item "dist\EcoVisionSentinel-2.0.0-win64.zip").Length / 1GB
+          Write-Host "Zip size: $([math]::Round($zipSize, 2)) GB"
+
+      - name: Upload portable build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EcoVisionSentinel-Setup
-          path: dist/*.exe
+          name: EcoVisionSentinel-Portable
+          path: dist/EcoVisionSentinel-*.zip
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.exe
+          files: dist/EcoVisionSentinel-*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
