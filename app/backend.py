@@ -1,3 +1,12 @@
+import sys
+import os
+
+# --- FORCE UTF-8 ENCODING FOR WINDOWS SUBPROCESS STDOUT/STDERR ---
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -7,7 +16,6 @@ import sqlite3
 import uvicorn
 import json
 import uuid
-import os
 import cv2
 import numpy as np
 import threading
@@ -20,18 +28,27 @@ import hmac
 import base64
 import secrets
 
-# --- CONFIGURATION ENGINE SETUP ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+WRITABLE_DIR = os.environ.get("ECOVISION_WRITABLE_DIR")
+if not WRITABLE_DIR:
+    WRITABLE_DIR = os.path.join(os.path.expanduser("~"), "EcoVisionSentinelData")
+os.makedirs(WRITABLE_DIR, exist_ok=True)
 
 with open(CONFIG_PATH, 'r') as f:
     sys_config = json.load(f)
 
-# --- AUTH: PASSWORD HASHING + SIGNED SESSION TOKENS ---
+WRITABLE_CONFIG_PATH = os.path.join(WRITABLE_DIR, "config.json")
+if os.path.exists(WRITABLE_CONFIG_PATH):
+    with open(WRITABLE_CONFIG_PATH, 'r') as f:
+        sys_config = json.load(f)
+
 if "auth" not in sys_config or not sys_config.get("auth", {}).get("secret_key"):
     sys_config.setdefault("auth", {})["secret_key"] = secrets.token_hex(32)
-    with open(CONFIG_PATH, "w") as f:
+    with open(WRITABLE_CONFIG_PATH, "w") as f:
         json.dump(sys_config, f, indent=2)
+
 SECRET_KEY = sys_config["auth"]["secret_key"]
 TOKEN_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
@@ -47,17 +64,6 @@ def verify_password(password: str, stored: str) -> bool:
         return False
     check = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000)
     return hmac.compare_digest(check.hex(), digest_hex)
-
-# NOTE ON THE API CONTRACT: every JSON field this backend sends OR accepts
-# is snake_case now, matching the DB column names directly (barangay_id,
-# case_id, occurred_date, parent_admin_id, etc.) -- including the signed
-# token payload below. This used to be translated to/from camelCase
-# (barangayId, caseId...) which caused a silent mismatch once some frontend
-# views were updated to read snake_case and others weren't. There is now
-# exactly one shape, everywhere. If any .tsx file still sends/reads
-# camelCase field names, it needs to be updated to match -- see the list of
-# files already aligned in this pass: AdminUsersView, DevteamView,
-# HistoryView, RecordsView, Sidebar, CameraManagement.
 
 def issue_token(user_row: dict) -> str:
     payload = {
@@ -94,17 +100,19 @@ def require_role(payload: dict, allowed_roles: set):
     if payload["role"] not in allowed_roles:
         raise HTTPException(status_code=403, detail=f"'{payload['role']}' accounts cannot do this")
 
-# Safe folder verification tracking routines anchored to workspace root
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, sys_config["database"]["path"]))
-LOGS_DIR = os.path.abspath(os.path.join(BASE_DIR, os.path.dirname(sys_config["monitoring"]["log_file"])))
+DATA_DIR = os.path.abspath(os.path.join(WRITABLE_DIR, sys_config["database"]["path"]))
+LOGS_DIR = os.path.abspath(os.path.join(WRITABLE_DIR, os.path.dirname(sys_config["monitoring"]["log_file"])))
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_final.sql")
+if not os.path.exists(SCHEMA_PATH):
+    SCHEMA_PATH = os.path.join(BASE_DIR, "schema_final.sql")
+
 ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
-RECORDINGS_DIR = os.path.join(BASE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
-SCREENSHOTS_DIR = os.path.join(BASE_DIR, "static", "screenshots")
+RECORDINGS_DIR = os.path.join(WRITABLE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
+SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
@@ -123,7 +131,6 @@ if sys_config["security"]["enable_cors"]:
         allow_headers=["*"],
     )
 
-# --- WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -151,7 +158,6 @@ manager = ConnectionManager()
 app.mount("/static/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 app.mount("/static/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
 
-# --- DATABASE INITIALIZATION ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -165,7 +171,7 @@ def init_db():
             )
         conn.executescript(open(SCHEMA_PATH).read())
         conn.commit()
-        print(f"💾 [DATABASE] Applied schema_final.sql to fresh database at {DB_PATH}")
+        print(f"[DATABASE] Applied schema_final.sql to fresh database at {DB_PATH}")
 
     cursor.execute("SELECT id, password FROM users")
     for row_id, pw in cursor.fetchall():
@@ -183,7 +189,7 @@ def init_db():
         )
         conn.commit()
         print("=" * 60)
-        print("🔑 [BOOTSTRAP] First-run DEVTEAM account created:")
+        print("[BOOTSTRAP] First-run DEVTEAM account created:")
         print(f"    username: devteam")
         print(f"    password: {bootstrap_password}")
         print("    Save this now -- it will not be shown again.")
@@ -208,7 +214,6 @@ def init_db():
 
 init_db()
 
-# --- NVIDIA SHADOWPLAY & 24/7 BACKGROUND RECORDING SYSTEMS ---
 class VideoRecordingEngine:
     def __init__(self, buffer_seconds=15, fps=20):
         self.buffer_size = buffer_seconds * fps
@@ -296,12 +301,6 @@ class VideoRecordingEngine:
 recorder_engine = VideoRecordingEngine()
 recorder_engine.start_workers()
 
-# --- DATA SCHEMAS ---
-# All request bodies now use the same snake_case field names as the
-# responses -- e.g. barangay_id, case_id, occurred_time -- so the frontend
-# doesn't have to remember two different cases depending on whether it's
-# reading or writing. If page.tsx / CrimeReportsView.tsx still POST
-# camelCase bodies, they need to be updated to match these field names.
 ADMIN_ROLES = {"PRECINCT_CAPTAIN", "BARANGAY_CAPTAIN"}
 STANDARD_ROLES = {"POLICE", "BARANGAY"}
 ADMIN_CREATES_ROLE = {"PRECINCT_CAPTAIN": "POLICE", "BARANGAY_CAPTAIN": "BARANGAY"}
@@ -406,11 +405,6 @@ class DevteamCreateUser(BaseModel):
     parent_admin_id: Optional[int] = None
     permissions: Optional[dict] = None
 
-
-# --- SERIALIZATION HELPERS ---
-# Every one of these returns snake_case keys matching the DB columns 1:1.
-# This is now the ONLY place a schema change needs to be reflected.
-
 def _row_to_incident_dict(inc_row, details_row, vis_row) -> dict:
     d = dict(inc_row)
     details = dict(details_row) if details_row else {}
@@ -453,8 +447,6 @@ def _row_to_user_dict(cursor, row) -> dict:
         "permissions": _user_permissions_json(cursor, d["id"]),
     }
 
-
-# --- PERSISTENT CAMERA ROUTINES ---
 @app.get("/api/cameras")
 async def get_cameras(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -477,10 +469,6 @@ def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
     return cursor.fetchone() is not None
 
 def require_permission(cursor, payload: dict, key: str):
-    """Server-side gate matching the permission checkboxes in
-    AdminUsersView.tsx / DevteamView.tsx. DEVTEAM and admin tiers always
-    pass. Standard POLICE/BARANGAY accounts must have the key granted in
-    user_permissions."""
     if payload["role"] == "DEVTEAM" or payload["role"] in ADMIN_ROLES:
         return
     if not _has_permission(cursor, payload["id"], key, payload["role"]):
@@ -516,8 +504,6 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
     conn.close()
     return {"status": "deleted"}
 
-
-# --- HIERARCHICAL INCIDENT FETCH ---
 @app.get("/api/incidents")
 async def get_incidents(authorization: Optional[str] = Header(None), filter_barangay_id: Optional[str] = "all"):
     payload = require_auth(authorization)
@@ -544,9 +530,6 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
         )
         redact = True
     else:
-        # POLICE / PRECINCT_CAPTAIN / DEVTEAM see full detail. filter_barangay_id
-        # only ever narrows the result set further for these already-
-        # privileged roles -- it cannot be used to escalate.
         if filter_barangay_id and filter_barangay_id.lower() != "all":
             cursor.execute(
                 "SELECT * FROM incidents WHERE LOWER(barangay_id) = ? ORDER BY occurred_date DESC, occurred_time DESC",
@@ -565,7 +548,7 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
         vis = cursor.fetchone()
         record = _row_to_incident_dict(inc, details, vis)
         if redact:
-            record["narrative"] = "🔒 [RESTRICTED] Investigative logs masked for non-police profiles."
+            record["narrative"] = "[RESTRICTED] Investigative logs masked for non-police profiles."
             record["nature_of_call"] = "CONFIDENTIAL // RESTRICTED"
             record["arrival_reason"] = "CONFIDENTIAL // RESTRICTED"
             record["additional_officers"] = "CONFIDENTIAL"
@@ -607,10 +590,6 @@ async def add_incident(incident: IncidentSchema, authorization: Optional[str] = 
 
 @app.post("/api/ai_trigger")
 async def ai_trigger(data: AiTriggerSchema):
-    # Deliberately NOT behind require_auth -- called by the local AI
-    # pipeline (main.py on 8001), not a browser. Protected only by being
-    # localhost-reachable in this deployment; give it its own service
-    # credential if this backend is ever exposed beyond localhost.
     incident_id = data.id if data.id else str(uuid.uuid4())[:8]
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     now = datetime.now()
@@ -655,9 +634,9 @@ async def panic_trigger(data: PanicSchema):
         cap_res = requests.post(AI_PIPELINE_CAPTURE_URL, json={"incident_id": incident_id}, timeout=2.0)
         if cap_res.ok:
             screenshot_url = cap_res.json().get("screenshot_path") or ""
-            print(f"🚨 [PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
+            print(f"[PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
     except Exception as e:
-        print(f"⚠️  [PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
+        print(f"[PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -758,7 +737,7 @@ async def siren_activate(authorization: Optional[str] = Header(None)):
     try:
         requests.post(f"http://{ESP32_IP}/siren/on", timeout=2.0)
     except Exception as e:
-        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+        print(f"[SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
     return {"status": "activate_sent"}
 
 @app.post("/siren/deactivate")
@@ -771,7 +750,7 @@ async def siren_deactivate(authorization: Optional[str] = Header(None)):
     try:
         requests.post(f"http://{ESP32_IP}/siren/off", timeout=2.0)
     except Exception as e:
-        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+        print(f"[SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
     return {"status": "deactivate_sent"}
 
 @app.websocket("/ws")
@@ -783,7 +762,6 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
-# --- VIDEO RECS MODULES ---
 @app.get("/api/records")
 async def get_video_records(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -832,7 +810,6 @@ async def update_record_notes(record_id: str, data: RecordNotesSchema, authoriza
         raise HTTPException(status_code=404, detail="Record not found")
     return {"status": "updated", "id": record_id}
 
-# --- AUTH SECTOR CORES ---
 @app.post("/api/signup")
 async def signup(user: UserSignup):
     role = user.role.upper()
@@ -924,12 +901,8 @@ async def get_me(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     return {"user": payload}
 
-# --- DEVTEAM: LOCATION APPROVAL ---
 @app.get("/api/devteam/locations")
 async def list_locations(authorization: Optional[str] = Header(None), status: Optional[str] = None):
-    """Includes the requesting captain's username/role/assignment so DevTeam
-    has enough to actually verify the person before approving -- a bare
-    location name + status was not enough to tell who's asking."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
     conn = sqlite3.connect(DB_PATH)
@@ -985,7 +958,6 @@ async def reject_location(barangay_id: str, data: LocationDecisionSchema, author
     await manager.broadcast({"channel": "locations", "event": "location_rejected", "barangay_id": barangay_id})
     return {"status": "rejected", "barangay_id": barangay_id}
 
-# --- ADMIN: MANAGE YOUR OWN USERS ONLY ---
 @app.get("/api/admin/users")
 async def list_my_users(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -1039,14 +1011,6 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
 
 @app.post("/api/devteam/users")
 async def devteam_create_user(new_user: DevteamCreateUser, authorization: Optional[str] = Header(None)):
-    """Full-power account creation -- DevTeam can create ANY role
-    (PRECINCT_CAPTAIN, BARANGAY_CAPTAIN, POLICE, BARANGAY) directly,
-    bypassing the self-signup approval flow, and grant it a permission
-    set from the same permission tree admins use for their sub-accounts.
-    A captain role still enforces the one-per-location unique index at
-    the DB level. Standard roles (POLICE/BARANGAY) can optionally be
-    slotted under an existing admin via parent_admin_id so they show up
-    under that admin's directory entry."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
@@ -1073,8 +1037,6 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
 
         parent_id = new_user.parent_admin_id
         if role in STANDARD_ROLES and parent_id is None:
-            # auto-attach to whichever captain already runs this location,
-            # so the account shows up nested under someone in the directory
             captain_role = "PRECINCT_CAPTAIN" if role == "POLICE" else "BARANGAY_CAPTAIN"
             cursor.execute(
                 "SELECT id FROM users WHERE barangay_id = ? AND role = ?",
@@ -1163,7 +1125,6 @@ async def delete_my_user(user_id: int, authorization: Optional[str] = Header(Non
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
 
-# --- DEVTEAM: FULL POWER OVER ANY USER (EDIT / DELETE) ---
 @app.patch("/api/devteam/users/{user_id}")
 async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -1216,10 +1177,6 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
 
 @app.delete("/api/devteam/users/{user_id}")
 async def devteam_delete_user(user_id: int, authorization: Optional[str] = Header(None)):
-    """Full-power delete -- devteam can remove a captain (and, via ON DELETE
-    CASCADE on parent_admin_id, that captain's own sub-accounts lose their
-    parent link and become unassigned rather than vanish silently) or any
-    single standard/sub-admin account directly."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
@@ -1240,7 +1197,6 @@ async def devteam_delete_user(user_id: int, authorization: Optional[str] = Heade
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
 
-# --- DEVTEAM: FULL SYSTEM VISIBILITY (READ-ONLY OVERVIEW) ---
 @app.get("/api/devteam/overview")
 async def devteam_overview(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)

@@ -65,13 +65,42 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. DYNAMIC CONFIGURATION MATRIX LOADER
 # ──────────────────────────────────────────────────────────────────────────────
+# BASE_DIR is this script's own folder (e.g. resources/maincode on a
+# packaged build) -- READ-ONLY on a per-machine install without admin
+# rights. config.json ships one level up from there (workspace/resources
+# root) and is read fine, but ANYTHING WRITTEN back (camera index changes
+# via /set_camera_index, etc.) must go to a writable location instead, or
+# that write throws, the process dies, port 8001 never opens, and
+# Electron's waitForPort(8001) times out -- which is what surfaces to the
+# user as "Timed out waiting on port 8000" once the backend also fails
+# for the identical reason.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(os.path.dirname(BASE_DIR), "config.json")
-if not os.path.exists(CONFIG_PATH):
-    sys.exit(f"❌ Central configuration file 'config.json' not found at workspace root: {CONFIG_PATH}")
+SHIPPED_CONFIG_PATH = os.path.join(os.path.dirname(BASE_DIR), "config.json")
+if not os.path.exists(SHIPPED_CONFIG_PATH):
+    sys.exit(f"❌ Central configuration file 'config.json' not found at workspace root: {SHIPPED_CONFIG_PATH}")
 
-with open(CONFIG_PATH, 'r') as f:
+with open(SHIPPED_CONFIG_PATH, 'r') as f:
     sys_config = json.load(f)
+
+WRITABLE_DIR = os.environ.get("ECOVISION_WRITABLE_DIR")
+if not WRITABLE_DIR:
+    # Standalone / dev-mode fallback -- always writable regardless of
+    # where this script itself lives.
+    WRITABLE_DIR = os.path.join(os.path.expanduser("~"), "EcoVisionSentinelData")
+os.makedirs(WRITABLE_DIR, exist_ok=True)
+
+# CONFIG_PATH from here on refers to the WRITABLE copy -- this is what
+# gets read back in and rewritten by /set_camera_index below. If backend.py
+# already created one (it starts first in electron/main.js), prefer that
+# so both processes agree on secret_key / persisted settings; otherwise
+# seed it from the shipped copy.
+CONFIG_PATH = os.path.join(WRITABLE_DIR, "config.json")
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, 'r') as f:
+        sys_config = json.load(f)
+else:
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(sys_config, f, indent=2)
 
 POSE_IMGSZ          = 416
 WEAPON_IMGSZ        = 416
@@ -197,18 +226,20 @@ print(f"📡 Dynamic Stream server live → http://localhost:8001/video_feed")
 # 4. HARDWARE DISCOVERY & MODEL INITIALIZATION MATRIX
 # ──────────────────────────────────────────────────────────────────────────────
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
-WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "weights")
+# PROJECT_ROOT now points at the WRITABLE dir for anything written at
+# runtime (screenshots). Model weights still ship read-only alongside the
+# code, so WEIGHTS_DIR is resolved separately against the shipped
+# resources root, not PROJECT_ROOT.
+SHIPPED_ROOT = os.path.dirname(CURRENT_DIR)
+PROJECT_ROOT = WRITABLE_DIR
+WEIGHTS_DIR = os.path.join(SHIPPED_ROOT, "weights")
 
 # IMPORTANT: these must resolve to the EXACT same physical folders that
 # backend.py serves via StaticFiles, or the frontend gets 404s on every
 # screenshot/clip no matter how correctly the URLs are built.
-# backend.py computes: BASE_DIR = dirname(dirname(backend.py))  -> project root
-#   SCREENSHOTS_DIR = BASE_DIR/static/screenshots
-#   RECORDINGS_DIR  = BASE_DIR/<config.database.recordings_subdir, default "recordings">
-# main.py's PROJECT_ROOT (dirname of this file's folder) IS that same project
-# root, so anchor on PROJECT_ROOT here too -- NOT on CURRENT_DIR (which is
-# main.py's own subfolder, one level too deep).
+# backend.py now serves both out of ECOVISION_WRITABLE_DIR (see backend.py's
+# WRITABLE_DIR), so main.py must write to that exact same writable root too
+# -- NOT to the (possibly read-only) SHIPPED_ROOT.
 SCREENSHOTS_DIR = os.path.join(PROJECT_ROOT, "static", "screenshots")
 
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
@@ -609,8 +640,9 @@ class CameraIndexRequest(BaseModel):
 def set_camera_index(payload: CameraIndexRequest):
     """Lets the Monitor view's camera-index picker swap the live capture
     device (e.g. OBS Virtual Camera vs. a webcam) without restarting the
-    whole AI process. Persists back to config.json so the choice survives
-    the next launch too."""
+    whole AI process. Persists back to the WRITABLE config.json (not the
+    shipped/possibly-read-only one) so the choice survives the next
+    launch too."""
     global camera_idx
     camera_idx = payload.index
     ok = _reopen_camera()

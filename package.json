@@ -1,6 +1,6 @@
 {
   "name": "ecovision-security-sentinel",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "Advanced Real-Time Security Monitoring & Threat Detection System",
   "private": true,
   "main": "electron/main.js",
@@ -12,6 +12,7 @@
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",
     "desktop": "electron .",
+    "preapp:build": "powershell -Command \"taskkill /F /IM EcoVisionSentinel.exe /IM electron.exe 2>$null; exit 0\"",
     "app:build": "next build && electron-builder"
   },
   "dependencies": {
@@ -55,13 +56,23 @@
   "build": {
     "appId": "com.ecovision.sentinel",
     "productName": "EcoVisionSentinel",
+    "asarUnpack": [
+      "node_modules/next/**/*",
+      ".next/**/*"
+    ],
     "win": {
       "target": [
-        { "target": "portable", "arch": ["x64"] }
+        { "target": "nsis", "arch": ["x64"] }
       ]
     },
-    "portable": {
-      "artifactName": "EcoVisionSentinel-${version}-portable-win64.exe"
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "EcoVisionSentinel-Setup-${version}.exe"
     },
     "files": [
       "electron/**/*",
@@ -71,11 +82,15 @@
       "next.config.*",
       "package.json"
     ],
-    "extraFiles": [
-      { "from": "maincode", "to": "maincode" },
+    "extraResources": [
+      { "from": "app/backend.py", "to": "backend/backend.py" },
+      { "from": "app/schema_final.sql", "to": "backend/schema_final.sql" },
+      { "from": "maincode/main.py", "to": "maincode/main.py" },
+      { "from": "maincode/robbery_vandalism.py", "to": "maincode/robbery_vandalism.py" },
+      { "from": "maincode/x3d_violence_detector.py", "to": "maincode/x3d_violence_detector.py" },
+      { "from": "maincode/pose_landmarker_heavy.task", "to": "maincode/pose_landmarker_heavy.task" },
       { "from": "weights", "to": "weights" },
       { "from": "config.json", "to": "config.json" },
-      { "from": "setup.bat", "to": "setup.bat" },
       { "from": "requirements.txt", "to": "requirements.txt" }
     ]
   }

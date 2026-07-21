@@ -3,63 +3,255 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>EcoVision Sentinel — First-Time Setup</title>
+<title>EcoVision Sentinel — Setup</title>
 <style>
+  :root {
+    --bg: #0a0d13;
+    --border: rgba(255,255,255,0.08);
+    --accent: #10b981;
+    --text: #e6edf3;
+    --text-dim: #5b6572;
+    --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+
   body {
     margin: 0; height: 100vh; display: flex; flex-direction: column;
-    background: #0B0F17; color: #e2e8f0; font-family: -apple-system, "Segoe UI", sans-serif;
-    padding: 32px; box-sizing: border-box;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    padding: 40px;
   }
-  h1 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.1em; margin: 0 0 4px; }
-  p.sub { font-size: 12px; color: #64748b; margin: 0 0 24px; }
-  .bar-track { width: 100%; height: 8px; background: rgba(255,255,255,0.05); border-radius: 999px; overflow: hidden; }
-  .bar-fill { height: 100%; width: 0%; background: #10b981; box-shadow: 0 0 12px #10b981; transition: width 0.3s ease; }
-  .status { font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.08em; color: #10b981; margin: 12px 0 20px; }
+
+  /* ---- Step 1: intro / picker ---- */
+  #stepIntro { display: flex; flex-direction: column; flex: 1; }
+
+  .logo {
+    width: 40px; height: 40px; border-radius: 11px;
+    background: linear-gradient(135deg, var(--accent), #059669);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 20px rgba(16,185,129,0.3);
+    margin-bottom: 20px;
+  }
+  .logo svg { width: 20px; height: 20px; }
+
+  h1 { font-size: 17px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .subtitle { font-size: 12.5px; color: var(--text-dim); margin: 0 0 32px; line-height: 1.5; }
+
+  .field-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 8px;
+  }
+
+  .path-row {
+    display: flex; gap: 8px; margin-bottom: 4px;
+  }
+  .path-input {
+    flex: 1; background: #12161f; border: 1px solid var(--border);
+    border-radius: 9px; padding: 11px 13px; font-size: 11.5px; color: var(--text);
+    font-family: "SF Mono", Consolas, monospace; outline: none;
+    text-overflow: ellipsis;
+  }
+  .path-input::placeholder { color: #3a4150; }
+  .btn-secondary {
+    background: #12161f; color: var(--text); border: 1px solid var(--border);
+    padding: 11px 16px; border-radius: 9px; font-size: 11px; font-weight: 600;
+    cursor: pointer; white-space: nowrap; transition: all 0.15s ease;
+  }
+  .btn-secondary:hover { border-color: rgba(16,185,129,0.35); color: var(--accent); }
+
+  .hint { font-size: 10.5px; color: var(--text-dim); margin-top: 8px; margin-bottom: auto; }
+
+  .btn-primary {
+    background: var(--accent); color: #04140e; border: none; padding: 14px;
+    border-radius: 11px; font-size: 12px; font-weight: 700;
+    cursor: pointer; width: 100%;
+    box-shadow: 0 8px 22px rgba(16,185,129,0.22);
+    transition: transform 0.1s ease, box-shadow 0.15s ease;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 10px 26px rgba(16,185,129,0.3); }
+  .btn-primary:active { transform: translateY(0); }
+  .btn-primary:disabled { opacity: 0.4; cursor: default; transform: none; box-shadow: none; }
+
+  /* ---- Step 2: progress ---- */
+  #stepProgress { display: none; flex-direction: column; flex: 1; }
+
+  .progress-header { margin-bottom: 28px; }
+  .progress-title { font-size: 15px; font-weight: 700; margin: 0 0 4px; }
+  .install-path-line {
+    font-size: 10.5px; color: var(--text-dim); font-family: "SF Mono", Consolas, monospace;
+  }
+
+  .status-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .status-text {
+    font-size: 12px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .status-text.error { color: var(--red); }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 8px var(--accent); animation: pulse 1.3s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  .status-text.error .dot { background: var(--red); box-shadow: 0 0 8px var(--red); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .pct { font-size: 11px; color: var(--text-dim); font-family: "SF Mono", Consolas, monospace; }
+
+  .bar-track {
+    width: 100%; height: 6px; background: #12161f;
+    border-radius: 999px; overflow: hidden; margin-bottom: 22px;
+  }
+  .bar-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #059669, var(--accent));
+    transition: width 0.4s ease; border-radius: 999px;
+  }
+
+  .log-toggle {
+    background: none; border: none; color: var(--text-dim); font-size: 10.5px;
+    cursor: pointer; padding: 0; margin-bottom: 10px; text-align: left;
+    display: flex; align-items: center; gap: 5px; width: fit-content;
+  }
+  .log-toggle:hover { color: var(--text); }
+  .log-toggle svg { width: 10px; height: 10px; transition: transform 0.15s ease; }
+  .log-toggle.open svg { transform: rotate(90deg); }
+
   .log {
-    flex: 1; background: #000; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;
-    padding: 12px; font-family: monospace; font-size: 11px; color: #94a3b8;
-    overflow-y: auto; white-space: pre-wrap;
+    display: none; flex: 1; background: #000; border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; font-family: "SF Mono", Consolas, monospace; font-size: 10px;
+    line-height: 1.6; color: #7d8898;
+    overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    margin-bottom: 16px;
   }
-  .error { color: #f87171; }
-  button {
-    margin-top: 16px; background: #10b981; color: #000; border: none; padding: 10px 20px;
-    border-radius: 8px; font-size: 11px; font-weight: bold; text-transform: uppercase;
-    letter-spacing: 0.08em; cursor: pointer; display: none;
-  }
+  .log.open { display: block; }
+  .log::-webkit-scrollbar { width: 5px; }
+  .log::-webkit-scrollbar-thumb { background: #232838; border-radius: 999px; }
+  .log-line.err { color: var(--red); }
+
+  .retry-btn { display: none; margin-top: auto; }
 </style>
 </head>
 <body>
-  <h1>EcoVision Sentinel — First-Time Setup</h1>
-  <p class="sub">Installing Python dependencies (including GPU-accelerated PyTorch) matched to this machine. This only happens once.</p>
-  <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
-  <div class="status" id="status">Starting…</div>
-  <div class="log" id="log"></div>
-  <button id="retryBtn">Retry Setup</button>
+
+  <!-- STEP 1 -->
+  <div id="stepIntro">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2L4 5.5V11c0 5.2 3.4 9.9 8 11 4.6-1.1 8-5.8 8-11V5.5L12 2z" fill="#04140e"/>
+      </svg>
+    </div>
+    <h1>Set up EcoVision Sentinel</h1>
+    <p class="subtitle">This installs a Python environment and AI model dependencies. It only needs to run once.</p>
+
+    <div class="field-label">Install location</div>
+    <div class="path-row">
+      <input type="text" class="path-input" id="pathInput" readonly placeholder="Default location" />
+      <button class="btn-secondary" id="browseBtn">Choose Folder</button>
+    </div>
+    <p class="hint" id="pathHint">A folder named "EcoVisionSentinel" will be created at this location.</p>
+
+    <button class="btn-primary" id="startBtn">Continue</button>
+  </div>
+
+  <!-- STEP 2 -->
+  <div id="stepProgress">
+    <div class="progress-header">
+      <p class="progress-title">Setting up…</p>
+      <p class="install-path-line" id="installPathLine"></p>
+    </div>
+
+    <div class="status-row">
+      <span class="status-text" id="status"><span class="dot"></span>Starting</span>
+      <span class="pct" id="pct">0%</span>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+
+    <button class="log-toggle" id="logToggle">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      Show details
+    </button>
+    <div class="log" id="log"></div>
+
+    <button class="btn-primary retry-btn" id="retryBtn">Retry Setup</button>
+  </div>
 
 <script>
-  const bar = document.getElementById('bar');
+  const stepIntro = document.getElementById('stepIntro');
+  const stepProgress = document.getElementById('stepProgress');
+
+  const pathInput = document.getElementById('pathInput');
+  const pathHint = document.getElementById('pathHint');
+  const browseBtn = document.getElementById('browseBtn');
+  const startBtn = document.getElementById('startBtn');
+
+  const installPathLine = document.getElementById('installPathLine');
   const status = document.getElementById('status');
+  const pct = document.getElementById('pct');
+  const bar = document.getElementById('bar');
   const log = document.getElementById('log');
+  const logToggle = document.getElementById('logToggle');
   const retryBtn = document.getElementById('retryBtn');
 
-  window.setupBridge.onProgress((pct, label) => {
-    bar.style.width = pct + '%';
-    status.textContent = label;
+  let selectedPath = '';
+
+  browseBtn.addEventListener('click', async () => {
+    const dir = await window.setupBridge.selectDirectory();
+    if (dir) {
+      selectedPath = dir;
+      pathInput.value = dir;
+      pathHint.textContent = 'Files will be installed to this folder.';
+    }
+  });
+
+  logToggle.addEventListener('click', () => {
+    const open = log.classList.toggle('open');
+    logToggle.classList.toggle('open', open);
+    logToggle.lastChild.textContent = open ? ' Hide details' : ' Show details';
+  });
+
+  function appendLog(text, isErr) {
+    const line = document.createElement('div');
+    line.className = 'log-line' + (isErr ? ' err' : '');
+    line.textContent = (isErr ? '✖ ' : '') + text;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function goToProgress() {
+    stepIntro.style.display = 'none';
+    stepProgress.style.display = 'flex';
+  }
+
+  startBtn.addEventListener('click', () => {
+    goToProgress();
+    window.setupBridge.startSetup(selectedPath);
+  });
+
+  window.setupBridge.onInstallPath((p) => {
+    installPathLine.textContent = p;
+  });
+
+  window.setupBridge.onProgress((p, label) => {
+    bar.style.width = p + '%';
+    pct.textContent = p + '%';
+    status.innerHTML = '<span class="dot"></span>' + label;
   });
 
   window.setupBridge.onLog((line) => {
-    log.textContent += line + '\n';
-    log.scrollTop = log.scrollHeight;
+    appendLog(line, false);
   });
 
   window.setupBridge.onError((msg) => {
-    status.textContent = 'Setup failed';
     status.classList.add('error');
-    const div = document.createElement('div');
-    div.className = 'error';
-    div.textContent = '\n✖ ' + msg;
-    log.appendChild(div);
-    retryBtn.style.display = 'inline-block';
+    status.innerHTML = '<span class="dot"></span>Setup failed';
+    appendLog(msg, true);
+    log.classList.add('open');
+    logToggle.classList.add('open');
+    logToggle.lastChild.textContent = ' Hide details';
+    retryBtn.style.display = 'block';
   });
 
   retryBtn.addEventListener('click', () => {
@@ -67,7 +259,8 @@
     status.classList.remove('error');
     log.textContent = '';
     bar.style.width = '0%';
-    window.setupBridge.retry();
+    pct.textContent = '0%';
+    window.setupBridge.retry(selectedPath);
   });
 </script>
 </body>
