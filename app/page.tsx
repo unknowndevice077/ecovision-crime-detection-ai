@@ -4,12 +4,14 @@ import CrimeReportsView from './components/CrimeReportsView';
 import HistoryView from './components/dashboard/HistoryView';
 import RecordsView from './components/RecordsView';
 import ProfileView from './components/ProfileView';
+import AdminUsersView from './components/dashboard/AdminUsersView';
+import DevteamView from './components/dashboard/DevteamView';
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { 
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin, 
   ShieldAlert, Maximize2, X, Sun, User,
-  BatteryMedium, Thermometer, Zap, Plus, Film, Clock
+  BatteryMedium, Thermometer, Zap, Plus, Film, Clock, Users, Terminal
 } from 'lucide-react';
 
 const CrimeReportsViewAny = CrimeReportsView as any;
@@ -57,6 +59,9 @@ export default function EcoVisionSentinel() {
     } else {
       const parsedUser = JSON.parse(savedUser);
       setCurrentUser(parsedUser);
+      if (parsedUser.role === 'DEVTEAM') {
+        setActiveTab('devteam'); // DEVTEAM has no Monitor/dashboard view -- lands on the console
+      }
       fetchCameras(parsedUser);
     }
   }, [router]);
@@ -291,7 +296,7 @@ const fetchCameras = async (userObj: any) => {
           </div>
 
           <nav className="space-y-1.5 flex-1 overflow-y-auto custom-scrollbar pr-1">
-            {currentUser.role === 'POLICE' && (
+            {(currentUser.role === 'POLICE' || currentUser.role === 'PRECINCT_CAPTAIN') && (
               <>
                 <NavItem label="Monitor" icon={<Activity size={15}/>} active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
                 <NavItem label="Map Layout" icon={<MapPin size={15}/>} active={activeTab === 'crime-reports'} onClick={() => setActiveTab('crime-reports')} badge={sqlReportCount} />
@@ -299,12 +304,18 @@ const fetchCameras = async (userObj: any) => {
                 <NavItem label="Crime History" icon={<AlertOctagon size={15}/>} active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} badge={alerts.filter(a => a.status === 'pending').length} />
               </>
             )}
-            {currentUser.role === 'BARANGAY' && (
+            {(currentUser.role === 'BARANGAY' || currentUser.role === 'BARANGAY_CAPTAIN') && (
                <>
                  <NavItem label="Monitor" icon={<Activity size={15}/>} active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
                  <NavItem label="Add Cameras" icon={<Video size={15}/>} active={activeTab === 'cameras'} onClick={() => setActiveTab('cameras')} badge={cameras.length} />
                  <NavItem label="Hardware Status" icon={<Zap size={15}/>} active={activeTab === 'health'} onClick={() => setActiveTab('health')} />
                </>
+            )}
+            {(currentUser.role === 'PRECINCT_CAPTAIN' || currentUser.role === 'BARANGAY_CAPTAIN') && (
+              <NavItem label="Manage Users" icon={<Users size={15}/>} active={activeTab === 'manage-users'} onClick={() => setActiveTab('manage-users')} />
+            )}
+            {currentUser.role === 'DEVTEAM' && (
+              <NavItem label="DevTeam Console" icon={<Terminal size={15}/>} active={activeTab === 'devteam'} onClick={() => setActiveTab('devteam')} />
             )}
           </nav>
         </div>
@@ -445,6 +456,10 @@ const fetchCameras = async (userObj: any) => {
                 </button>
               </div>
             )}
+
+            {activeTab === 'manage-users' && <AdminUsersView />}
+
+            {activeTab === 'devteam' && <DevteamView />}
 
             {activeTab === 'profile' && <ProfileView currentUser={currentUser} time={time} onLogout={handleLogout} />}
           </div>

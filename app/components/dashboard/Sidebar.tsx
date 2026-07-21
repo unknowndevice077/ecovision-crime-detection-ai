@@ -4,12 +4,16 @@ import React from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { 
   Shield, AlertOctagon, Activity, Video, MapPin, 
-  Zap, LogOut, Film, BatteryMedium
+  Zap, LogOut, Film, BatteryMedium, Users, Wifi, WifiOff
 } from 'lucide-react';
+import { usePermissions } from '../../hooks/usePermissions';
+import { useWebSocketContext } from '../../context/WebSocketContext';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type SidebarProps = {
   currentUser: {
-    role: 'POLICE' | 'BARANGAY';
+    role: 'DEVTEAM' | 'PRECINCT_CAPTAIN' | 'POLICE' | 'BARANGAY_CAPTAIN' | 'BARANGAY';
     assignment: string;
   } | null;
   sqlReportCount?: number;
@@ -36,21 +40,29 @@ export default function Sidebar({
 }: SidebarProps) {
   const router = useRouter();
   const pathname = usePathname();
+  const { can } = usePermissions();
+  const { connected } = useWebSocketContext();
 
-  if (!currentUser) return null;
+  if (!currentUser || currentUser.role === 'DEVTEAM') return null;
 
   const handleLogout = () => {
+    const token = localStorage.getItem('ecoToken');
+    fetch(`${API_URL}/api/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    }).catch(() => {}); // stateless tokens -- best-effort, logout proceeds regardless
     localStorage.removeItem('ecoUser');
+    localStorage.removeItem('ecoToken');
     router.push('/loginpage/login');
   };
 
-  // Synchronize layout highlights accurately across static routes and modular views
   const isDashboardActive = activeTab === 'dashboard' || pathname === '/';
   const isMapActive = activeTab === 'crime-reports' || pathname === '/map';
   const isRecordsActive = activeTab === 'records' || pathname === '/records';
   const isHistoryActive = activeTab === 'alerts' || pathname === '/history';
   const isCamerasActive = activeTab === 'cameras';
   const isHealthActive = activeTab === 'health';
+  const isManageUsersActive = activeTab === 'manage-users';
 
   const changeTab = (tabName: string, fallbackRoute: string) => {
     if (setActiveTab) {
@@ -60,65 +72,89 @@ export default function Sidebar({
     }
   };
 
+  const isPoliceTier = currentUser.role === 'POLICE' || currentUser.role === 'PRECINCT_CAPTAIN';
+  const isBarangayTier = currentUser.role === 'BARANGAY' || currentUser.role === 'BARANGAY_CAPTAIN';
+  const isAdmin = currentUser.role === 'PRECINCT_CAPTAIN' || currentUser.role === 'BARANGAY_CAPTAIN';
+  // DEVTEAM never reaches this point -- it returns null above and renders
+  // its own full-viewport console instead. isElevated only needs to cover
+  // the admin tiers still routed through this sidebar.
+  const isElevated = isAdmin;
+
   return (
     <aside className="w-64 bg-[#11141b] border border-white/5 rounded-3xl flex flex-col p-6 shrink-0 shadow-2xl overflow-y-auto custom-scrollbar">
-      {/* FIXED: Dynamic telemetry style rules evaluated cleanly inside an internal stylesheet container to bypass webhint rules */}
       <style>{`
         .sidebar-battery-progress { width: ${telemetry.battery}%; }
       `}</style>
 
-      <div className="flex items-center gap-3 mb-8 pb-6 border-b border-white/5">
-        <div className="p-2 bg-emerald-500 rounded-xl">
-          <Shield className="w-5 h-5 text-[#0a0c10]" />
+      <div className="flex items-center justify-between mb-8 pb-6 border-b border-white/5">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-emerald-500 rounded-xl">
+            <Shield className="w-5 h-5 text-[#0a0c10]" />
+          </div>
+          <h1 className="text-sm font-semibold tracking-widest uppercase text-white">
+            EcoVision <span className="text-emerald-500 font-mono text-[10px]">v16.0</span>
+          </h1>
         </div>
-        <h1 className="text-sm font-semibold tracking-widest uppercase text-white">
-          EcoVision <span className="text-emerald-500 font-mono text-[10px]">v15.0</span>
-        </h1>
+        <div title={connected ? "Live connection active" : "Reconnecting..."}>
+          {connected
+            ? <Wifi size={14} className="text-emerald-500" />
+            : <WifiOff size={14} className="text-red-500 animate-pulse" />}
+        </div>
       </div>
 
       <nav className="space-y-1.5 flex-1">
-        <NavItem 
-          label="Monitor" 
-          icon={<Activity size={18}/>} 
-          active={isDashboardActive} 
-          onClick={() => changeTab('dashboard', '/')} 
+        <NavItem
+          label="Monitor"
+          icon={<Activity size={18}/>}
+          active={isDashboardActive}
+          onClick={() => changeTab('dashboard', '/')}
         />
-        
-        {/* POLICE PERMISSION LEVEL ACCESS VIEWPORT LAYER */}
-        {currentUser.role === 'POLICE' && (
+
+        {/* POLICE TIER -- standard POLICE accounts only see items their
+            admin actually granted via AdminUsersView's permissions editor.
+            PRECINCT_CAPTAIN sees everything regardless (isElevated). */}
+        {isPoliceTier && (
           <>
-            <NavItem 
-              label="Tactical Map" 
-              icon={<MapPin size={18}/>} 
-              active={isMapActive} 
-              onClick={() => changeTab('crime-reports', '/')} 
-              badge={sqlReportCount} 
-            />
-            <NavItem 
-              label="Records" 
-              icon={<Film size={18}/>} 
-              active={isRecordsActive} 
-              onClick={() => router.push('/records')} 
-            />
-            <NavItem 
-              label="Crime History" 
-              icon={<AlertOctagon size={18}/>} 
-              active={isHistoryActive} 
-              onClick={() => changeTab('alerts', '/')} 
-            />
+            {(isElevated || can('view_map')) && (
+              <NavItem 
+                label="Tactical Map" 
+                icon={<MapPin size={18}/>} 
+                active={isMapActive} 
+                onClick={() => changeTab('crime-reports', '/')} 
+                badge={sqlReportCount} 
+              />
+            )}
+            {(isElevated || can('view_records')) && (
+              <NavItem 
+                label="Records" 
+                icon={<Film size={18}/>} 
+                active={isRecordsActive} 
+                onClick={() => router.push('/records')} 
+              />
+            )}
+            {(isElevated || can('view_history')) && (
+              <NavItem 
+                label="Crime History" 
+                icon={<AlertOctagon size={18}/>} 
+                active={isHistoryActive} 
+                onClick={() => changeTab('alerts', '/')} 
+              />
+            )}
           </>
         )}
 
-        {/* BARANGAY PERMISSION LEVEL ACCESS VIEWPORT LAYER */}
-        {currentUser.role === 'BARANGAY' && (
+        {/* BARANGAY TIER */}
+        {isBarangayTier && (
           <>
-            <NavItem 
-              label="Add Cameras" 
-              icon={<Video size={18}/>} 
-              active={isCamerasActive} 
-              onClick={() => changeTab('cameras', '/')} 
-              badge={camerasCount} 
-            />
+            {(isElevated || can('manage_cameras')) && (
+              <NavItem 
+                label="Add Cameras" 
+                icon={<Video size={18}/>} 
+                active={isCamerasActive} 
+                onClick={() => changeTab('cameras', '/')} 
+                badge={camerasCount} 
+              />
+            )}
             <NavItem 
               label="Hardware Status" 
               icon={<Zap size={18}/>} 
@@ -127,10 +163,18 @@ export default function Sidebar({
             />
           </>
         )}
+
+        {isAdmin && (
+          <NavItem 
+            label="Manage Users" 
+            icon={<Users size={18}/>} 
+            active={isManageUsersActive} 
+            onClick={() => changeTab('manage-users', '/')} 
+          />
+        )}
       </nav>
 
-      {/* RE-IMPLEMENTATION: Contextualized battery overview status display */}
-      {currentUser.role === 'BARANGAY' && (
+      {isBarangayTier && (
         <div className="my-4 p-4 bg-black/20 border border-white/5 rounded-2xl space-y-3 shrink-0">
           <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-slate-400 font-bold">
             <span className="flex items-center gap-1.5"><BatteryMedium size={12}/> Charge Loop</span>
@@ -150,7 +194,7 @@ export default function Sidebar({
         <button 
           title="Sign Out" 
           onClick={handleLogout} 
-          className="w-full flex items-center gap-3 px-4 py-3 text-slate-500 hover:text-red-500 text-[10px] uppercase font-bold transition-all border border-white/5 rounded-xl"
+          className="w-full flex items-center gap-3 px-4 py-3 text-slate-500 hover:text-red-500 text-[10px] uppercase font-bold transition-all border border-white/5 rounded-xl hover:border-red-500/20"
         >
           <LogOut size={16}/> Terminate
         </button>

@@ -12,7 +12,7 @@
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",
     "desktop": "electron .",
-    "app:build": "next build && electron-builder --dir"
+    "app:build": "next build && electron-builder"
   },
   "dependencies": {
     "axios": "^1.6.2",
@@ -35,7 +35,7 @@
     "real-time"
   ],
   "author": "EcoVision Team",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"
@@ -56,21 +56,27 @@
     "appId": "com.ecovision.sentinel",
     "productName": "EcoVisionSentinel",
     "win": {
-      "target": "dir",
-      "signAndEditExecutable": false
+      "target": [
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "portable": {
+      "artifactName": "EcoVisionSentinel-${version}-portable-win64.exe"
     },
     "files": [
       "electron/**/*",
       ".next/**/*",
       "node_modules/**/*",
       "public/**/*",
+      "next.config.*",
       "package.json"
     ],
     "extraFiles": [
-      { "from": ".venv", "to": ".venv" },
       { "from": "maincode", "to": "maincode" },
       { "from": "weights", "to": "weights" },
-      { "from": "config.json", "to": "config.json" }
+      { "from": "config.json", "to": "config.json" },
+      { "from": "setup.bat", "to": "setup.bat" },
+      { "from": "requirements.txt", "to": "requirements.txt" }
     ]
   }
 }

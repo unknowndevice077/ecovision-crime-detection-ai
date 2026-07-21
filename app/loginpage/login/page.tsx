@@ -12,6 +12,7 @@ export default function LoginPage() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
     try {
       const res = await fetch("http://localhost:8000/api/login", {
         method: "POST",
@@ -20,10 +21,14 @@ export default function LoginPage() {
       });
       const data = await res.json();
       if (res.ok) {
+        // Token is a signed, server-verified session credential -- the
+        // backend checks it (and the role inside it) on every admin/devteam
+        // endpoint, rather than trusting whatever role the client claims.
         localStorage.setItem('ecoUser', JSON.stringify(data.user));
+        localStorage.setItem('ecoToken', data.token);
         router.push('/');
       } else {
-        setError("Unauthorized: Invalid Credentials");
+        setError(data.detail || "Unauthorized: Invalid Credentials");
       }
     } catch (err) {
       setError("System Offline: Check Backend Connection");
@@ -78,10 +83,13 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div className="text-center pt-4 border-t border-white/5">
-          <Link href="/loginpage/signup" className="text-[9px] text-slate-500 hover:text-emerald-500 uppercase font-bold transition-all">
-            Initialize New Operator Profile
+        <div className="text-center pt-4 border-t border-white/5 space-y-2">
+          <Link href="/loginpage/signup" className="text-[9px] text-slate-500 hover:text-emerald-500 uppercase font-bold transition-all block">
+            Initialize New Precinct / Barangay Admin Account
           </Link>
+          <p className="text-[8px] text-slate-600 font-mono">
+            Standard operator accounts are created by your admin, not here.
+          </p>
         </div>
       </div>
     </div>

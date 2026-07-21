@@ -58,7 +58,9 @@
   "security": {
     "enable_https": false,
     "enable_cors": true,
-    "cors_origins": ["*"],
+    "cors_origins": [
+      "*"
+    ],
     "rate_limit": {
       "enabled": false,
       "requests_per_minute": 100
@@ -78,5 +80,8 @@
     "esp32_support": true,
     "analytics": true,
     "export_data": true
+  },
+  "auth": {
+    "secret_key": "297cea48a44bb8bd3398f5a75109f59e2d9dfdc67d1c94494d10b6852823d1d5"
   }
 }

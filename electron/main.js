@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
@@ -23,6 +23,13 @@ const PYTHON_EXE = process.platform === "win32"
 const MAINCODE_DIR = path.join(RESOURCES_ROOT, "maincode");
 const BACKEND_SCRIPT = path.join(MAINCODE_DIR, "backend.py");
 const AI_SCRIPT       = path.join(MAINCODE_DIR, "main.py");
+const REQUIREMENTS_TXT = path.join(RESOURCES_ROOT, "requirements.txt");
+
+// System Python (NOT the venv -- used only to create the venv the first time).
+// Relies on Python being on PATH, same assumption setup.bat already makes.
+const SYSTEM_PYTHON = process.platform === "win32" ? "python" : "python3";
+
+let setupWindow = null;
 
 function spawnPython(scriptPath, cwd) {
   if (!fs.existsSync(scriptPath)) {
@@ -80,7 +87,78 @@ async function createWindow() {
   mainWindow.once("ready-to-show", () => mainWindow.show());
 }
 
-app.whenReady().then(async () => {
+function openSetupWindow() {
+  setupWindow = new BrowserWindow({
+    width: 640,
+    height: 480,
+    resizable: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      preload: path.join(__dirname, "setup-preload.js"),
+    },
+  });
+  setupWindow.loadFile(path.join(__dirname, "setup.html"));
+  return setupWindow;
+}
+
+function sendProgress(pct, label) {
+  if (setupWindow && !setupWindow.isDestroyed()) setupWindow.webContents.send("setup:progress", pct, label);
+}
+function sendLog(line) {
+  if (setupWindow && !setupWindow.isDestroyed()) setupWindow.webContents.send("setup:log", line);
+}
+function sendError(msg) {
+  if (setupWindow && !setupWindow.isDestroyed()) setupWindow.webContents.send("setup:error", msg);
+}
+
+// Runs a command and resolves/rejects on exit, streaming stdout/stderr to the setup window's log.
+function runStep(cmd, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, { cwd, windowsHide: true, shell: process.platform === "win32" });
+    proc.stdout.on("data", (d) => sendLog(d.toString().trimEnd()));
+    proc.stderr.on("data", (d) => sendLog(d.toString().trimEnd()));
+    proc.on("error", (err) => reject(err));
+    proc.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`"${cmd} ${args.join(" ")}" exited with code ${code}`));
+    });
+  });
+}
+
+async function runFirstTimeSetup() {
+  sendProgress(5, "Checking for Python...");
+  try {
+    await runStep(SYSTEM_PYTHON, ["--version"], RESOURCES_ROOT);
+  } catch {
+    throw new Error(
+      "Python was not found on your PATH. Install Python 3.11+ from python.org " +
+      "(check 'Add python.exe to PATH' during install), then relaunch EcoVision Sentinel."
+    );
+  }
+
+  sendProgress(15, "Creating Python environment...");
+  await runStep(SYSTEM_PYTHON, ["-m", "venv", ".venv"], RESOURCES_ROOT);
+
+  sendProgress(30, "Upgrading pip...");
+  await runStep(PYTHON_EXE, ["-m", "pip", "install", "--upgrade", "pip"], RESOURCES_ROOT);
+
+  sendProgress(40, "Installing dependencies (this can take several minutes)...");
+  await runStep(PYTHON_EXE, ["-m", "pip", "install", "-r", REQUIREMENTS_TXT], RESOURCES_ROOT);
+
+  sendProgress(100, "Setup complete.");
+}
+
+ipcMain.on("setup:retry", () => {
+  runFirstTimeSetup()
+    .then(() => {
+      sendProgress(100, "Setup complete. Launching...");
+      setTimeout(() => { setupWindow.close(); launchMainApp(); }, 800);
+    })
+    .catch((err) => sendError(err.message));
+});
+
+async function launchMainApp() {
   try {
     // backend.py -> port 8000, main.py's stream/AI server -> port 8001
     backendProc = spawnPython(BACKEND_SCRIPT, MAINCODE_DIR);
@@ -97,6 +175,28 @@ app.whenReady().then(async () => {
     );
     app.quit();
   }
+}
+
+app.whenReady().then(async () => {
+  // The installer no longer bundles .venv (it's a multi-GB CUDA build tied
+  // to the dev machine's exact CUDA/driver version -- shipping it pre-built
+  // risks silent runtime failures on a different GPU). Instead, on first
+  // run, install it live against *this* machine's actual GPU with a visible
+  // progress window, same steps setup.bat already does, just with a UI.
+  if (!fs.existsSync(PYTHON_EXE)) {
+    openSetupWindow();
+    setupWindow.webContents.once("did-finish-load", () => {
+      runFirstTimeSetup()
+        .then(() => {
+          sendProgress(100, "Setup complete. Launching...");
+          setTimeout(() => { setupWindow.close(); launchMainApp(); }, 800);
+        })
+        .catch((err) => sendError(err.message));
+    });
+    return;
+  }
+
+  await launchMainApp();
 });
 
 function killAll() {

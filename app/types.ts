@@ -17,11 +17,20 @@ export type Camera = {
   status: 'online' | 'offline';
 };
 
+export type UserRole = 'DEVTEAM' | 'PRECINCT_CAPTAIN' | 'POLICE' | 'BARANGAY_CAPTAIN' | 'BARANGAY';
+
 export type User = {
+  id: number;
   username: string;
-  role: 'POLICE' | 'BARANGAY';
+  role: UserRole;
+  barangayId: string;   // "Location", e.g. "cogon"
   assignment: string;
+  parentAdminId?: number | null;
+  permissions?: Record<string, boolean>;
 };
+
+export const ADMIN_ROLES: UserRole[] = ['PRECINCT_CAPTAIN', 'BARANGAY_CAPTAIN'];
+export const STANDARD_ROLES: UserRole[] = ['POLICE', 'BARANGAY'];
 
 export type Telemetry = {
   battery: number;

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoVision Sentinel — First-Time Setup</title>
+<style>
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #0B0F17; color: #e2e8f0; font-family: -apple-system, "Segoe UI", sans-serif;
+    padding: 32px; box-sizing: border-box;
+  }
+  h1 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.1em; margin: 0 0 4px; }
+  p.sub { font-size: 12px; color: #64748b; margin: 0 0 24px; }
+  .bar-track { width: 100%; height: 8px; background: rgba(255,255,255,0.05); border-radius: 999px; overflow: hidden; }
+  .bar-fill { height: 100%; width: 0%; background: #10b981; box-shadow: 0 0 12px #10b981; transition: width 0.3s ease; }
+  .status { font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.08em; color: #10b981; margin: 12px 0 20px; }
+  .log {
+    flex: 1; background: #000; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;
+    padding: 12px; font-family: monospace; font-size: 11px; color: #94a3b8;
+    overflow-y: auto; white-space: pre-wrap;
+  }
+  .error { color: #f87171; }
+  button {
+    margin-top: 16px; background: #10b981; color: #000; border: none; padding: 10px 20px;
+    border-radius: 8px; font-size: 11px; font-weight: bold; text-transform: uppercase;
+    letter-spacing: 0.08em; cursor: pointer; display: none;
+  }
+</style>
+</head>
+<body>
+  <h1>EcoVision Sentinel — First-Time Setup</h1>
+  <p class="sub">Installing Python dependencies (including GPU-accelerated PyTorch) matched to this machine. This only happens once.</p>
+  <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+  <div class="status" id="status">Starting…</div>
+  <div class="log" id="log"></div>
+  <button id="retryBtn">Retry Setup</button>
+
+<script>
+  const bar = document.getElementById('bar');
+  const status = document.getElementById('status');
+  const log = document.getElementById('log');
+  const retryBtn = document.getElementById('retryBtn');
+
+  window.setupBridge.onProgress((pct, label) => {
+    bar.style.width = pct + '%';
+    status.textContent = label;
+  });
+
+  window.setupBridge.onLog((line) => {
+    log.textContent += line + '\n';
+    log.scrollTop = log.scrollHeight;
+  });
+
+  window.setupBridge.onError((msg) => {
+    status.textContent = 'Setup failed';
+    status.classList.add('error');
+    const div = document.createElement('div');
+    div.className = 'error';
+    div.textContent = '\n✖ ' + msg;
+    log.appendChild(div);
+    retryBtn.style.display = 'inline-block';
+  });
+
+  retryBtn.addEventListener('click', () => {
+    retryBtn.style.display = 'none';
+    status.classList.remove('error');
+    log.textContent = '';
+    bar.style.width = '0%';
+    window.setupBridge.retry();
+  });
+</script>
+</body>
+</html>

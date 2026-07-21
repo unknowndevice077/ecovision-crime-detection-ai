@@ -1,20 +1,32 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  ShieldAlert, Film, Clapperboard, Edit3, Save, Play, 
+import React, { useState, useRef } from 'react';
+import {
+  ShieldAlert, Film, Clapperboard, Edit3, Save, Play,
   ListFilter, Calendar, Clock, Scissors, AlertCircle
 } from 'lucide-react';
+import { useLiveChannel } from '../context/WebSocketContext';
+import { SkeletonRow } from './dashboard/Skeleton';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+function authHeaders() {
+  const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
+  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
+// Matches backend.py's _row_to_record_dict() -- snake_case, 1:1 with the
+// video_records table columns. type is CLIP | FULL_24_7 | CRIME_CLIP per
+// schema_final.sql's CHECK constraint.
 type VideoRecord = {
   id: string;
   filename: string;
-  filePath: string;
-  timestamp: string;
+  file_path: string;
+  recorded_at: string;
   duration: string;
-  type: 'CLIP' | 'FULL_24_7';
-  associatedCrimeId?: string;
-  crimeTimeMarker?: string; 
+  type: 'CLIP' | 'FULL_24_7' | 'CRIME_CLIP';
+  associated_incident_id?: string | null;
+  crime_time_marker?: string;
   notes: string;
 };
 
@@ -26,7 +38,8 @@ export default function RecordsView() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editNotes, setEditNotes] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  
+  const [error, setError] = useState('');
+
   const [filterDate, setFilterDate] = useState("");
   const [filterCrimeType, setFilterCrimeType] = useState("ALL");
   const [startTime, setStartTime] = useState("00:00");
@@ -36,65 +49,80 @@ export default function RecordsView() {
 
   const fetchRecordsAndCrimes = async () => {
     try {
-      const recordsRes = await fetch("http://localhost:8000/api/records");
-      const crimesRes = await fetch("http://localhost:8000/api/incidents");
+      const [recordsRes, crimesRes] = await Promise.all([
+        fetch(`${API_URL}/api/records`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/incidents`, { headers: authHeaders() }),
+      ]);
       if (recordsRes.ok && crimesRes.ok) {
         setRecords(await recordsRes.json());
         setCrimes(await crimesRes.json());
+        setError('');
+      } else if (recordsRes.status === 401 || crimesRes.status === 401) {
+        setError('Session expired -- please log in again.');
+      } else {
+        setError('Failed to load records.');
       }
     } catch (e) {
       console.error("Failed to query stream archive indices:", e);
+      setError('Backend connection failure.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  useEffect(() => {
-    fetchRecordsAndCrimes();
-    const interval = setInterval(fetchRecordsAndCrimes, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  // Was setInterval(fetchRecordsAndCrimes, 5000) -- now refetches on any
+  // relevant WebSocket broadcast (new clips, incident status changes),
+  // with a slow 60s fallback poll as a safety net.
+  useLiveChannel("*", fetchRecordsAndCrimes);
 
   const handleUpdateNotes = async (id: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/records/${id}/notes`, {
+      const res = await fetch(`${API_URL}/api/records/${id}/notes`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({ notes: editNotes })
       });
       if (res.ok) {
         setEditingId(null);
         fetchRecordsAndCrimes();
+      } else {
+        setError('Could not save notes.');
       }
     } catch (e) {
       console.error("Notes field persistence update error:", e);
+      setError('Backend connection failure.');
     }
   };
 
   const handleExtractClip = async () => {
     if (!activePlayback) return;
-    console.log("🎬 [DISK HANDSHAKE SPUN] Extracting dynamic time bounds from clip: ", startTime, " to ", endTime);
     try {
-      const res = await fetch("http://localhost:8000/api/records/register_clip", {
+      const res = await fetch(`${API_URL}/api/records/register_clip`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({
           filename: `EXTRACT_${Date.now()}_${activePlayback.filename}`,
           duration: "Custom Range",
           type: "CLIP",
-          crimeTimeMarker: startTime,
-          notes: `Manually extracted sequence boundary from segment ${activePlayback.filename}.`
+          crime_time_marker: startTime,
+          notes: `Manually extracted sequence boundary from segment ${activePlayback.filename}.`,
+          associated_incident_id: activePlayback.associated_incident_id || null,
         })
       });
-      if (res.ok) fetchRecordsAndCrimes();
+      if (res.ok) {
+        fetchRecordsAndCrimes();
+      } else {
+        setError('Could not extract segment.');
+      }
     } catch (e) {
-      console.error("Handshake pipeline clipping matrix dropped:", e);
+      console.error("Clip extraction request failed:", e);
+      setError('Backend connection failure.');
     }
   };
 
   const filteredRecords = records.filter(r => {
     if (r.type !== (subView === 'CLIPS' ? 'CLIP' : 'FULL_24_7')) return false;
-    if (filterDate && !r.timestamp.includes(filterDate)) return false;
+    if (filterDate && !r.recorded_at.includes(filterDate)) return false;
     if (subView === 'CLIPS' && filterCrimeType !== 'ALL' && !r.filename.toUpperCase().includes(filterCrimeType)) return false;
     return true;
   });
@@ -120,31 +148,36 @@ export default function RecordsView() {
             </div>
           )}
         </div>
-        
-        {/* SUBVIEW TOGGLES RESIDE SAFELY ON STAGE WINDOWS HEADER GRID */}
+
         <div className="flex bg-black/40 border border-white/5 rounded-2xl p-1 gap-1">
           <button onClick={() => { setSubView('CLIPS'); setActivePlayback(null); }} className={`px-4 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all ${subView === 'CLIPS' ? 'bg-emerald-500 text-black' : 'text-slate-400 hover:text-white'}`}>Automated Clips</button>
           <button onClick={() => { setSubView('DVR'); setActivePlayback(null); }} className={`px-4 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all ${subView === 'DVR' ? 'bg-emerald-500 text-black' : 'text-slate-400 hover:text-white'}`}>24/7 Records</button>
         </div>
       </div>
 
+      {error && (
+        <div className="px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-[10px] font-bold uppercase text-red-400 text-center shrink-0">
+          {error}
+        </div>
+      )}
+
       <div className="flex-1 bg-[#11141b] border border-white/5 rounded-[2rem] p-6 shadow-2xl flex overflow-hidden min-h-0">
         <div className="grid grid-cols-12 gap-6 w-full h-full">
-          
-          {/*Surveillance Video Display Target Viewport */}
+
+          {/* Surveillance Video Display Target Viewport */}
           <div className="col-span-7 flex flex-col gap-4 h-full">
             {activePlayback ? (
               <div className="bg-black rounded-3xl border border-white/5 p-4 flex flex-col gap-4 shadow-inner relative h-full justify-center">
-                <video ref={videoRef} controls autoPlay className="w-full rounded-2xl aspect-video bg-neutral-950 shadow-2xl" src={`http://localhost:8000/static/recordings/${activePlayback.filename}`} />
-                
+                <video ref={videoRef} controls autoPlay className="w-full rounded-2xl aspect-video bg-neutral-950 shadow-2xl" src={`${API_URL}/static/recordings/${activePlayback.filename}`} />
+
                 <div className="w-full bg-white/5 h-8 rounded-xl relative overflow-hidden flex items-center px-3 border border-white/10 shrink-0">
                   <div className="absolute left-0 top-0 bottom-0 bg-emerald-500/10 w-full" />
-                  {subView === 'CLIPS' && activePlayback.crimeTimeMarker && (
+                  {subView === 'CLIPS' && activePlayback.crime_time_marker && (
                     <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 bg-red-600/90 text-white font-mono text-[9px] font-bold px-4 flex items-center animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.6)] rounded-lg h-full">
-                      <ShieldAlert size={12} className="mr-1.5 inline"/> CRIME INTERCEPT TIME: {activePlayback.crimeTimeMarker}
+                      <ShieldAlert size={12} className="mr-1.5 inline"/> CRIME INTERCEPT TIME: {activePlayback.crime_time_marker}
                     </div>
                   )}
-                  {subView === 'DVR' && crimes.filter(c => c.date === activePlayback.timestamp.split(' ')[0]).map((crime, idx) => {
+                  {subView === 'DVR' && crimes.filter(c => c.occurred_date === activePlayback.recorded_at.split(' ')[0]).map((crime, idx) => {
                     const offsetValue = Math.min(84, 15 + (idx * 22));
                     const markerId = `dvr-marker-${idx}`;
                     return (
@@ -152,8 +185,8 @@ export default function RecordsView() {
                         <style>{`
                           .${markerId} { left: ${offsetValue}%; }
                         `}</style>
-                        <div className={`absolute h-full bg-red-600/70 border-x border-red-500 px-2 text-[8px] font-mono text-white flex items-center hover:bg-red-500 z-10 cursor-help ${markerId}`} title={`[${crime.type}] Flagged at ${crime.militaryTime}`}>
-                          ⚠️ THREAT DETECT: {crime.militaryTime}
+                        <div className={`absolute h-full bg-red-600/70 border-x border-red-500 px-2 text-[8px] font-mono text-white flex items-center hover:bg-red-500 z-10 cursor-help ${markerId}`} title={`[${crime.type}] Flagged at ${crime.occurred_time}`}>
+                          ⚠️ THREAT DETECT: {crime.occurred_time}
                         </div>
                       </React.Fragment>
                     );
@@ -185,7 +218,9 @@ export default function RecordsView() {
           {/* Incident List Records Track metadata Directory column */}
           <div className="col-span-5 flex flex-col overflow-y-auto custom-scrollbar gap-3 h-full pr-1">
             {isLoading ? (
-              <div className="h-48 flex items-center justify-center font-mono text-[10px] uppercase text-slate-500 tracking-widest animate-pulse">Syncing tracks file index...</div>
+              <div className="space-y-3">
+                {Array.from({ length: 4 }).map((_, i) => <SkeletonRow key={i} />)}
+              </div>
             ) : filteredRecords.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center border border-dashed border-white/5 rounded-3xl p-8 opacity-20 text-slate-500">
                 <AlertCircle size={32} className="mb-2"/>
@@ -197,7 +232,7 @@ export default function RecordsView() {
                   <div className="flex justify-between items-start gap-2">
                     <div className="min-w-0">
                       <h4 className="text-xs font-bold text-white truncate font-mono">{track.filename}</h4>
-                      <span className="text-[9px] font-mono text-slate-500 block mt-1">Logged: {track.timestamp} // Length: {track.duration}</span>
+                      <span className="text-[9px] font-mono text-slate-500 block mt-1">Logged: {track.recorded_at} // Length: {track.duration}</span>
                     </div>
                     <button title="Play Track Stream" onClick={() => setActivePlayback(track)} className="p-2 bg-emerald-500 text-black rounded-xl hover:bg-emerald-400 transition-all shadow-md shrink-0"><Play size={12}/></button>
                   </div>
