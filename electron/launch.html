@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoVision Sentinel — Starting</title>
+<style>
+  :root {
+    --bg: #0a0d13; --border: rgba(255,255,255,0.08); --accent: #10b981;
+    --text: #e6edf3; --text-dim: #5b6572; --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", sans-serif; padding: 40px;
+  }
+  .logo {
+    width: 40px; height: 40px; border-radius: 11px;
+    background: linear-gradient(135deg, var(--accent), #059669);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 20px rgba(16,185,129,0.3); margin-bottom: 20px;
+  }
+  .logo svg { width: 20px; height: 20px; }
+  h1 { font-size: 17px; font-weight: 700; margin: 0 0 6px; }
+  .subtitle { font-size: 12.5px; color: var(--text-dim); margin: 0 0 28px; }
+  .subtitle-tight { margin-bottom: 4px; }
+  .subtitle-loose { margin-bottom: 20px; }
+
+  #stepStart { display: flex; flex-direction: column; flex: 1; }
+  .btn-primary {
+    background: var(--accent); color: #04140e; border: none; padding: 14px;
+    border-radius: 11px; font-size: 12px; font-weight: 700; cursor: pointer;
+    width: 100%; box-shadow: 0 8px 22px rgba(16,185,129,0.22);
+    margin-top: auto;
+  }
+  .btn-primary:hover { filter: brightness(1.05); }
+
+  #stepProgress { display: none; flex-direction: column; flex: 1; }
+  .status-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .status-text { font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .status-text.error { color: var(--red); }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 8px var(--accent); animation: pulse 1.3s ease-in-out infinite;
+  }
+  .status-text.error .dot { background: var(--red); box-shadow: 0 0 8px var(--red); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .pct { font-size: 11px; color: var(--text-dim); font-family: Consolas, monospace; }
+  .bar-track { width: 100%; height: 6px; background: #12161f; border-radius: 999px; overflow: hidden; margin-bottom: 22px; }
+  .bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #059669, var(--accent)); transition: width 0.4s ease; border-radius: 999px; }
+
+  .steps { flex: 1; display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+  .step { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim); }
+  .step .mark { width: 16px; text-align: center; }
+  .step.done { color: var(--text); }
+  .step.done .mark { color: var(--accent); }
+  .step.active { color: var(--text); }
+  .step.error { color: var(--red); }
+
+  .log {
+    display: none; max-height: 140px; background: #000; border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px; font-family: Consolas, monospace; font-size: 10px;
+    line-height: 1.6; color: #7d8898; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    margin-bottom: 12px;
+  }
+  .log.open { display: block; }
+  .log-toggle {
+    background: none; border: none; color: var(--text-dim); font-size: 10.5px;
+    cursor: pointer; padding: 0; margin-bottom: 10px; text-align: left; width: fit-content;
+  }
+  .log-toggle:hover { color: var(--text); }
+  .retry-btn { display: none; margin-top: auto; }
+</style>
+</head>
+<body>
+
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2L4 5.5V11c0 5.2 3.4 9.9 8 11 4.6-1.1 8-5.8 8-11V5.5L12 2z" fill="#04140e"/>
+    </svg>
+  </div>
+
+  <div id="stepStart">
+    <h1>EcoVision Sentinel</h1>
+    <p class="subtitle">Ready to start the detection engine, backend, and dashboard.</p>
+    <button class="btn-primary" id="startBtn">Start</button>
+  </div>
+
+  <div id="stepProgress">
+    <h1 class="subtitle-tight">Starting up…</h1>
+    <p class="subtitle subtitle-loose">This can take a moment on first launch after a restart.</p>
+
+    <div class="status-row">
+      <span class="status-text" id="status"><span class="dot"></span>Working</span>
+      <span class="pct" id="pct">0%</span>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+
+    <div class="steps">
+      <div class="step" id="step-backend"><span class="mark">○</span> Starting backend API (port 8000)</div>
+      <div class="step" id="step-ai"><span class="mark">○</span> Starting AI detection core (port 8001)</div>
+      <div class="step" id="step-next"><span class="mark">○</span> Starting dashboard (port 3000)</div>
+    </div>
+
+    <button class="log-toggle" id="logToggle">▶ Show details</button>
+    <div class="log" id="log"></div>
+
+    <button class="btn-primary retry-btn" id="retryBtn">Retry</button>
+  </div>
+
+<script>
+  const stepStart = document.getElementById('stepStart');
+  const stepProgress = document.getElementById('stepProgress');
+  const startBtn = document.getElementById('startBtn');
+  const status = document.getElementById('status');
+  const pct = document.getElementById('pct');
+  const bar = document.getElementById('bar');
+  const log = document.getElementById('log');
+  const logToggle = document.getElementById('logToggle');
+  const retryBtn = document.getElementById('retryBtn');
+
+  logToggle.addEventListener('click', () => {
+    const open = log.classList.toggle('open');
+    logToggle.textContent = (open ? '▼' : '▶') + ' Show details';
+  });
+
+  function appendLog(text) {
+    const line = document.createElement('div');
+    line.textContent = text;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function markStep(id, state) {
+    const el = document.getElementById(id);
+    el.classList.remove('done', 'active', 'error');
+    el.classList.add(state);
+    el.querySelector('.mark').textContent = state === 'done' ? '✓' : state === 'error' ? '✕' : '●';
+  }
+
+  startBtn.addEventListener('click', () => {
+    stepStart.style.display = 'none';
+    stepProgress.style.display = 'flex';
+    window.launchBridge.startLaunch();
+  });
+
+  window.launchBridge.onStepStatus((step, state) => markStep('step-' + step, state));
+
+  window.launchBridge.onProgress((p, label) => {
+    bar.style.width = p + '%';
+    pct.textContent = p + '%';
+    status.innerHTML = '<span class="dot"></span>' + label;
+  });
+
+  window.launchBridge.onLog((line) => appendLog(line));
+
+  window.launchBridge.onError((msg) => {
+    status.classList.add('error');
+    status.innerHTML = '<span class="dot"></span>Startup failed';
+    appendLog(msg);
+    log.classList.add('open');
+    logToggle.textContent = '▼ Show details';
+    retryBtn.style.display = 'block';
+  });
+
+  retryBtn.addEventListener('click', () => {
+    retryBtn.style.display = 'none';
+    status.classList.remove('error');
+    log.textContent = '';
+    bar.style.width = '0%';
+    pct.textContent = '0%';
+    window.launchBridge.startLaunch();
+  });
+</script>
+</body>
+</html>

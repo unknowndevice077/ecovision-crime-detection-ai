@@ -5,18 +5,22 @@ import { Shield, UserPlus, ArrowRight, Building, Lock, User, MapPin } from 'luci
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 export default function SignupPage() {
   const [formData, setFormData] = useState({
     username: '', password: '', role: 'PRECINCT_CAPTAIN', barangayId: '', assignment: ''
   });
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setIsSubmitting(true);
     try {
-      const res = await fetch("http://localhost:8000/api/signup", {
+      const res = await fetch(`${API_URL}/api/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),
@@ -24,7 +28,11 @@ export default function SignupPage() {
       const data = await res.json().catch(() => ({}));
       if (res.ok) router.push('/loginpage/login');
       else setError(data.detail || "System Error: Username Conflict");
-    } catch (err) { setError("Backend Connection Failure"); }
+    } catch (err) {
+      setError("Backend Connection Failure");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -48,8 +56,10 @@ export default function SignupPage() {
             <input 
               title="Set Username ID"
               placeholder="Username ID" 
+              value={formData.username}
               onChange={e => setFormData({...formData, username: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all" 
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
               required
             />
           </div>
@@ -60,8 +70,10 @@ export default function SignupPage() {
               type="password" 
               title="Set Secure Access Key"
               placeholder="Secure Access Key" 
+              value={formData.password}
               onChange={e => setFormData({...formData, password: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all" 
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
               required
             />
           </div>
@@ -73,7 +85,8 @@ export default function SignupPage() {
               aria-label="Designate Admin Role"
               value={formData.role} 
               onChange={e => setFormData({...formData, role: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all appearance-none cursor-pointer"
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all appearance-none cursor-pointer disabled:opacity-50"
             >
               <option value="PRECINCT_CAPTAIN" className="bg-[#0f172a]">PRECINCT CAPTAIN (POLICE ADMIN)</option>
               <option value="BARANGAY_CAPTAIN" className="bg-[#0f172a]">BARANGAY CAPTAIN (BARANGAY ADMIN)</option>
@@ -85,8 +98,10 @@ export default function SignupPage() {
             <input 
               title="Enter Location (e.g. Cogon)"
               placeholder="Location (e.g. Cogon)" 
+              value={formData.barangayId}
               onChange={e => setFormData({...formData, barangayId: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all" 
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
               required
             />
           </div>
@@ -96,16 +111,21 @@ export default function SignupPage() {
             <input 
               title="Enter Station / Precinct Name"
               placeholder="Station / Precinct Name" 
+              value={formData.assignment}
               onChange={e => setFormData({...formData, assignment: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all" 
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
               required
             />
           </div>
 
           {error && <p className="text-red-500 text-[9px] text-center uppercase font-bold">{error}</p>}
 
-          <button className="w-full py-4 bg-emerald-600 text-black font-black uppercase text-[10px] tracking-widest rounded-xl hover:bg-emerald-500 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-lg">
-            Establish Account <ArrowRight size={14} />
+          <button
+            disabled={isSubmitting}
+            className="w-full py-4 bg-emerald-600 text-black font-black uppercase text-[10px] tracking-widest rounded-xl hover:bg-emerald-500 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:active:scale-100"
+          >
+            {isSubmitting ? "Submitting…" : "Establish Account"} <ArrowRight size={14} />
           </button>
         </form>
 

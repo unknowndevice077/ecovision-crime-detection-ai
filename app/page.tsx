@@ -75,8 +75,10 @@ export default function EcoVisionSentinel() {
 const fetchCameras = async (userObj: any) => {
     try {
       const barangay = userObj.barangayId && userObj.barangayId !== 'undefined' ? userObj.barangayId : 'cogon';
-      // FIXED: Added 'const' to declare the network response variable cleanly
-      const res = await fetch(`http://localhost:8000/api/cameras?barangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(userObj.role)}`);
+      const token = localStorage.getItem('ecoToken');
+      const res = await fetch(`http://localhost:8000/api/cameras?barangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(userObj.role)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
       if (res.ok) {
         const data = await res.json();
         setCameras(data);
@@ -92,8 +94,11 @@ const fetchCameras = async (userObj: any) => {
       // FIXED: Checks for invalid properties and defaults to 'cogon' to prevent passing literal 'undefined' strings
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const role = currentUser.role || 'user';
+      const token = localStorage.getItem('ecoToken');
       
-      const res = await fetch(`http://localhost:8000/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`);
+      const res = await fetch(`http://localhost:8000/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
       if (!res.ok) return;
       const data = await res.json();
       setSqlReportCount(data.length);
@@ -110,8 +115,11 @@ const fetchCameras = async (userObj: any) => {
       // FIXED: Sanitizes query context variables before initiating the HTTP request
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const role = currentUser.role || 'user';
+      const token = localStorage.getItem('ecoToken');
       
-      const res = await fetch(`http://localhost:8000/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`);
+      const res = await fetch(`http://localhost:8000/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
       if (res.ok) {
         const data = await res.json();
         const activeDetections = data.filter((inc: any) => inc.status === 'Active');
@@ -204,9 +212,10 @@ const fetchCameras = async (userObj: any) => {
   const handleUpsertNode = async (name: string, url: string) => {
     try {
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
+      const token = localStorage.getItem('ecoToken');
       const res = await fetch("http://localhost:8000/api/cameras", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name, url, barangayId: barangay })
       });
       if (res.ok) {
@@ -218,7 +227,11 @@ const fetchCameras = async (userObj: any) => {
 
   const deleteCam = async (id: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/cameras/${id}`, { method: "DELETE" });
+      const token = localStorage.getItem('ecoToken');
+      const res = await fetch(`http://localhost:8000/api/cameras/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      });
       if (res.ok) {
         fetchCameras(currentUser);
         if (selectedCam?.id === id) setSelectedCam(null);
@@ -241,10 +254,11 @@ const fetchCameras = async (userObj: any) => {
     }
 
     try {
+      const token = localStorage.getItem('ecoToken');
       fetch("http://localhost:8000/siren/activate", { method: "POST" }).catch(e => console.error(e));
       await fetch(`http://localhost:8000/api/incidents/${id}/status`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status: "Confirmed" })
       });
       fetchStats();
@@ -255,10 +269,11 @@ const fetchCameras = async (userObj: any) => {
   const handleDismissCrime = async (id: string) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
     try {
+      const token = localStorage.getItem('ecoToken');
       fetch("http://localhost:8000/siren/deactivate", { method: "POST" }).catch(e => console.error(e));
       const res = await fetch(`http://localhost:8000/api/incidents/${id}/status`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status: "Dismissed" })
       });
       if (!res.ok) {

@@ -15,8 +15,34 @@ let mainWindow = null;
 const isPackaged = app.isPackaged;
 const RESOURCES_ROOT = isPackaged ? process.resourcesPath : path.join(__dirname, "..");
 const CONFIG_PATH = path.join(app.getPath("userData"), "env_config.json");
-
 const INSTALL_FOLDER_NAME = "EcoVisionSentinel";
+
+function isWritable(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const testFile = path.join(dir, ".write_test");
+    fs.writeFileSync(testFile, "x");
+    fs.unlinkSync(testFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Everything lives in one place by default: the venv goes right inside
+// the app's own install folder (RESOURCES_ROOT), next to backend/,
+// maincode/, weights/, etc. Only falls back to a separate per-user
+// AppData folder if the install location turns out to be read-only
+// (e.g. Program Files without admin rights) -- no folder picker, no
+// second location for the user to think about.
+function resolveVenvInstallDir() {
+  if (isWritable(RESOURCES_ROOT)) {
+    return RESOURCES_ROOT;
+  }
+  const fallback = path.join(app.getPath("userData"), "EcoVisionRuntime");
+  fs.mkdirSync(fallback, { recursive: true });
+  return fallback;
+}
 
 function getVenvDir() {
   if (fs.existsSync(CONFIG_PATH)) {
@@ -30,19 +56,41 @@ function getVenvDir() {
   return path.join(RESOURCES_ROOT, ".venv");
 }
 
+// The folder the user picked in the setup wizard, containing a FULL copy
+// of backend/, maincode/, weights/, config.json, requirements.txt, and
+// the venv itself -- everything code-related lives here in one place.
+// Falls back to RESOURCES_ROOT (the installer's own resources folder)
+// if setup hasn't recorded a chosen folder yet.
+function getAppDataDir() {
+  if (fs.existsSync(CONFIG_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+      if (data.appDataDir && fs.existsSync(data.appDataDir)) return data.appDataDir;
+    } catch (e) {
+      console.error("Failed to read env_config.json", e);
+    }
+  }
+  return RESOURCES_ROOT;
+}
+
 function getPythonExe(venvDir = getVenvDir()) {
   return process.platform === "win32"
     ? path.join(venvDir, "Scripts", "python.exe")
     : path.join(venvDir, "bin", "python");
 }
 
-const MAINCODE_DIR = path.join(RESOURCES_ROOT, "maincode");
-const BACKEND_DIR = path.join(RESOURCES_ROOT, "backend");
-const BACKEND_SCRIPT = path.join(BACKEND_DIR, "backend.py");
-const AI_SCRIPT = path.join(MAINCODE_DIR, "main.py");
-const REQUIREMENTS_TXT = path.join(RESOURCES_ROOT, "requirements.txt");
+function getScriptPaths() {
+  const appDataDir = getAppDataDir();
+  return {
+    maincodeDir: path.join(appDataDir, "maincode"),
+    backendDir: path.join(appDataDir, "backend"),
+    backendScript: path.join(appDataDir, "backend", "backend.py"),
+    aiScript: path.join(appDataDir, "maincode", "main.py"),
+  };
+}
 
 let setupWindow = null;
+let launchWindow = null;
 
 function spawnPython(scriptPath, cwd) {
   if (!fs.existsSync(scriptPath)) {
@@ -55,7 +103,12 @@ function spawnPython(scriptPath, cwd) {
   const proc = spawn(pythonExe, [scriptPath], {
     cwd,
     windowsHide: true,
-    env: { ...process.env, ECOVISION_WRITABLE_DIR: writableDir },
+    env: {
+      ...process.env,
+      ECOVISION_WRITABLE_DIR: writableDir,
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
+    },
   });
   const tag = path.basename(scriptPath);
   proc.stdout.on("data", (d) => console.log(`[${tag}] ${d}`));
@@ -124,28 +177,38 @@ async function createWindow() {
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, backgroundThrottling: false },
   });
+}
 
-  const splashHtml = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        body { background: #0B0F17; color: #f8fafc; font-family: -apple-system, Segoe UI, sans-serif; display: flex; height: 100vh; margin: 0; align-items: center; justify-content: center; flex-direction: column; }
-        .spinner { width: 44px; height: 44px; border: 3px solid rgba(16,185,129,0.15); border-top-color: #10b981; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 24px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        h2 { font-size: 15px; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 700; color: #10b981; margin: 0; }
-        p { font-size: 12px; color: #64748b; margin-top: 8px; font-weight: 500; }
-      </style>
-    </head>
-    <body>
-      <div class="spinner"></div>
-      <h2>EcoVision Sentinel</h2>
-      <p>Initializing AI Detection Engines & Next.js Server...</p>
-    </body>
-    </html>
-  `;
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(splashHtml)}`);
+function openLaunchWindow() {
+  launchWindow = new BrowserWindow({
+    width: 480,
+    height: 520,
+    resizable: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#0B0F17",
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      preload: path.join(__dirname, "launch-preload.js"),
+      backgroundThrottling: false,
+    },
+  });
+  launchWindow.once("ready-to-show", () => launchWindow.show());
+  launchWindow.loadFile(path.join(__dirname, "launch.html"));
+  return launchWindow;
+}
+
+function sendLaunchProgress(pct, label) {
+  if (launchWindow && !launchWindow.isDestroyed()) launchWindow.webContents.send("launch:progress", pct, label);
+}
+function sendLaunchLog(line) {
+  if (launchWindow && !launchWindow.isDestroyed()) launchWindow.webContents.send("launch:log", line);
+}
+function sendLaunchStep(step, state) {
+  if (launchWindow && !launchWindow.isDestroyed()) launchWindow.webContents.send("launch:step", step, state);
+}
+function sendLaunchError(msg) {
+  if (launchWindow && !launchWindow.isDestroyed()) launchWindow.webContents.send("launch:error", msg);
 }
 
 function openSetupWindow() {
@@ -242,7 +305,7 @@ Write-Output "Python installation complete."
   await runPowerShellScript(psScript, RESOURCES_ROOT);
 }
 
-async function runFirstTimeSetup(targetVenvDir) {
+async function runFirstTimeSetup(targetVenvDir, requirementsPath) {
   sendProgress(5, "Checking for Python 3.11 / 3.12...");
 
   let validPy = await findCompatiblePython();
@@ -270,7 +333,7 @@ async function runFirstTimeSetup(targetVenvDir) {
   sendProgress(40, "Installing dependencies & GPU binaries...");
   await runStep(
     pythonExe,
-    ["-m", "pip", "install", "-r", REQUIREMENTS_TXT, "--extra-index-url", "https://download.pytorch.org/whl/cu121"],
+    ["-m", "pip", "install", "-r", requirementsPath, "--extra-index-url", "https://download.pytorch.org/whl/cu121"],
     RESOURCES_ROOT
   );
 
@@ -286,23 +349,51 @@ ipcMain.handle("setup:select-directory", async () => {
   if (result.canceled || !result.filePaths || result.filePaths.length === 0) return null;
 
   const installDir = path.join(result.filePaths[0], INSTALL_FOLDER_NAME);
-  return installDir;
+
+  if (!isWritable(installDir)) {
+    return { error: "This drive/folder can't be written to. Pick a different location." };
+  }
+  return { path: installDir };
 });
 
+function copyAppResourcesInto(targetDir) {
+  // Copies everything code/model-related from the installer's resources
+  // folder into the folder the user picked, so that folder ends up
+  // self-contained: backend/, maincode/, weights/, config.json,
+  // requirements.txt, AND (after runFirstTimeSetup) .venv/ all sitting
+  // next to each other. Skips re-copying if already present from a
+  // previous run/retry.
+  const entries = [
+    { from: path.join(RESOURCES_ROOT, "backend"), to: path.join(targetDir, "backend") },
+    { from: path.join(RESOURCES_ROOT, "maincode"), to: path.join(targetDir, "maincode") },
+    { from: path.join(RESOURCES_ROOT, "weights"), to: path.join(targetDir, "weights") },
+    { from: path.join(RESOURCES_ROOT, "config.json"), to: path.join(targetDir, "config.json") },
+    { from: path.join(RESOURCES_ROOT, "requirements.txt"), to: path.join(targetDir, "requirements.txt") },
+  ];
+  for (const { from, to } of entries) {
+    if (!fs.existsSync(from)) continue;
+    sendLog(`Copying ${path.basename(from)}...`);
+    fs.cpSync(from, to, { recursive: true, force: true });
+  }
+}
+
 ipcMain.on("setup:start", (_event, targetInstallDir) => {
-  const installDir = targetInstallDir || path.join(RESOURCES_ROOT, INSTALL_FOLDER_NAME);
-  const venvDir = path.join(installDir, ".venv");
+  const appDataDir = targetInstallDir || resolveVenvInstallDir();
+  const venvDir = path.join(appDataDir, ".venv");
 
-  fs.mkdirSync(installDir, { recursive: true });
-  sendInstallPath(installDir);
+  fs.mkdirSync(appDataDir, { recursive: true });
+  sendInstallPath(appDataDir);
 
-  runFirstTimeSetup(venvDir)
+  sendProgress(2, "Copying application files...");
+  copyAppResourcesInto(appDataDir);
+
+  runFirstTimeSetup(venvDir, path.join(appDataDir, "requirements.txt"))
     .then(() => {
       const configDir = path.dirname(CONFIG_PATH);
       if (!fs.existsSync(configDir)) {
         fs.mkdirSync(configDir, { recursive: true });
       }
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ venvDir }), "utf8");
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ venvDir, appDataDir }), "utf8");
       sendProgress(100, "Launching...");
       setTimeout(() => { setupWindow.close(); launchMainApp(); }, 800);
     })
@@ -310,31 +401,50 @@ ipcMain.on("setup:start", (_event, targetInstallDir) => {
 });
 
 async function launchMainApp() {
+  killAll();
   try {
-    await createWindow();
+    const { backendDir, backendScript, maincodeDir, aiScript } = getScriptPaths();
 
     let backendLog = "";
     let nextLog = "";
 
-    backendProc = spawnPython(BACKEND_SCRIPT, BACKEND_DIR);
-    backendProc.stderr.on("data", (d) => { backendLog += d.toString(); });
-    backendProc.stdout.on("data", (d) => { backendLog += d.toString(); });
+    sendLaunchProgress(10, "Starting backend API...");
+    sendLaunchStep("backend", "active");
+    backendProc = spawnPython(backendScript, backendDir);
+    backendProc.stderr.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+    backendProc.stdout.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
 
-    aiProc = spawnPython(AI_SCRIPT, MAINCODE_DIR);
+    sendLaunchProgress(35, "Starting AI detection core...");
+    sendLaunchStep("ai", "active");
+    aiProc = spawnPython(aiScript, maincodeDir);
+    aiProc.stderr.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
+    aiProc.stdout.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
 
+    sendLaunchProgress(60, "Starting dashboard...");
+    sendLaunchStep("next", "active");
     nextProc = spawnNextServer();
     if (nextProc) {
-      nextProc.stderr.on("data", (d) => { nextLog += d.toString(); });
-      nextProc.stdout.on("data", (d) => { nextLog += d.toString(); });
+      nextProc.stderr.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+      nextProc.stdout.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
     }
 
     try {
-      await Promise.all([
-        waitForPort(8000, 60000),
-        waitForPort(8001, 60000),
-        waitForPort(3000, 60000)
-      ]);
+      await waitForPort(8000, 60000);
+      sendLaunchStep("backend", "done");
+      sendLaunchProgress(70, "Backend ready. Waiting on AI core...");
+
+      await waitForPort(8001, 60000);
+      sendLaunchStep("ai", "done");
+      sendLaunchProgress(85, "AI core ready. Waiting on dashboard...");
+
+      await waitForPort(3000, 60000);
+      sendLaunchStep("next", "done");
+      sendLaunchProgress(100, "Ready.");
     } catch (portErr) {
+      if (portErr.message.includes("8000")) sendLaunchStep("backend", "error");
+      else if (portErr.message.includes("8001")) sendLaunchStep("ai", "error");
+      else if (portErr.message.includes("3000")) sendLaunchStep("next", "error");
+
       let detail = portErr.message;
       if (portErr.message.includes("3000") && nextLog) {
         detail += `\n\nNext.js Output (last 2000 chars):\n${nextLog.slice(-2000)}`;
@@ -344,24 +454,29 @@ async function launchMainApp() {
       throw new Error(detail);
     }
 
+    await createWindow();
+    if (launchWindow && !launchWindow.isDestroyed()) launchWindow.close();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadURL("http://localhost:3000");
     }
   } catch (err) {
-    dialog.showErrorBox("EcoVision Sentinel failed to start", err.message);
-    killAll();
-    app.quit();
+    sendLaunchError(err.message);
   }
 }
 
+ipcMain.on("launch:start", () => {
+  launchMainApp();
+});
+
 app.whenReady().then(async () => {
   const pythonExe = getPythonExe();
-  if (!fs.existsSync(pythonExe)) {
+  const { backendScript } = getScriptPaths();
+  if (!fs.existsSync(pythonExe) || !fs.existsSync(backendScript)) {
     openSetupWindow();
     return;
   }
 
-  await launchMainApp();
+  openLaunchWindow();
 });
 
 function killTree(proc) {

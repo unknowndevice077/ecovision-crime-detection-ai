@@ -63,10 +63,13 @@ type PendingLocation = {
   created_at: string;
 };
 
-type Tab = 'directory' | 'approvals' | 'create';
+type Tab = 'directory' | 'approvals' | 'create' | 'cameras';
+
+type CameraRow = { id: string; name: string; url: string; status: string; barangay_id: string };
 
 export default function DevteamView() {
   const [data, setData] = useState<any>(null);
+  const [cameras, setCameras] = useState<CameraRow[]>([]);
   const [pendingLocations, setPendingLocations] = useState<PendingLocation[]>([]);
   const [allLocations, setAllLocations] = useState<PendingLocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -102,7 +105,9 @@ export default function DevteamView() {
         fetch(`${API_URL}/api/devteam/locations`, { headers: authHeaders() }),
       ]);
       if (overviewRes.ok && locationsRes.ok) {
-        setData(await overviewRes.json());
+        const overview = await overviewRes.json();
+        setData(overview);
+        setCameras(overview.cameras || []);
         setPendingLocations(await locationsRes.json());
         if (allLocationsRes.ok) setAllLocations(await allLocationsRes.json());
         setLoadFailed(false);
@@ -266,6 +271,26 @@ export default function DevteamView() {
     return Array.from(byLoc.entries()).map(([loc, pair]) => ({ loc, ...pair }));
   }, [data]);
 
+  // Cameras grouped by location, each with whichever captain(s) are
+  // responsible for that barangay_id -- reuses the same pairing logic as
+  // locationPairs above (same barangay_id = same jurisdiction).
+  const camerasByLocation = useMemo(() => {
+    const map = new Map<string, { precinct?: ManagedUser; barangay?: ManagedUser; cameras: CameraRow[] }>();
+    cameras.forEach(cam => {
+      const key = cam.barangay_id || '—';
+      if (!map.has(key)) map.set(key, { cameras: [] });
+      map.get(key)!.cameras.push(cam);
+    });
+    locationPairs.forEach(p => {
+      const key = p.loc || '—';
+      const entry = map.get(key) || { cameras: [] };
+      entry.precinct = p.precinct;
+      entry.barangay = p.barangay;
+      map.set(key, entry);
+    });
+    return Array.from(map.entries()).map(([loc, v]) => ({ loc, ...v }));
+  }, [cameras, locationPairs]);
+
   const knownLocationIds = useMemo(() => {
     const set = new Set<string>();
     allLocations.forEach(l => set.add(l.id));
@@ -353,6 +378,7 @@ export default function DevteamView() {
           badge={pendingLocations.length}
         />
         <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
+        <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
       </div>
 
       {/* ================= DIRECTORY TAB ================= */}
@@ -654,6 +680,45 @@ export default function DevteamView() {
               <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ================= CAMERAS TAB ================= */}
+      {tab === 'cameras' && (
+        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-6">
+          {camerasByLocation.length === 0 ? (
+            <div className="border border-[#2B2D31] py-14 text-center">
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50]">No cameras registered at any location yet</p>
+            </div>
+          ) : camerasByLocation.map(group => (
+            <div key={group.loc} className="border border-[#2B2D31]">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[#2B2D31] bg-[#8FA8D9]/[0.03]">
+                <div className="flex items-center gap-2">
+                  <MapPinned size={12} className="text-[#8FA8D9]" />
+                  <span className="text-[10px] tracking-[0.15em] uppercase text-[#F0F1F3]">{group.loc}</span>
+                  <span className="text-[9px] text-[#6B6D73]">&middot; {group.cameras.length} camera{group.cameras.length === 1 ? '' : 's'}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <SeatChip user={group.precinct} code="PD" />
+                  <SeatChip user={group.barangay} code="BG" />
+                </div>
+              </div>
+              <div className="divide-y divide-[#1E2023]">
+                {group.cameras.map(cam => (
+                  <div key={cam.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <Video size={12} className={cam.status === 'online' ? 'text-[#6FBF8F]' : 'text-[#D9756A]'} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] text-[#F0F1F3] truncate">{cam.name}</p>
+                      <p className="text-[9px] text-[#6B6D73] font-mono truncate">{cam.url}</p>
+                    </div>
+                    <span className={`text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border ${cam.status === 'online' ? 'border-[#6FBF8F]/25 text-[#6FBF8F]' : 'border-[#D9756A]/25 text-[#D9756A]'}`}>
+                      {cam.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

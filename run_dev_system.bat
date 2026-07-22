@@ -20,11 +20,27 @@ echo  =^> Port registries scrubbed and verified clean.
 
 echo.
 echo [2/4] Deploying Local Storage Ledger Backend (Port 8000)...
+:: NOTE: if this is the very first run against a fresh/empty DB, backend.py
+:: bootstraps a DEVTEAM account and prints its username/password ONCE to
+:: THIS window ("EcoVision Data Core") -- it is never shown again after
+:: this run. Watch that window when the DB is new.
 start "EcoVision Data Core" cmd /c "call .venv\Scripts\activate && python app/backend.py"
 
 echo.
 echo [3/4] Deploying Real-Time Computer Vision Core (Port 8001)...
 start "EcoVision AI Vision" cmd /c "call .venv\Scripts\activate && python maincode/main.py"
+
+echo.
+echo [DEV] Checking for DevTeam credentials (development convenience only)...
+:: reset_devteam_password.py forcibly resets whatever DEVTEAM account exists
+:: and prints the new username/password to THIS console. This only exists
+:: for local dev convenience -- it must never ship in a production/release
+:: build, since anyone running it wipes the current DevTeam password.
+timeout /t 3 /nobreak >nul
+call .venv\Scripts\activate
+python app/reset_devteam_password.py
+echo  =^> DevTeam credentials printed above. Save them now.
+echo ──────────────────────────────────────────────────────────────
 
 echo.
 echo [4/4] Mounting Interface Template with Hot-Reloading (Port 3000)...

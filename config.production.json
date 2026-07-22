@@ -1,0 +1,14 @@
+{
+  "system": { "name": "EcoVision Security Sentinel", "version": "2.0", "environment": "production", "debug": false },
+  "backend": { "host": "0.0.0.0", "port": 8000, "workers": 4, "reload": false, "log_level": "info" },
+  "frontend": { "port": 3000, "host": "0.0.0.0" },
+  "database": { "type": "postgres", "path": "./data", "backup_interval": 3600 },
+  "detection": { "models": { "pose": "yolo11s-pose.pt", "violence": "weights/best.pt" }, "confidence_threshold": 0.6, "detection_interval": 6, "max_unseen_frames": 150 },
+  "alert": { "enabled": true, "alert_duration": 90, "cooldown_frames": 150, "sound_enabled": true },
+  "camera": { "index": 0, "default_resolution": "1280x720", "fps": 30, "buffer_size": 50 },
+  "esp32": { "enabled": true, "heartbeat_interval": 30, "timeout": 60, "max_devices": 100, "auto_registration": true },
+  "networking": { "websocket_url": "wss://YOUR_DOMAIN/ws", "api_url": "https://YOUR_DOMAIN", "timeout": 5, "retries": 3 },
+  "security": { "enable_https": true, "enable_cors": true, "cors_origins": ["https://YOUR_DOMAIN"], "rate_limit": { "enabled": true, "requests_per_minute": 100 } },
+  "monitoring": { "enabled": true, "log_file": "logs/system.log", "performance_tracking": true, "alert_log": "logs/alerts.log" },
+  "features": { "real_time_monitoring": true, "alert_system": true, "device_management": true, "camera_integration": true, "esp32_support": true, "analytics": true, "export_data": true }
+}

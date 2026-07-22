@@ -198,12 +198,19 @@
   let selectedPath = '';
 
   browseBtn.addEventListener('click', async () => {
-    const dir = await window.setupBridge.selectDirectory();
-    if (dir) {
-      selectedPath = dir;
-      pathInput.value = dir;
-      pathHint.textContent = 'Files will be installed to this folder.';
+    const result = await window.setupBridge.selectDirectory();
+    if (!result) return; // user cancelled the dialog
+    if (result.error) {
+      pathInput.value = '';
+      pathHint.textContent = result.error;
+      pathHint.style.color = '#f87171';
+      selectedPath = '';
+      return;
     }
+    selectedPath = result.path;
+    pathInput.value = result.path;
+    pathHint.textContent = 'Files will be installed to this folder.';
+    pathHint.style.color = '';
   });
 
   logToggle.addEventListener('click', () => {
@@ -227,7 +234,7 @@
 
   startBtn.addEventListener('click', () => {
     goToProgress();
-    window.setupBridge.startSetup(selectedPath);
+    window.setupBridge.startSetup(selectedPath || null);
   });
 
   window.setupBridge.onInstallPath((p) => {
@@ -260,7 +267,7 @@
     log.textContent = '';
     bar.style.width = '0%';
     pct.textContent = '0%';
-    window.setupBridge.retry(selectedPath);
+    window.setupBridge.retry(selectedPath || null);
   });
 </script>
 </body>

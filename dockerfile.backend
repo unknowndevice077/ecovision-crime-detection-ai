@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+WORKDIR /srv/ecovision
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt psycopg2-binary alembic python-dotenv
+
+COPY app/backend.py app/db.py app/schema_final.sql app/
+COPY config.production.json .
+COPY config.json .
+
+EXPOSE 8000
+CMD ["uvicorn", "app.backend:app", "--host", "0.0.0.0", "--port", "8000"]

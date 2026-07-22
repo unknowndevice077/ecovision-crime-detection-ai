@@ -57,8 +57,11 @@
     "appId": "com.ecovision.sentinel",
     "productName": "EcoVisionSentinel",
     "asarUnpack": [
-      "node_modules/next/**/*",
-      ".next/**/*"
+      "node_modules/**/*",
+      ".next/**/*",
+      "public/**/*",
+      "package.json",
+      "next.config.*"
     ],
     "win": {
       "target": [

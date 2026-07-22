@@ -1,21 +1,13 @@
-import sys
-import os
-
-# --- FORCE UTF-8 ENCODING FOR WINDOWS SUBPROCESS STDOUT/STDERR ---
-if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if sys.stderr and hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
-import sqlite3
+from db import get_conn, IntegrityError
 import uvicorn
 import json
 import uuid
+import os
 import cv2
 import numpy as np
 import threading
@@ -27,9 +19,19 @@ import hashlib
 import hmac
 import base64
 import secrets
+from dotenv import load_dotenv
 
+load_dotenv()
+
+APP_ENV = os.environ.get("APP_ENV", "development")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # set -> Postgres; unset -> SQLite fallback
+CORS_ORIGINS_ENV = os.environ.get("CORS_ORIGINS")  # comma-separated
+SECRET_KEY_ENV = os.environ.get("SECRET_KEY")
+
+# --- CONFIGURATION ENGINE SETUP ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+_ENV_CONFIG_PATH = os.path.join(BASE_DIR, f"config.{APP_ENV}.json")
+CONFIG_PATH = _ENV_CONFIG_PATH if os.path.exists(_ENV_CONFIG_PATH) else os.path.join(BASE_DIR, "config.json")
 
 WRITABLE_DIR = os.environ.get("ECOVISION_WRITABLE_DIR")
 if not WRITABLE_DIR:
@@ -44,11 +46,18 @@ if os.path.exists(WRITABLE_CONFIG_PATH):
     with open(WRITABLE_CONFIG_PATH, 'r') as f:
         sys_config = json.load(f)
 
+if CORS_ORIGINS_ENV:
+    sys_config.setdefault("security", {})["cors_origins"] = [o.strip() for o in CORS_ORIGINS_ENV.split(",")]
+
+# --- AUTH: PASSWORD HASHING + SIGNED SESSION TOKENS ---
+if SECRET_KEY_ENV:
+    sys_config.setdefault("auth", {})["secret_key"] = SECRET_KEY_ENV
 if "auth" not in sys_config or not sys_config.get("auth", {}).get("secret_key"):
     sys_config.setdefault("auth", {})["secret_key"] = secrets.token_hex(32)
+    # Write to the WRITABLE copy, never back to CONFIG_PATH (BASE_DIR) --
+    # that path can be read-only on a packaged install.
     with open(WRITABLE_CONFIG_PATH, "w") as f:
         json.dump(sys_config, f, indent=2)
-
 SECRET_KEY = sys_config["auth"]["secret_key"]
 TOKEN_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
@@ -64,6 +73,17 @@ def verify_password(password: str, stored: str) -> bool:
         return False
     check = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000)
     return hmac.compare_digest(check.hex(), digest_hex)
+
+# NOTE ON THE API CONTRACT: every JSON field this backend sends OR accepts
+# is snake_case now, matching the DB column names directly (barangay_id,
+# case_id, occurred_date, parent_admin_id, etc.) -- including the signed
+# token payload below. This used to be translated to/from camelCase
+# (barangayId, caseId...) which caused a silent mismatch once some frontend
+# views were updated to read snake_case and others weren't. There is now
+# exactly one shape, everywhere. If any .tsx file still sends/reads
+# camelCase field names, it needs to be updated to match -- see the list of
+# files already aligned in this pass: AdminUsersView, DevteamView,
+# HistoryView, RecordsView, Sidebar, CameraManagement.
 
 def issue_token(user_row: dict) -> str:
     payload = {
@@ -100,6 +120,8 @@ def require_role(payload: dict, allowed_roles: set):
     if payload["role"] not in allowed_roles:
         raise HTTPException(status_code=403, detail=f"'{payload['role']}' accounts cannot do this")
 
+# Safe folder verification tracking routines anchored to the WRITABLE
+# root, never BASE_DIR -- BASE_DIR can be a read-only install directory.
 DATA_DIR = os.path.abspath(os.path.join(WRITABLE_DIR, sys_config["database"]["path"]))
 LOGS_DIR = os.path.abspath(os.path.join(WRITABLE_DIR, os.path.dirname(sys_config["monitoring"]["log_file"])))
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -107,9 +129,6 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_final.sql")
-if not os.path.exists(SCHEMA_PATH):
-    SCHEMA_PATH = os.path.join(BASE_DIR, "schema_final.sql")
-
 ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
 RECORDINGS_DIR = os.path.join(WRITABLE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
 SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
@@ -131,6 +150,7 @@ if sys_config["security"]["enable_cors"]:
         allow_headers=["*"],
     )
 
+# --- WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -158,11 +178,13 @@ manager = ConnectionManager()
 app.mount("/static/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 app.mount("/static/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
 
+# --- DATABASE INITIALIZATION ---
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    if not cursor.fetchone():
+    cursor.execute("SELECT to_regclass('public.users') AS reg")
+    table_check = cursor.fetchone()
+    if not table_check or table_check["reg"] is None:
         if not os.path.exists(SCHEMA_PATH):
             conn.close()
             raise RuntimeError(
@@ -171,7 +193,7 @@ def init_db():
             )
         conn.executescript(open(SCHEMA_PATH).read())
         conn.commit()
-        print(f"[DATABASE] Applied schema_final.sql to fresh database at {DB_PATH}")
+        print(f"💾 [DATABASE] Applied schema_final.sql to fresh database at {DB_PATH}")
 
     cursor.execute("SELECT id, password FROM users")
     for row_id, pw in cursor.fetchall():
@@ -189,7 +211,7 @@ def init_db():
         )
         conn.commit()
         print("=" * 60)
-        print("[BOOTSTRAP] First-run DEVTEAM account created:")
+        print("🔑 [BOOTSTRAP] First-run DEVTEAM account created:")
         print(f"    username: devteam")
         print(f"    password: {bootstrap_password}")
         print("    Save this now -- it will not be shown again.")
@@ -198,11 +220,12 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM barangays")
     if cursor.fetchone()[0] == 0:
         cursor.execute(
-            "INSERT INTO barangays (id, name, status, approved_at) VALUES ('cogon', 'Cogon', 'approved', datetime('now'))"
+            "INSERT INTO barangays (id, name, status, approved_at) VALUES ('cogon', 'Cogon', 'approved', NOW())"
         )
+        seed_cam_url = os.environ.get("SEED_CAMERA_1_URL", "rtsp://user:pass@192.168.254.106:554/stream1")
         cursor.execute(
-            "INSERT INTO cameras (id, name, url, status, barangay_id) VALUES "
-            "('1', 'Main Entrance Hub', 'rtsp://ecovision:REDACTED_ROTATE_THIS_PASSWORD@192.168.254.106:554/stream1', 'online', 'cogon')"
+            "INSERT INTO cameras (id, name, url, status, barangay_id) VALUES (?, ?, ?, 'online', 'cogon')",
+            ("1", "Main Entrance Hub", seed_cam_url),
         )
         cursor.execute(
             "INSERT INTO cameras (id, name, url, status, barangay_id) VALUES "
@@ -214,6 +237,7 @@ def init_db():
 
 init_db()
 
+# --- NVIDIA SHADOWPLAY & 24/7 BACKGROUND RECORDING SYSTEMS ---
 class VideoRecordingEngine:
     def __init__(self, buffer_seconds=15, fps=20):
         self.buffer_size = buffer_seconds * fps
@@ -281,7 +305,7 @@ class VideoRecordingEngine:
                 time.sleep(1.0 / self.fps)
             writer.release()
 
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_conn()
             cursor = conn.cursor()
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute(
@@ -301,10 +325,17 @@ class VideoRecordingEngine:
 recorder_engine = VideoRecordingEngine()
 recorder_engine.start_workers()
 
+# --- DATA SCHEMAS ---
+# All request bodies now use the same snake_case field names as the
+# responses -- e.g. barangay_id, case_id, occurred_time -- so the frontend
+# doesn't have to remember two different cases depending on whether it's
+# reading or writing. If page.tsx / CrimeReportsView.tsx still POST
+# camelCase bodies, they need to be updated to match these field names.
 ADMIN_ROLES = {"PRECINCT_CAPTAIN", "BARANGAY_CAPTAIN"}
 STANDARD_ROLES = {"POLICE", "BARANGAY"}
 ADMIN_CREATES_ROLE = {"PRECINCT_CAPTAIN": "POLICE", "BARANGAY_CAPTAIN": "BARANGAY"}
 ALL_ROLES = ADMIN_ROLES | STANDARD_ROLES | {"DEVTEAM"}
+ADMIN_OR_DEVTEAM = ADMIN_ROLES | {"DEVTEAM"}
 VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cameras", "confirm_dismiss_alerts"}
 
 class UserSignup(BaseModel):
@@ -405,6 +436,11 @@ class DevteamCreateUser(BaseModel):
     parent_admin_id: Optional[int] = None
     permissions: Optional[dict] = None
 
+
+# --- SERIALIZATION HELPERS ---
+# Every one of these returns snake_case keys matching the DB columns 1:1.
+# This is now the ONLY place a schema change needs to be reflected.
+
 def _row_to_incident_dict(inc_row, details_row, vis_row) -> dict:
     d = dict(inc_row)
     details = dict(details_row) if details_row else {}
@@ -447,14 +483,21 @@ def _row_to_user_dict(cursor, row) -> dict:
         "permissions": _user_permissions_json(cursor, d["id"]),
     }
 
+
+# --- PERSISTENT CAMERA ROUTINES ---
 @app.get("/api/cameras")
 async def get_cameras(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
 
-    if payload["role"] in ("BARANGAY", "BARANGAY_CAPTAIN") and payload.get("barangay_id"):
+    # DEVTEAM sees everything system-wide. Every other role (BARANGAY,
+    # BARANGAY_CAPTAIN, POLICE, PRECINCT_CAPTAIN) is scoped to cameras at
+    # their own barangay_id -- a Precinct Captain and their paired Barangay
+    # Captain share the same barangay_id (enforced by the one-per-barangay
+    # unique indexes in schema_final.sql), so this is what actually gives
+    # police visibility into "cameras under their precinct."
+    if payload["role"] != "DEVTEAM" and payload.get("barangay_id"):
         cursor.execute("SELECT * FROM cameras WHERE LOWER(barangay_id) = ?", (payload["barangay_id"].lower(),))
     else:
         cursor.execute("SELECT * FROM cameras")
@@ -469,6 +512,10 @@ def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
     return cursor.fetchone() is not None
 
 def require_permission(cursor, payload: dict, key: str):
+    """Server-side gate matching the permission checkboxes in
+    AdminUsersView.tsx / DevteamView.tsx. DEVTEAM and admin tiers always
+    pass. Standard POLICE/BARANGAY accounts must have the key granted in
+    user_permissions."""
     if payload["role"] == "DEVTEAM" or payload["role"] in ADMIN_ROLES:
         return
     if not _has_permission(cursor, payload["id"], key, payload["role"]):
@@ -477,7 +524,7 @@ def require_permission(cursor, payload: dict, key: str):
 @app.post("/api/cameras")
 async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "manage_cameras")
     cam_id = str(uuid.uuid4())[:8]
@@ -496,7 +543,7 @@ async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(No
 @app.delete("/api/cameras/{cam_id}")
 async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "manage_cameras")
     cursor.execute("DELETE FROM cameras WHERE id = ?", (cam_id,))
@@ -504,11 +551,12 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
     conn.close()
     return {"status": "deleted"}
 
+
+# --- HIERARCHICAL INCIDENT FETCH ---
 @app.get("/api/incidents")
 async def get_incidents(authorization: Optional[str] = Header(None), filter_barangay_id: Optional[str] = "all"):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
 
     role = payload["role"]
@@ -530,6 +578,9 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
         )
         redact = True
     else:
+        # POLICE / PRECINCT_CAPTAIN / DEVTEAM see full detail. filter_barangay_id
+        # only ever narrows the result set further for these already-
+        # privileged roles -- it cannot be used to escalate.
         if filter_barangay_id and filter_barangay_id.lower() != "all":
             cursor.execute(
                 "SELECT * FROM incidents WHERE LOWER(barangay_id) = ? ORDER BY occurred_date DESC, occurred_time DESC",
@@ -548,7 +599,7 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
         vis = cursor.fetchone()
         record = _row_to_incident_dict(inc, details, vis)
         if redact:
-            record["narrative"] = "[RESTRICTED] Investigative logs masked for non-police profiles."
+            record["narrative"] = "🔒 [RESTRICTED] Investigative logs masked for non-police profiles."
             record["nature_of_call"] = "CONFIDENTIAL // RESTRICTED"
             record["arrival_reason"] = "CONFIDENTIAL // RESTRICTED"
             record["additional_officers"] = "CONFIDENTIAL"
@@ -559,7 +610,7 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
 @app.post("/api/incidents")
 async def add_incident(incident: IncidentSchema, authorization: Optional[str] = Header(None)):
     require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -590,12 +641,16 @@ async def add_incident(incident: IncidentSchema, authorization: Optional[str] = 
 
 @app.post("/api/ai_trigger")
 async def ai_trigger(data: AiTriggerSchema):
+    # Deliberately NOT behind require_auth -- called by the local AI
+    # pipeline (main.py on 8001), not a browser. Protected only by being
+    # localhost-reachable in this deployment; give it its own service
+    # credential if this backend is ever exposed beyond localhost.
     incident_id = data.id if data.id else str(uuid.uuid4())[:8]
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     now = datetime.now()
     screenshot_url = data.screenshot_path or ""
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO incidents
@@ -634,11 +689,11 @@ async def panic_trigger(data: PanicSchema):
         cap_res = requests.post(AI_PIPELINE_CAPTURE_URL, json={"incident_id": incident_id}, timeout=2.0)
         if cap_res.ok:
             screenshot_url = cap_res.json().get("screenshot_path") or ""
-            print(f"[PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
+            print(f"🚨 [PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
     except Exception as e:
-        print(f"[PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
+        print(f"⚠️  [PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO incidents
@@ -669,7 +724,7 @@ async def panic_trigger(data: PanicSchema):
 @app.patch("/api/incidents/{incident_id}/status")
 async def update_incident_status(incident_id: str, data: StatusUpdateSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
@@ -685,7 +740,7 @@ async def update_incident_status(incident_id: str, data: StatusUpdateSchema, aut
 async def delete_incident(incident_id: str, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"} | ADMIN_ROLES)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
     conn.commit()
@@ -698,7 +753,7 @@ async def delete_incident(incident_id: str, authorization: Optional[str] = Heade
 @app.patch("/api/incidents/{incident_id}/archive")
 async def archive_incident(incident_id: str, authorization: Optional[str] = Header(None)):
     require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("UPDATE incident_visibility SET map_hidden = 1 WHERE incident_id = ?", (incident_id,))
     conn.commit()
@@ -711,7 +766,7 @@ async def archive_incident(incident_id: str, authorization: Optional[str] = Head
 @app.post("/api/incidents/{incident_id}/confirm-and-report")
 async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     officer = (data.report_details or {}).get("reporting_officer")
@@ -730,27 +785,27 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
 @app.post("/siren/activate")
 async def siren_activate(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     conn.close()
     try:
         requests.post(f"http://{ESP32_IP}/siren/on", timeout=2.0)
     except Exception as e:
-        print(f"[SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
     return {"status": "activate_sent"}
 
 @app.post("/siren/deactivate")
 async def siren_deactivate(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     conn.close()
     try:
         requests.post(f"http://{ESP32_IP}/siren/off", timeout=2.0)
     except Exception as e:
-        print(f"[SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
     return {"status": "deactivate_sent"}
 
 @app.websocket("/ws")
@@ -762,11 +817,11 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+# --- VIDEO RECS MODULES ---
 @app.get("/api/records")
 async def get_video_records(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "view_records")
     cursor.execute("SELECT * FROM video_records ORDER BY recorded_at DESC")
@@ -777,7 +832,7 @@ async def get_video_records(authorization: Optional[str] = Header(None)):
 @app.post("/api/records/register_clip")
 async def register_clip(data: ManualClipSchema, authorization: Optional[str] = Header(None)):
     require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     rid = str(uuid.uuid4())[:8]
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -800,7 +855,7 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
 @app.patch("/api/records/{record_id}/notes")
 async def update_record_notes(record_id: str, data: RecordNotesSchema, authorization: Optional[str] = Header(None)):
     require_auth(authorization)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("UPDATE video_records SET notes = ? WHERE id = ?", (data.notes, record_id))
     conn.commit()
@@ -810,6 +865,7 @@ async def update_record_notes(record_id: str, data: RecordNotesSchema, authoriza
         raise HTTPException(status_code=404, detail="Record not found")
     return {"status": "updated", "id": record_id}
 
+# --- AUTH SECTOR CORES ---
 @app.post("/api/signup")
 async def signup(user: UserSignup):
     role = user.role.upper()
@@ -823,8 +879,7 @@ async def signup(user: UserSignup):
     if not barangay_id:
         raise HTTPException(status_code=400, detail="Location is required")
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
@@ -843,7 +898,7 @@ async def signup(user: UserSignup):
                 detail=f"This location already has a {role.replace('_', ' ').title()} account.",
             )
 
-        cursor.execute(
+        cursor.returning_execute(
             "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id) "
             "VALUES (?, ?, ?, ?, ?, NULL)",
             (user.username, hash_password(user.password), role, barangay_id, user.assignment),
@@ -859,15 +914,14 @@ async def signup(user: UserSignup):
             return {"status": "success"}
         return {"status": "pending_approval",
                 "detail": "Account created. A DevTeam administrator must approve this location before you can log in."}
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         raise HTTPException(status_code=400, detail="Operator profile already mapped.")
     finally:
         conn.close()
 
 @app.post("/api/login")
 async def login(creds: UserLogin):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE username = ?", (creds.username,))
     row = cursor.fetchone()
@@ -901,12 +955,15 @@ async def get_me(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     return {"user": payload}
 
+# --- DEVTEAM: LOCATION APPROVAL ---
 @app.get("/api/devteam/locations")
 async def list_locations(authorization: Optional[str] = Header(None), status: Optional[str] = None):
+    """Includes the requesting captain's username/role/assignment so DevTeam
+    has enough to actually verify the person before approving -- a bare
+    location name + status was not enough to tell who's asking."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     query = """
         SELECT b.*, u.username AS requester_username, u.role AS requester_role,
@@ -926,10 +983,10 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
 async def approve_location(barangay_id: str, data: LocationDecisionSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = datetime('now') WHERE id = ?",
+        "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
         (payload["id"], barangay_id),
     )
     conn.commit()
@@ -944,10 +1001,10 @@ async def approve_location(barangay_id: str, data: LocationDecisionSchema, autho
 async def reject_location(barangay_id: str, data: LocationDecisionSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE barangays SET status = 'rejected', approved_by = ?, approved_at = datetime('now') WHERE id = ?",
+        "UPDATE barangays SET status = 'rejected', approved_by = ?, approved_at = NOW() WHERE id = ?",
         (payload["id"], barangay_id),
     )
     conn.commit()
@@ -958,12 +1015,12 @@ async def reject_location(barangay_id: str, data: LocationDecisionSchema, author
     await manager.broadcast({"channel": "locations", "event": "location_rejected", "barangay_id": barangay_id})
     return {"status": "rejected", "barangay_id": barangay_id}
 
+# --- ADMIN: MANAGE YOUR OWN USERS ONLY ---
 @app.get("/api/admin/users")
 async def list_my_users(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    require_role(payload, ADMIN_ROLES | {"DEVTEAM"})
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    require_role(payload, ADMIN_OR_DEVTEAM)
+    conn = get_conn()
     cursor = conn.cursor()
     if payload["role"] == "DEVTEAM":
         cursor.execute("SELECT * FROM users")
@@ -977,14 +1034,14 @@ async def list_my_users(authorization: Optional[str] = Header(None)):
 @app.post("/api/admin/users")
 async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    require_role(payload, ADMIN_ROLES | {"DEVTEAM"})
+    require_role(payload, ADMIN_OR_DEVTEAM)
 
     target_role = ADMIN_CREATES_ROLE.get(payload["role"], "POLICE") if payload["role"] != "DEVTEAM" else "POLICE"
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     try:
-        cursor.execute(
+        cursor.returning_execute(
             "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (new_user.username, hash_password(new_user.password), target_role,
@@ -998,19 +1055,27 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
             for key, granted in new_user.permissions.items():
                 if granted and key in VALID_PERMISSION_KEYS:
                     cursor.execute(
-                        "INSERT OR IGNORE INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?)",
+                        "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
                         (new_id, key, payload["id"]),
                     )
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         return {"status": "success", "role": target_role, "id": new_id}
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         raise HTTPException(status_code=400, detail="That username is already taken.")
     finally:
         conn.close()
 
 @app.post("/api/devteam/users")
 async def devteam_create_user(new_user: DevteamCreateUser, authorization: Optional[str] = Header(None)):
+    """Full-power account creation -- DevTeam can create ANY role
+    (PRECINCT_CAPTAIN, BARANGAY_CAPTAIN, POLICE, BARANGAY) directly,
+    bypassing the self-signup approval flow, and grant it a permission
+    set from the same permission tree admins use for their sub-accounts.
+    A captain role still enforces the one-per-location unique index at
+    the DB level. Standard roles (POLICE/BARANGAY) can optionally be
+    slotted under an existing admin via parent_admin_id so they show up
+    under that admin's directory entry."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
@@ -1022,8 +1087,7 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
     if role in ADMIN_ROLES | STANDARD_ROLES and not barangay_id:
         raise HTTPException(status_code=400, detail="Location is required for this role")
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     try:
         if barangay_id:
@@ -1031,12 +1095,14 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             if not cursor.fetchone():
                 cursor.execute(
                     "INSERT INTO barangays (id, name, status, approved_by, approved_at) "
-                    "VALUES (?, ?, 'approved', ?, datetime('now'))",
+                    "VALUES (?, ?, 'approved', ?, NOW())",
                     (barangay_id, barangay_id.title(), payload["id"]),
                 )
 
         parent_id = new_user.parent_admin_id
         if role in STANDARD_ROLES and parent_id is None:
+            # auto-attach to whichever captain already runs this location,
+            # so the account shows up nested under someone in the directory
             captain_role = "PRECINCT_CAPTAIN" if role == "POLICE" else "BARANGAY_CAPTAIN"
             cursor.execute(
                 "SELECT id FROM users WHERE barangay_id = ? AND role = ?",
@@ -1045,7 +1111,7 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             existing_captain = cursor.fetchone()
             parent_id = existing_captain["id"] if existing_captain else None
 
-        cursor.execute(
+        cursor.returning_execute(
             "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (new_user.username, hash_password(new_user.password), role,
@@ -1058,14 +1124,14 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             for key, granted in new_user.permissions.items():
                 if granted and key in VALID_PERMISSION_KEYS:
                     cursor.execute(
-                        "INSERT OR IGNORE INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?)",
+                        "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
                         (new_id, key, payload["id"]),
                     )
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
         return {"status": "success", "role": role, "id": new_id, "barangay_id": barangay_id}
-    except sqlite3.IntegrityError as e:
+    except IntegrityError as e:
         raise HTTPException(
             status_code=400,
             detail="That username is taken, or this location already has that captain role filled.",
@@ -1076,10 +1142,9 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
 @app.patch("/api/admin/users/{user_id}/permissions")
 async def update_user_permissions(user_id: int, data: PermissionsUpdate, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    require_role(payload, ADMIN_ROLES | {"DEVTEAM"})
+    require_role(payload, ADMIN_OR_DEVTEAM)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT parent_admin_id FROM users WHERE id = ?", (user_id,))
     target = cursor.fetchone()
@@ -1105,10 +1170,9 @@ async def update_user_permissions(user_id: int, data: PermissionsUpdate, authori
 @app.delete("/api/admin/users/{user_id}")
 async def delete_my_user(user_id: int, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    require_role(payload, ADMIN_ROLES | {"DEVTEAM"})
+    require_role(payload, ADMIN_OR_DEVTEAM)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT parent_admin_id FROM users WHERE id = ?", (user_id,))
     target = cursor.fetchone()
@@ -1125,13 +1189,13 @@ async def delete_my_user(user_id: int, authorization: Optional[str] = Header(Non
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
 
+# --- DEVTEAM: FULL POWER OVER ANY USER (EDIT / DELETE) ---
 @app.patch("/api/devteam/users/{user_id}")
 async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
     target = cursor.fetchone()
@@ -1164,7 +1228,7 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
     try:
         cursor.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
         conn.commit()
-    except sqlite3.IntegrityError as e:
+    except IntegrityError as e:
         conn.close()
         raise HTTPException(status_code=400, detail=f"Update rejected: {e}")
 
@@ -1177,10 +1241,14 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
 
 @app.delete("/api/devteam/users/{user_id}")
 async def devteam_delete_user(user_id: int, authorization: Optional[str] = Header(None)):
+    """Full-power delete -- devteam can remove a captain (and, via ON DELETE
+    CASCADE on parent_admin_id, that captain's own sub-accounts lose their
+    parent link and become unassigned rather than vanish silently) or any
+    single standard/sub-admin account directly."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT role FROM users WHERE id = ?", (user_id,))
     target = cursor.fetchone()
@@ -1197,13 +1265,13 @@ async def devteam_delete_user(user_id: int, authorization: Optional[str] = Heade
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
 
+# --- DEVTEAM: FULL SYSTEM VISIBILITY (READ-ONLY OVERVIEW) ---
 @app.get("/api/devteam/overview")
 async def devteam_overview(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("SELECT id, username, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin FROM users")
@@ -1224,9 +1292,17 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     cursor.execute("SELECT barangay_id, COUNT(*) AS c FROM incidents GROUP BY barangay_id")
     incidents_by_location = [dict(r) for r in cursor.fetchall()]
 
+    # Full camera roster (not just a count) so DevteamView can group cameras
+    # by location and show which Precinct Captain / Barangay Captain is
+    # responsible for each -- same pairing used elsewhere: cameras and the
+    # two captains at a location all share one barangay_id.
+    cursor.execute("SELECT id, name, url, status, barangay_id FROM cameras ORDER BY barangay_id, name")
+    cameras = [dict(r) for r in cursor.fetchall()]
+
     conn.close()
     return {
         "users": users,
+        "cameras": cameras,
         "totals": {
             "users": len(users),
             "incidents": incident_count,

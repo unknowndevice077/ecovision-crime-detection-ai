@@ -19,39 +19,39 @@ const SMARTPOLE_LOCATIONS: SmartpoleNode[] = [
 
 const SAMPLE_REPORTS = [
   {
-    id: 'sample-sp1', caseId: 'CASE-C019AA60', type: 'ASSAULT', officer: 'AI_SENTINEL',
-    lat: 11.0176, lng: 124.6031, locationName: 'Cogon Core Smartpole Node',
-    severity: 'CRITICAL', date: '2026-06-01', militaryTime: '0552',
+    id: 'sample-sp1', case_id: 'CASE-C019AA60', type: 'ASSAULT', officer: 'AI_SENTINEL',
+    lat: 11.0176, lng: 124.6031, location_name: 'Cogon Core Smartpole Node',
+    severity: 'CRITICAL', occurred_date: '2026-06-01', occurred_time: '0552',
     narrative: 'Automated neural detection of ASSAULT.',
-    natureOfCall: 'AI Threat Flag', arrivalReason: 'Automated Tracking',
-    additionalOfficers: 'None', status: 'PENDING', screenshotPath: 'https://picsum.photos/seed/sp1/640/360'
+    nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
+    additional_officers: 'None', status: 'PENDING', screenshot_path: 'https://picsum.photos/seed/sp1/640/360'
   },
   {
-    id: 'sample-sp2', caseId: 'CASE-B882AC11', type: 'THEFT', officer: 'AI_SENTINEL',
-    lat: 11.0182, lng: 124.6025, locationName: 'Sector B Gate Smartpole Node',
-    severity: 'MEDIUM', date: '2026-06-02', militaryTime: '1114',
+    id: 'sample-sp2', case_id: 'CASE-B882AC11', type: 'THEFT', officer: 'AI_SENTINEL',
+    lat: 11.0182, lng: 124.6025, location_name: 'Sector B Gate Smartpole Node',
+    severity: 'MEDIUM', occurred_date: '2026-06-02', occurred_time: '1114',
     narrative: 'Automated neural detection of Theft / Larceny.',
-    natureOfCall: 'AI Threat Flag', arrivalReason: 'Automated Tracking',
-    additionalOfficers: 'None', status: 'Confirmed', screenshotPath: 'https://picsum.photos/seed/sp2/640/360'
+    nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
+    additional_officers: 'None', status: 'Confirmed', screenshot_path: 'https://picsum.photos/seed/sp2/640/360'
   },
   {
-    id: 'sample-sp3', caseId: 'CASE-N993DF44', type: 'PHYSICAL ALTERCATION', officer: 'AI_SENTINEL',
-    lat: 11.0145, lng: 124.6055, locationName: 'North Uplink Smartpole Node',
-    severity: 'HIGH', date: '2026-05-31', militaryTime: '0245',
+    id: 'sample-sp3', case_id: 'CASE-N993DF44', type: 'PHYSICAL ALTERCATION', officer: 'AI_SENTINEL',
+    lat: 11.0145, lng: 124.6055, location_name: 'North Uplink Smartpole Node',
+    severity: 'HIGH', occurred_date: '2026-05-31', occurred_time: '0245',
     narrative: 'Automated neural detection of a Physical Altercation on public lanes.',
-    natureOfCall: 'AI Threat Flag', arrivalReason: 'Automated Tracking',
-    additionalOfficers: 'None', status: 'Confirmed', screenshotPath: 'https://picsum.photos/seed/sp3/640/360'
+    nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
+    additional_officers: 'None', status: 'Confirmed', screenshot_path: 'https://picsum.photos/seed/sp3/640/360'
   }
 ];
 
 type Incident = {
-  id: string; caseId: string; type: string; officer: string;
-  lat: number; lng: number; locationName: string;
-  severity: string; date: string; militaryTime: string;
-  narrative: string; natureOfCall: string; arrivalReason: string;
-  additionalOfficers: string; status: string;
-  screenshotPath?: string;
-  mapHidden?: number | boolean;
+  id: string; case_id: string; type: string; officer: string;
+  lat: number; lng: number; location_name: string;
+  severity: string; occurred_date: string; occurred_time: string;
+  narrative: string; nature_of_call: string; arrival_reason: string;
+  additional_officers: string; status: string;
+  screenshot_path?: string;
+  map_hidden?: number | boolean;
 };
 
 interface CrimeReportsViewProps {
@@ -100,13 +100,13 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   const filteredIncidents = useMemo(() => {
     return incidents.filter(inc => {
       // Expunged from this view only -- Crime History still has it.
-      if (inc.mapHidden === 1 || inc.mapHidden === true) return false;
+      if (inc.map_hidden === 1 || inc.map_hidden === true) return false;
       if (selectedPole) {
-        const match = inc.locationName.toLowerCase().includes(selectedPole.name.toLowerCase()) ||
-                      inc.locationName.toLowerCase().includes(selectedPole.street.toLowerCase());
+        const match = inc.location_name.toLowerCase().includes(selectedPole.name.toLowerCase()) ||
+                      inc.location_name.toLowerCase().includes(selectedPole.street.toLowerCase());
         if (!match) return false;
       }
-      if (poleDateFilter && !inc.date.includes(poleDateFilter)) return false;
+      if (poleDateFilter && !inc.occurred_date.includes(poleDateFilter)) return false;
       if (poleTypeFilter !== 'ALL' && inc.type.toUpperCase() !== poleTypeFilter.toUpperCase()) return false;
    
       return true;
@@ -184,7 +184,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     // on top of pole markers (same coords) permanently eating their clicks.
     incidents
       .filter(inc => (inc.status || '').toLowerCase() !== 'dismissed')
-      .filter(inc => inc.mapHidden !== 1 && inc.mapHidden !== true)
+      .filter(inc => inc.map_hidden !== 1 && inc.map_hidden !== true)
       .forEach(inc => {
         const isConfirmed = (inc.status || '').toLowerCase() === 'confirmed';
         const ringColor = isConfirmed ? 'border-emerald-500' : 'border-red-500';
@@ -274,7 +274,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     // and must keep the permanent record even after this view "removes" it.
     const res = await fetch(`${API_URL}/api/incidents/${incidentId}/archive`, { method: 'PATCH' });
     if (res.ok) {
-      setIncidents(prev => prev.map(i => i.id === incidentId ? { ...i, mapHidden: 1 } : i));
+      setIncidents(prev => prev.map(i => i.id === incidentId ? { ...i, map_hidden: 1 } : i));
       onUpdate();
     }
   };
@@ -287,20 +287,21 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     const now = new Date();
     const payload = {
       id: generatedId,
-      caseId: `CASE-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}-${Math.random().toString(36).substr(2,4).toUpperCase()}`,
+      case_id: `CASE-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}-${Math.random().toString(36).substr(2,4).toUpperCase()}`,
       type: manualType.toUpperCase(),
       officer: "MANUAL_ENTRY",
       lat: selectedPole.lat,
       lng: selectedPole.lng,
-      locationName: selectedPole.name,
+      location_name: selectedPole.name,
       severity: manualSeverity,
-      date: now.toISOString().split('T')[0],
-      militaryTime: now.toTimeString().split(' ')[0].replace(/:/g, '').substring(0,4),
+      occurred_date: now.toISOString().split('T')[0],
+      occurred_time: now.toTimeString().split(' ')[0].replace(/:/g, '').substring(0,4),
       narrative: manualNarrative,
-      natureOfCall: "Operator Manual Filing",
-      arrivalReason: "Field Request",
-      additionalOfficers: "None",
-      status: "Active"
+      nature_of_call: "Operator Manual Filing",
+      arrival_reason: "Field Request",
+      additional_officers: "None",
+      status: "Active",
+      barangay_id: "cogon"
     };
     const res = await fetch(`${API_URL}/api/incidents`, {
       method: "POST",
@@ -329,8 +330,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           status: "Confirmed",
-          captureSnapshot: true,
-          reportDetails: reportForm
+          capture_snapshot: true,
+          report_details: reportForm
         })
       });
       setShowFilingModal(false); 
@@ -347,10 +348,10 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
   const reportImageUrl = useMemo(() => {
     if (!filingTarget) return '';
-    if (filingTarget.screenshotPath) {
-      return filingTarget.screenshotPath.startsWith('http')
-        ? filingTarget.screenshotPath
-        : `${API_URL}${filingTarget.screenshotPath}`;
+    if (filingTarget.screenshot_path) {
+      return filingTarget.screenshot_path.startsWith('http')
+        ? filingTarget.screenshot_path
+        : `${API_URL}${filingTarget.screenshot_path}`;
     }
     return 'https://picsum.photos/seed/ai-crime-report/900/450';
   }, [filingTarget, API_URL]);
@@ -533,22 +534,22 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                   return (
                     <div key={inc.id} className="w-full text-left p-5 bg-[#0a0d14] border border-white/[0.04] rounded-xl flex flex-col gap-2 hover:border-white/10 transition-all relative">
                       <div className="flex justify-between items-center text-[10px] font-mono">
-                        <span className="text-emerald-400 font-bold select-all">{inc.caseId}</span>
-                        <span className="text-slate-500 tabular-nums">{formatTo12Hour(inc.militaryTime)}</span>
+                        <span className="text-emerald-400 font-bold select-all">{inc.case_id}</span>
+                        <span className="text-slate-500 tabular-nums">{formatTo12Hour(inc.occurred_time)}</span>
                       </div>
 
                       <h5 className="text-[14px] font-black uppercase text-slate-200 tracking-wide mt-0.5">{inc.type}</h5>
                       
-                      {inc.screenshotPath && !isImageBroken ? (
+                      {inc.screenshot_path && !isImageBroken ? (
                         <div className="w-full h-24 bg-black border border-white/5 rounded-lg overflow-hidden relative shadow-inner mt-1">
                           <img 
-                            src={inc.screenshotPath.startsWith('http') ? inc.screenshotPath : `${API_URL}${inc.screenshotPath}`} 
+                            src={inc.screenshot_path.startsWith('http') ? inc.screenshot_path : `${API_URL}${inc.screenshot_path}`} 
                             className="w-full h-full object-cover" 
                             alt="AI Camera Log Snap" 
                             onError={() => setBrokenImages(prev => ({ ...prev, [inc.id]: true }))}
                           />
                         </div>
-                      ) : inc.screenshotPath ? (
+                      ) : inc.screenshot_path ? (
                         <div className="w-full h-20 bg-white/[0.02] border border-white/5 border-dashed rounded-lg mt-1 flex flex-col items-center justify-center text-slate-600 gap-1 animate-in fade-in">
                           <AlertCircle size={14} className="text-slate-500" />
                           <span className="text-[8px] font-mono font-bold uppercase tracking-wider">Scene Image Missing (404)</span>
@@ -560,7 +561,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                       <div className="flex gap-2 pt-2 mt-1 border-t border-white/5 justify-end items-center text-[10px] uppercase tracking-wider font-extrabold">
                         <div className="flex items-center gap-3">
                           <button
-                            title={`Generate official incident report form for case ${inc.caseId}`}
+                            title={`Generate official incident report form for case ${inc.case_id}`}
                             onClick={() => handleOpenReportFiler(inc)}
                             className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 font-black"
                           >
@@ -639,9 +640,9 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
             <div className="p-6 space-y-5">
               <div className="grid grid-cols-3 gap-4 bg-black/20 p-4 rounded-xl border border-white/5 font-mono text-xs text-slate-400">
-                <div><span className={labelClass}>Case ID</span><span className="text-emerald-500 font-bold">{filingTarget.caseId}</span></div>
+                <div><span className={labelClass}>Case ID</span><span className="text-emerald-500 font-bold">{filingTarget.case_id}</span></div>
                 <div><span className={labelClass}>Type</span><span className="text-white font-bold uppercase">{filingTarget.type}</span></div>
-                <div><span className={labelClass}>Timestamp</span><span className="text-slate-300">{filingTarget.date} {formatTo12Hour(filingTarget.militaryTime)}</span></div>
+                <div><span className={labelClass}>Timestamp</span><span className="text-slate-300">{filingTarget.occurred_date} {formatTo12Hour(filingTarget.occurred_time)}</span></div>
               </div>
 
               <div className="space-y-2 animate-in fade-in duration-300">
@@ -663,7 +664,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                     <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">Secured Forensic Capture Not Found (404)</span>
                   </div>
                 )}
-                {!filingTarget.screenshotPath && (
+                {!filingTarget.screenshot_path && (
                   <p className="text-[8px] text-slate-500 uppercase tracking-widest font-mono">Placeholder crime scene image used because no AI evidence frame was attached.</p>
                 )}
               </div>

@@ -5,21 +5,25 @@ import { Shield, Lock, User, ArrowRight } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 export default function LoginPage() {
   const [creds, setCreds] = useState({ username: '', password: '' });
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setIsSubmitting(true);
     try {
-      const res = await fetch("http://localhost:8000/api/login", {
+      const res = await fetch(`${API_URL}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(creds),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         // Token is a signed, server-verified session credential -- the
         // backend checks it (and the role inside it) on every admin/devteam
@@ -32,6 +36,8 @@ export default function LoginPage() {
       }
     } catch (err) {
       setError("System Offline: Check Backend Connection");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -56,8 +62,10 @@ export default function LoginPage() {
             <input 
               title="Enter your Username ID"
               placeholder="Username ID"
+              value={creds.username}
               onChange={e => setCreds({...creds, username: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 text-xs text-white outline-none focus:border-emerald-500 font-mono" 
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 text-xs text-white outline-none focus:border-emerald-500 font-mono disabled:opacity-50" 
               required
             />
           </div>
@@ -70,16 +78,21 @@ export default function LoginPage() {
               type="password" 
               title="Enter your Access Key"
               placeholder="Secure Access Key"
+              value={creds.password}
               onChange={e => setCreds({...creds, password: e.target.value})}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 text-xs text-white outline-none focus:border-emerald-500 font-mono" 
+              disabled={isSubmitting}
+              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 text-xs text-white outline-none focus:border-emerald-500 font-mono disabled:opacity-50" 
               required
             />
           </div>
 
           {error && <p className="text-red-500 text-[9px] text-center font-bold uppercase animate-pulse">{error}</p>}
 
-          <button className="w-full py-4 bg-emerald-600 text-black font-black uppercase text-[10px] tracking-[0.2em] rounded-xl hover:bg-emerald-500 active:scale-95 transition-all shadow-xl flex items-center justify-center gap-2">
-            Authorize Node <ArrowRight size={14}/>
+          <button
+            disabled={isSubmitting}
+            className="w-full py-4 bg-emerald-600 text-black font-black uppercase text-[10px] tracking-[0.2em] rounded-xl hover:bg-emerald-500 active:scale-95 transition-all shadow-xl flex items-center justify-center gap-2 disabled:opacity-50 disabled:active:scale-100"
+          >
+            {isSubmitting ? "Authorizing…" : "Authorize Node"} <ArrowRight size={14}/>
           </button>
         </form>
 
