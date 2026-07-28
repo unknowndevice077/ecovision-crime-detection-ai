@@ -100,6 +100,18 @@ CREATE TABLE IF NOT EXISTS incident_details (
     additional_officers TEXT
 );
 
+CREATE TABLE IF NOT EXISTS incident_reports (
+    id                  TEXT PRIMARY KEY,
+    incident_id         TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+    reported_by         INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    narrative           TEXT,
+    nature_of_call      TEXT,
+    arrival_reason      TEXT,
+    additional_officers TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_incident_reports_incident ON incident_reports(incident_id);
+
 CREATE TABLE IF NOT EXISTS incident_visibility (
     incident_id     TEXT PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,
     map_hidden      INTEGER NOT NULL DEFAULT 0,

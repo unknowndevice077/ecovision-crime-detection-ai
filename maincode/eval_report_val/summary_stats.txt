@@ -3,26 +3,26 @@ EcoVision X3D-XS -- EVALUATION REPORT
 ==============================================================================
 Split evaluated: TRUE HELD-OUT (val) -- clips the model NEVER trained on
 
-Generated: 2026-07-10 05:04:37
+Generated: 2026-07-28 03:25:43
 Dataset roots: ['D:\\EcoVisionImagesTraining\\To_Be_Trained2\\archive', 'D:\\EcoVisionImagesTraining\\To_Be_Trained2\\SCVD']
 Total clips evaluated: 769
-Evaluation wall time: 41.4 min
+Evaluation wall time: 31.9 min
 
 -- Confusion Matrix --
-TP=286  FN=88  TN=229  FP=166
-Accuracy:  67.0%
-Recall:    76.5%
-Precision: 63.3%
-False Positive Rate: 42.0%
+TP=238  FN=136  TN=303  FP=92
+Accuracy:  70.4%
+Recall:    63.6%
+Precision: 72.1%
+False Positive Rate: 23.3%
 
 -- Mean max-confidence by outcome bucket --
-  TP: 0.642  (n=286)
-  FN: 0.197  (n=88)
-  TN: 0.187  (n=229)
-  FP: 0.582  (n=166)
+  TP: 0.667  (n=238)
+  FN: 0.278  (n=136)
+  TN: 0.233  (n=303)
+  FP: 0.646  (n=92)
 
 -- Pipeline health --
-Clips with NO real inference ever run (no crop captured): 100 / 769
+Clips with NO real inference ever run (no crop captured): 109 / 769
 (these clips' JPGs show a fallback raw frame labeled 'NO INFERENCE' --
  worth a manual look, since these are likely pose-tracking failures, not
  model failures)

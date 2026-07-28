@@ -18,7 +18,7 @@
   "dependencies": {
     "axios": "^1.6.2",
     "date-fns": "^2.30.0",
-    "lucide-react": "^1.12.0",
+    "lucide-react": "^0.469.0",
     "next": "^16.2.4",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
@@ -51,7 +51,7 @@
     "electron-builder": "^25.1.8",
     "postcss": "^8.5.12",
     "tailwindcss": "^4.2.4",
-    "typescript": "^6.0.3"
+    "typescript": "^5.7.2"
   },
   "build": {
     "appId": "com.ecovision.sentinel",
@@ -68,6 +68,7 @@
         { "target": "nsis", "arch": ["x64"] }
       ]
     },
+    "compression": "maximum",
     "nsis": {
       "oneClick": false,
       "perMachine": false,
@@ -86,7 +87,11 @@
       "package.json"
     ],
     "extraResources": [
+      { "from": "python-env", "to": "python-env", "filter": ["**/*"] },
       { "from": "app/backend.py", "to": "backend/backend.py" },
+      { "from": "app/db.py", "to": "backend/db.py" },
+      { "from": "app/port_utils.py", "to": "backend/port_utils.py" },
+      { "from": "app/port_utils.py", "to": "maincode/port_utils.py" },
       { "from": "app/schema_final.sql", "to": "backend/schema_final.sql" },
       { "from": "maincode/main.py", "to": "maincode/main.py" },
       { "from": "maincode/robbery_vandalism.py", "to": "maincode/robbery_vandalism.py" },

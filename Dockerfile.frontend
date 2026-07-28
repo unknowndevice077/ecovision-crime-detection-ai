@@ -1,0 +1,33 @@
+# --- deps: install once, cached separately from source changes ---
+FROM node:20-slim AS deps
+WORKDIR /app
+# Deliberately NOT copying package-lock.json -- it was generated on Windows
+# and pins lightningcss (Tailwind v4's native CSS engine) to the Windows
+# binary. npm install still honors an existing lockfile's resolved tree
+# even without --ci, so the wrong binary keeps winning. Only package.json
+# here forces npm to resolve dependencies fresh against this container's
+# actual Linux platform.
+COPY package.json ./
+RUN npm install
+
+# --- builder: build the Next.js app ---
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+RUN npm run build
+RUN mkdir -p public
+
+# --- runner: minimal final image, standalone output only ---
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+EXPOSE 3000
+CMD ["node", "server.js"]

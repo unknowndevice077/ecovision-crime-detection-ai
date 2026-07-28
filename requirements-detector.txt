@@ -1,0 +1,23 @@
+# requirements-detector.txt
+--extra-index-url https://download.pytorch.org/whl/cu121
+fastapi==0.136.1
+starlette==1.0.0
+uvicorn==0.46.0
+pydantic==2.13.3
+pydantic_core==2.46.3
+requests==2.33.1
+opencv-python-headless==4.13.0.92
+numpy==2.4.4
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+ultralytics==8.4.42
+ultralytics-thop==2.0.19
+pytorchvideo==0.1.5
+lap==0.5.13
+scipy==1.17.1
+PyYAML==6.0.3
+pillow==12.2.0
+tqdm==4.67.3
+pandas==3.0.3
+psutil==7.2.2
+tensorrt-cu12

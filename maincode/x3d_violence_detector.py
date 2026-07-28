@@ -29,7 +29,28 @@ CLIP_FRAMES        = 13
 FRAME_SIZE         = 160
 BUFFER_SPAN         = 45     
 X3D_CHECK_INTERVAL  = 15
-VIOLENCE_CONFIDENCE_THRESHOLD = 0.40
+VIOLENCE_CONFIDENCE_THRESHOLD = 0.40   # LOCKED (true held-out test, test_x3d_true_heldout.py):
+                                        # 76.5% recall / 63.3% precision / 67.0% acc / 42.0% FPR.
+                                        # A separate 0.50 sweep exists in old notes (70.5% acc,
+                                        # 23.3% FPR, ~10pt recall drop) but was NOT run through
+                                        # the true held-out split -- 0.40 is the number cited in
+                                        # the thesis and is the deployed value. Do not change
+                                        # without re-running test_x3d_true_heldout.py.
+
+# Live-deployment-only hysteresis. Does NOT change the model, the threshold,
+# or the thesis-cited accuracy numbers above (those are per-inference, still
+# computed the same way) -- this just requires the SAME track to trip the
+# threshold on CONSECUTIVE checks (spaced X3D_CHECK_INTERVAL frames apart)
+# before main.py is told "violent". A lone noisy window (jitter, a gesture,
+# a bystander's motion leaking into the crop) no longer flips state by itself.
+VIOLENCE_CONSECUTIVE_REQUIRED = 2
+
+# How far (in multiples of the person's own box size) to search for a nearby
+# second person to merge into the crop. This used to be 3x, which routinely
+# pulled in unrelated bystanders several body-lengths away and fed their
+# motion into a "standing still" track's clip. 1.3x keeps the intent (catch
+# a genuine close-contact pair) without grabbing everyone in the frame.
+BYSTANDER_MERGE_RADIUS_MULT = 1.3
 
 class X3DViolenceDetector:
     """
@@ -67,6 +88,7 @@ class X3DViolenceDetector:
         self._cached_result: dict[int, tuple] = {}   
         self._real_inference_count: dict[int, int] = {}   
         self._latest_live_crops: dict[int, np.ndarray] = {}
+        self._consecutive_hits: dict[int, int] = {}   # per-track raw-positive streak, for hysteresis
         
         # SUPPORT EXTENSION: In-memory dictionary tracking coordinates fed to the model
         self._active_crop_boxes: dict[int, tuple] = {}
@@ -86,7 +108,7 @@ class X3DViolenceDetector:
         if all_boxes is not None:
             my_center_x = (x1 + x2) / 2
             my_center_y = (y1 + y2) / 2
-            search_radius = max(x2 - x1, y2 - y1) * 3   
+            search_radius = max(x2 - x1, y2 - y1) * BYSTANDER_MERGE_RADIUS_MULT
 
             for ob in all_boxes:
                 ox1, oy1, ox2, oy2 = [int(v) for v in ob]
@@ -129,7 +151,17 @@ class X3DViolenceDetector:
 
         if buffer_full and due_for_check:
             self._last_check_frame[tid] = frame_count
-            self._cached_result[tid] = self._run_inference(self._frame_buffers[tid], tid=tid)
+            raw_is_violent, raw_conf = self._run_inference(self._frame_buffers[tid], tid=tid)
+
+            if raw_is_violent:
+                self._consecutive_hits[tid] = self._consecutive_hits.get(tid, 0) + 1
+            else:
+                self._consecutive_hits[tid] = 0
+
+            confirmed = self._consecutive_hits[tid] >= VIOLENCE_CONSECUTIVE_REQUIRED
+            # Confidence shown/logged is still the raw model probability --
+            # only the boolean alert state is gated by hysteresis.
+            self._cached_result[tid] = (confirmed, raw_conf)
 
         return self._cached_result[tid]
 
@@ -193,3 +225,4 @@ class X3DViolenceDetector:
         self._real_inference_count.pop(tid, None)
         self._latest_live_crops.pop(tid, None)
         self._active_crop_boxes.pop(tid, None)
+        self._consecutive_hits.pop(tid, None)

@@ -1,12 +1,18 @@
+# Dockerfile.backend
 FROM python:3.11-slim
-WORKDIR /srv/ecovision
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt psycopg2-binary alembic python-dotenv
+WORKDIR /app
 
-COPY app/backend.py app/db.py app/schema_final.sql app/
-COPY config.production.json .
-COPY config.json .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-backend.txt .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r requirements-backend.txt
+
+COPY config.json config.json
+COPY app/backend.py app/db.py app/schema_final.sql app/reset_devteam_password.py app/
 
 EXPOSE 8000
-CMD ["uvicorn", "app.backend:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "app/backend.py"]

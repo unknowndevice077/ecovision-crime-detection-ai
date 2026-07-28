@@ -59,7 +59,13 @@ from x3d_violence_detector import X3DViolenceDetector
 # built its own copy of the gather/shuffle/split logic and it drifted even
 # slightly from train_x3d_full.py's, the "held-out" set wouldn't actually
 # match what was reported in the thesis anymore.
-from test_x3d_true_heldout import gather_all_clips_EXACT_TRAINING_LOGIC, POSE_IMGSZ, POSE_MODEL_PATH
+from test_x3d_true_heldout import (
+    gather_all_clips_EXACT_TRAINING_LOGIC,
+    POSE_IMGSZ,
+    POSE_MODEL_PATH,
+    DEFAULT_RWF_ROOT,
+    DEFAULT_SCVD_ROOT,
+)
 
 
 CROP_DISPLAY_SIZE = 320   # upscaled display size for the saved crop (source crop is 160x160)
@@ -368,8 +374,8 @@ def run_report(roots: list, device: str, output_dir: str, split: str = "val", li
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EcoVision X3D-XS evaluation report generator")
-    parser.add_argument("--rwf-root", type=str, default=None)
-    parser.add_argument("--scvd-root", type=str, default=None)
+    parser.add_argument("--rwf-root", type=str, default=DEFAULT_RWF_ROOT)
+    parser.add_argument("--scvd-root", type=str, default=DEFAULT_SCVD_ROOT)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--output-dir", type=str, default=None,
                          help="Defaults to 'eval_report_<split>' so train/val/all runs never overwrite each other")

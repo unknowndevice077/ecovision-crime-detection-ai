@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 from types import ModuleType
 from concurrent.futures import ThreadPoolExecutor
 import torch
-
+from port_utils import find_free_port, write_runtime_port
 # ──────────────────────────────────────────────────────────────────────────────
 # 0. DEPENDENCY CHECK
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,6 +170,17 @@ SCENE_COOLDOWN_FRAMES  = 120
 MAX_UNSEEN_FRAMES      = sys_config["detection"].get("max_unseen_frames", 180)
 
 GRIP_THRESHOLD         = 60
+# Fixed-pixel grip radius doesn't scale with camera distance/zoom -- a person
+# close to the camera and one far away need different pixel tolerances for
+# "this object is in their hand." Grip radius is now max(GRIP_THRESHOLD,
+# fraction of that person's own box height) so it stays proportional.
+GRIP_RADIUS_BOX_FRAC   = 0.35
+# A weapon-track must be a MEANINGFULLY closer match to steal an assignment
+# away from whoever it was assigned to last frame -- stops a false-positive
+# weapon box from flickering between adjacent people every frame due to pose
+# jitter alone. 0.8 means a new candidate has to be <80% of the previous
+# holder's distance to take over.
+GRIP_STICKY_MARGIN     = 0.80
 
 ESP32_IP    = sys_config["esp32"].get("ip_override") or "192.168.254.152"
 BACKEND_URL = f"{sys_config['networking']['api_url'].rstrip('/')}/api/ai_trigger"
@@ -217,10 +228,13 @@ def video_feed():
     )
 
 def _start_stream_server():
-    uvicorn.run(stream_app, host=sys_config["backend"]["host"], port=8001, log_level="error")
+    preferred_port = 8001
+    actual_port = find_free_port(preferred_port)
+    write_runtime_port("detector", actual_port)
+    print(f"📡 Dynamic Stream server live → http://localhost:{actual_port}/video_feed")
+    uvicorn.run(stream_app, host=sys_config["backend"]["host"], port=actual_port, log_level="error")
 
 threading.Thread(target=_start_stream_server, daemon=True).start()
-print(f"📡 Dynamic Stream server live → http://localhost:8001/video_feed")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. HARDWARE DISCOVERY & MODEL INITIALIZATION MATRIX
@@ -245,22 +259,76 @@ SCREENSHOTS_DIR = os.path.join(PROJECT_ROOT, "static", "screenshots")
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
-pose_file_name   = "yolo11s-pose.engine" if os.path.exists(os.path.join(WEIGHTS_DIR, "yolo11s-pose.engine")) else "yolo11s-pose.pt"
-weapon_file_name = "weapon_signs.engine" if os.path.exists(os.path.join(WEIGHTS_DIR, "weapon_signs.engine")) else "weapon_signs.pt"
-x3d_model_path  = os.path.join(WEIGHTS_DIR, "x3d_xs_violence_best.pt")
+# Verify CUDA actually works (not just available)
+USE_CUDA = False
+if torch.cuda.is_available():
+    try:
+        # Test that CUDA actually functions (not just installed)
+        test_tensor = torch.zeros(1, device='cuda')
+        del test_tensor
+        USE_CUDA = True
+        print(f"✅ CUDA verified working on device: {torch.cuda.get_device_name(0)}")
+    except Exception as e:
+        print(f"⚠️  CUDA available but not working: {str(e)[:80]}")
+        USE_CUDA = False
 
-pose_model_path = os.path.join(WEIGHTS_DIR, pose_file_name)
-w_weight_path   = os.path.join(WEIGHTS_DIR, weapon_file_name)
-
-USE_CUDA = torch.cuda.is_available()
 TARGET_DEVICE = "cuda" if USE_CUDA else "cpu"
 print(f"📡 [HARDWARE PROFILER] Selected Execution Target: {TARGET_DEVICE.upper()}")
-print(f"📦 [ENGINE LOADER] Mounting Pose Pipeline: {pose_file_name}")
-print(f"📦 [ENGINE LOADER] Mounting Weapon Pipeline: {weapon_file_name}")
 
-pose_model     = YOLO(pose_model_path, task="pose")
-violence_model = YOLO(w_weight_path, task="detect")
+# ──────────────────────────────────────────────────────────────────────────────
+# 3.5 ENGINE LOADER WITH GRACEFUL FALLBACK (GPU → CPU)
+# ──────────────────────────────────────────────────────────────────────────────
+def load_model_with_fallback(engine_name: str, pt_name: str, task: str, weights_dir: str):
+    """
+    Attempts to load a TensorRT engine if CUDA is available.
+    Falls back to PyTorch .pt file if engine fails to initialize or CUDA unavailable.
+    If neither exists, attempts to download the PT file from Ultralytics.
+    """
+    engine_path = os.path.join(weights_dir, engine_name)
+    pt_path = os.path.join(weights_dir, pt_name)
+    
+    # Prefer engine only if CUDA available AND file exists
+    use_engine = USE_CUDA and os.path.exists(engine_path)
+    
+    if use_engine:
+        try:
+            print(f"🔄 Attempting TensorRT engine: {engine_name}")
+            model = YOLO(engine_path, task=task)
+            # Warm-up to catch CUDA init errors early (don't force GPU device, let it use what's available)
+            _dummy = np.zeros((416, 416, 3), dtype=np.uint8)
+            model.predict(_dummy, verbose=False, imgsz=416, device="cuda:0" if USE_CUDA else "cpu")
+            print(f"✅ TensorRT engine loaded: {engine_name}")
+            return model, engine_name
+        except Exception as e:
+            print(f"⚠️  TensorRT engine failed ({engine_name}): {str(e)[:100]}")
+            print(f"   Falling back to PyTorch model: {pt_name}")
+    
+    # Check if PT file exists, if not Ultralytics will download it
+    if not os.path.exists(pt_path):
+        print(f"📦 {pt_name} not found locally, Ultralytics will attempt to download it...")
+    else:
+        print(f"📦 Loading PyTorch model: {pt_name}")
+    
+    # Fallback to PT file (works on both GPU and CPU, downloads if missing)
+    try:
+        model = YOLO(pt_path, task=task)
+        return model, pt_name
+    except Exception as e:
+        print(f"❌ Failed to load {pt_name}: {str(e)}")
+        raise
+
+pose_model, pose_file_name = load_model_with_fallback(
+    "yolo11s-pose.engine", "yolo11s-pose.pt", "pose", WEIGHTS_DIR
+)
+violence_model, weapon_file_name = load_model_with_fallback(
+    "weapon_signs.engine", "weapon_signs.pt", "detect", WEIGHTS_DIR
+)
+
+x3d_model_path = os.path.join(WEIGHTS_DIR, "x3d_xs_violence_best.pt")
 x3d_detector   = X3DViolenceDetector(model_path=x3d_model_path, device=TARGET_DEVICE)
+
+print(f"📦 [ENGINE LOADER] Using Pose Pipeline: {pose_file_name}")
+print(f"📦 [ENGINE LOADER] Using Weapon Pipeline: {weapon_file_name}")
 
 if pose_file_name.endswith(".pt"):
     pose_model.to(TARGET_DEVICE)
@@ -341,6 +409,7 @@ _vbox_tracker = VBoxTracker()
 # ──────────────────────────────────────────────────────────────────────────────
 _weapon_track_store:   dict[int, dict] = {}
 _weapon_track_counter: int             = 0
+_weapon_grip_sticky:   dict[int, int]  = {}   # weapon-track wid -> person tid it's currently gripped by
 
 def _update_weapon_tracks(raw_weapons: list) -> list:
     global _weapon_track_counter
@@ -386,8 +455,9 @@ def _update_weapon_tracks(raw_weapons: list) -> list:
     stale = [wid for wid, t in _weapon_track_store.items() if t["unseen"] > WEAPON_MAX_UNSEEN]
     for wid in stale:
         del _weapon_track_store[wid]
+        _weapon_grip_sticky.pop(wid, None)   # clear stale grip-assignment memory too
 
-    return list(_weapon_track_store.values())
+    return [{**t, "wid": wid} for wid, t in _weapon_track_store.items()]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 8. WEAPON DETECTION THREAD WORKER
@@ -440,25 +510,58 @@ def _bbox_overlap_count(p_box, all_boxes):
             if ratio > OVERLAP_IOU_THRESH: count += 1
     return count
 
-def _assign_weapons(active_weapons, ids, kpts, boxes):
+def _assign_weapons(active_weapons, ids, kpts, boxes, sticky_assign: dict):
+    """
+    Assigns each detected weapon to the nearest wrist, gated by a grip
+    radius that scales with that person's own box size (not a fixed pixel
+    count -- a fixed radius is either too loose up close or too tight far
+    from the camera). Also keeps a per-weapon-track "sticky" memory: once
+    weapon-track `wid` is assigned to track `tid`, a DIFFERENT track has to
+    be meaningfully closer (not just marginally, from pose jitter) to steal
+    it. This is what stops a false-positive weapon box from bouncing between
+    two nearby standing people frame-to-frame.
+    """
     assignments: dict[int, list] = {tid: [] for tid in ids}
+
+    box_by_tid = {tid: b for tid, b in zip(ids, boxes)}
+    wrists_by_tid = {}
+    for tid, joints in zip(ids, kpts):
+        wrists = joints[[9, 10]]
+        valid = wrists[np.any(wrists > 1, axis=1)]
+        if len(valid) > 0:
+            wrists_by_tid[tid] = valid
+
     for weapon in active_weapons:
-        w_center  = np.array(weapon["center"])
-        best_tid, best_score = None, float("inf")
+        wid = weapon.get("wid")
+        w_center = np.array(weapon["center"])
 
-        for tid, joints, p_box in zip(ids, kpts, boxes):
-            wrists = joints[[9, 10]]
-            valid  = wrists[np.any(wrists > 1, axis=1)]
-            if len(valid) == 0: continue
+        candidates = {}
+        for tid in ids:
+            if tid not in wrists_by_tid:
+                continue
+            p_box = box_by_tid[tid]
+            box_h = max(p_box[3] - p_box[1], 1)
+            grip_radius = max(GRIP_THRESHOLD, box_h * GRIP_RADIUS_BOX_FRAC)
+            dist = float(np.min(np.linalg.norm(wrists_by_tid[tid] - w_center, axis=1)))
+            if dist <= grip_radius:
+                candidates[tid] = dist
 
-            dist = float(np.min(np.linalg.norm(valid - w_center, axis=1)))
-            margin = 30
-            outside = (w_center[0] < p_box[0] - margin or w_center[0] > p_box[2] + margin or w_center[1] < p_box[1] - margin or w_center[1] > p_box[3] + margin)
-            if outside: dist += 350
-            if dist < best_score: best_score = dist; best_tid = tid
+        if not candidates:
+            if wid is not None:
+                sticky_assign.pop(wid, None)   # nobody's wrist is close enough -- drop any memory
+            continue
 
-        if best_tid is not None and best_score < GRIP_THRESHOLD + 350:
-            assignments[best_tid].append(weapon)
+        best_tid = min(candidates, key=candidates.get)
+
+        prev_tid = sticky_assign.get(wid) if wid is not None else None
+        if prev_tid is not None and prev_tid in candidates:
+            if candidates[prev_tid] <= candidates[best_tid] / GRIP_STICKY_MARGIN:
+                best_tid = prev_tid   # previous holder is still close enough -- don't steal it
+
+        if wid is not None:
+            sticky_assign[wid] = best_tid
+
+        assignments[best_tid].append(weapon)
     return assignments
 
 def _vbox_overlap_ratio(p_box, vb):
@@ -634,6 +737,27 @@ def _reopen_camera():
 
 class CameraIndexRequest(BaseModel):
     index: int
+
+
+@stream_app.get("/available_cameras")
+def get_available_cameras():
+    """Detects available camera indices by attempting to open each one.
+    Returns a list of working camera indices (0-9 checked by default)."""
+    available = []
+    for idx in range(10):  # Check indices 0-9
+        try:
+            test_cap = cv2.VideoCapture(idx)
+            if test_cap.isOpened():
+                # Try to read a frame to confirm it's actually available
+                ret, _ = test_cap.read()
+                test_cap.release()
+                if ret:
+                    available.append(idx)
+            else:
+                test_cap.release()
+        except Exception:
+            pass
+    return {"available_cameras": available, "current_index": camera_idx}
 
 
 @stream_app.post("/set_camera_index")
@@ -882,7 +1006,7 @@ while _running:
                 victims[tid] = {"center": np.mean(valid, axis=0), "box": b}
 
         weapon_only = [w for w in tracked_weapons if w["name"] not in SIGN_CLASSES]
-        weapon_assigns = _assign_weapons(weapon_only, ids, kpts, boxes)
+        weapon_assigns = _assign_weapons(weapon_only, ids, kpts, boxes, _weapon_grip_sticky)
 
         # ── FIX: snapshot prev_joints BEFORE the per-track loop below
         # overwrites it with this frame's wrist positions. Vandalism scoring

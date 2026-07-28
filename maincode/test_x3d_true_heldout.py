@@ -35,6 +35,10 @@ NONFIGHT_KEYWORDS = ["nonfight", "non-fight", "normal"]
 
 OUTPUT_CSV = "x3d_true_heldout_results.csv"
 
+# Fixed dataset locations -- always here, no need to pass --rwf-root/--scvd-root.
+DEFAULT_RWF_ROOT = r"D:\EcoVisionImagesTraining\To_Be_Trained2\archive"
+DEFAULT_SCVD_ROOT = r"D:\EcoVisionImagesTraining\To_Be_Trained2\SCVD"
+
 
 def classify_folder(name: str) -> str:
     name_clean = name.lower().replace(" ", "").replace("_", "").replace("-", "")
@@ -128,7 +132,6 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
     # that made every previous run's force-flush silently never fire).
     forced_flush = False
     had_any_buffer = len(x3d_detector._frame_buffers) > 0
-    total_real_inferences = sum(x3d_detector._real_inference_count.values())
 
     for tid in list(x3d_detector._frame_buffers.keys()):
         if x3d_detector.get_inference_count(tid) == 0:
@@ -137,6 +140,13 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
             max_confidence_seen = max(max_confidence_seen, conf)
             if is_violent:
                 any_violence_detected = True
+
+    # NOTE: this snapshot must be taken AFTER the forced-flush loop above,
+    # not before it -- force_inference() calls _run_inference() which DOES
+    # increment _real_inference_count, so snapshotting earlier silently
+    # undercounted every clip that only got a real inference via flush
+    # (this was true for 546/769 clips in the last held-out run).
+    total_real_inferences = sum(x3d_detector._real_inference_count.values())
 
     pose_rate = frames_with_pose / frame_count if frame_count > 0 else 0
     return {
@@ -234,8 +244,8 @@ def run_test(roots: list, device: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rwf-root", type=str, default=None)
-    parser.add_argument("--scvd-root", type=str, default=None)
+    parser.add_argument("--rwf-root", type=str, default=DEFAULT_RWF_ROOT)
+    parser.add_argument("--scvd-root", type=str, default=DEFAULT_SCVD_ROOT)
     parser.add_argument("--device", type=str, default="0")
     args = parser.parse_args()
     roots = [r for r in [args.rwf_root, args.scvd_root] if r is not None]

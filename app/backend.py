@@ -1,9 +1,12 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
 from typing import List, Optional
-from db import get_conn, IntegrityError
+from db import get_conn, IntegrityError, DB_KIND, table_exists
 import uvicorn
 import json
 import uuid
@@ -17,14 +20,22 @@ from datetime import datetime, timedelta
 import time
 import hashlib
 import hmac
-import base64
+import base64   
 import secrets
 from dotenv import load_dotenv
+from db import get_conn, IntegrityError, DB_KIND, table_exists
+from port_utils import find_free_port, write_runtime_port
+import uvicorn
 
 load_dotenv()
-
+# The standard fix, whenever you want it (not urgent, doesn't block anything above): 
+# split into FastAPI APIRouters — routers/auth.py, routers/incidents.py, 
+# routers/cameras.py, routers/admin.py, routers/devteam.py — each mounted onto the 
+# main app in backend.py. Same behavior, same single running process, just organized into 
+# separate files. Want me to do that split now, or leave it as one file for now since it still 
+# works fine functionally?
 APP_ENV = os.environ.get("APP_ENV", "development")
-DATABASE_URL = os.environ.get("DATABASE_URL")  # set -> Postgres; unset -> SQLite fallback
+DATABASE_URL = os.environ.get("DATABASE_URL")  # set -> Postgres; unset -> SQLite fallback (see db.py)
 CORS_ORIGINS_ENV = os.environ.get("CORS_ORIGINS")  # comma-separated
 SECRET_KEY_ENV = os.environ.get("SECRET_KEY")
 
@@ -128,7 +139,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
-SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_final.sql")
+# Schema file depends on which DB engine db.py picked: Postgres uses
+# DATABASE_URL (schema_final.sql), no DATABASE_URL falls back to SQLite
+# (schema_sqlite.sql) for the standalone installer build. Both files are
+# kept in sync field-for-field -- see schema_sqlite.sql's header comment.
+SCHEMA_FILENAME = "schema_final.sql" if DB_KIND == "postgres" else "schema_sqlite.sql"
+SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), SCHEMA_FILENAME)
 ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
 RECORDINGS_DIR = os.path.join(WRITABLE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
 SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
@@ -141,6 +157,10 @@ app = FastAPI(
     title=sys_config["system"]["name"],
     version=sys_config["system"]["version"]
 )
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 if sys_config["security"]["enable_cors"]:
     app.add_middleware(
@@ -182,18 +202,16 @@ app.mount("/static/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="s
 def init_db():
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT to_regclass('public.users') AS reg")
-    table_check = cursor.fetchone()
-    if not table_check or table_check["reg"] is None:
+    if not table_exists(cursor, "users"):
         if not os.path.exists(SCHEMA_PATH):
             conn.close()
             raise RuntimeError(
                 f"Database is empty and {SCHEMA_PATH} was not found. "
-                "Copy schema_final.sql next to backend.py, or run it manually against ecovision.db."
+                f"Copy {SCHEMA_FILENAME} next to backend.py, or run it manually against the database."
             )
         conn.executescript(open(SCHEMA_PATH).read())
         conn.commit()
-        print(f"💾 [DATABASE] Applied schema_final.sql to fresh database at {DB_PATH}")
+        print(f"💾 [DATABASE] Applied {SCHEMA_FILENAME} to fresh {DB_KIND} database.")
 
     cursor.execute("SELECT id, password FROM users")
     for row_id, pw in cursor.fetchall():
@@ -216,6 +234,19 @@ def init_db():
         print(f"    password: {bootstrap_password}")
         print("    Save this now -- it will not be shown again.")
         print("=" * 60)
+        # Also write to a file next to the writable data dir, since a
+        # packaged installer build has no visible console for the person
+        # to read this from (see Phase 3: first-run credential surfacing).
+        try:
+            cred_path = os.path.join(WRITABLE_DIR, "devteam_credentials.txt")
+            with open(cred_path, "w") as f:
+                f.write("EcoVision Sentinel — first-run DEVTEAM account\n")
+                f.write("Generated once; this file is not regenerated after first boot.\n\n")
+                f.write("username: devteam\n")
+                f.write(f"password: {bootstrap_password}\n")
+            print(f"🔑 [BOOTSTRAP] Also written to: {cred_path}")
+        except Exception as e:
+            print(f"⚠️  [BOOTSTRAP] Could not write credentials file: {e}")
 
     cursor.execute("SELECT COUNT(*) FROM barangays")
     if cursor.fetchone()[0] == 0:
@@ -312,7 +343,7 @@ class VideoRecordingEngine:
                 """INSERT INTO video_records
                    (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(uuid.uuid4())[:8], clip_filename, clip_filepath, now_str,
+                (str(uuid.uuid4()), clip_filename, clip_filepath, now_str,
                  f"{post_trigger_duration + 15}s", "CRIME_CLIP", incident_id, "00:15",
                  "Auto-generated clip via ShadowPlay engine."),
             )
@@ -336,6 +367,7 @@ STANDARD_ROLES = {"POLICE", "BARANGAY"}
 ADMIN_CREATES_ROLE = {"PRECINCT_CAPTAIN": "POLICE", "BARANGAY_CAPTAIN": "BARANGAY"}
 ALL_ROLES = ADMIN_ROLES | STANDARD_ROLES | {"DEVTEAM"}
 ADMIN_OR_DEVTEAM = ADMIN_ROLES | {"DEVTEAM"}
+POLICE_SIDE_ROLES = {"POLICE", "PRECINCT_CAPTAIN", "DEVTEAM"}
 VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cameras", "confirm_dismiss_alerts"}
 
 class UserSignup(BaseModel):
@@ -403,6 +435,12 @@ class ConfirmAndReportSchema(BaseModel):
     status: str
     capture_snapshot: Optional[bool] = False
     report_details: Optional[dict] = None
+
+class IncidentReportSchema(BaseModel):
+    narrative: Optional[str] = None
+    nature_of_call: Optional[str] = None
+    arrival_reason: Optional[str] = None
+    additional_officers: Optional[str] = None
 
 class ManualClipSchema(BaseModel):
     filename: str
@@ -495,8 +533,9 @@ async def get_cameras(authorization: Optional[str] = Header(None)):
     # BARANGAY_CAPTAIN, POLICE, PRECINCT_CAPTAIN) is scoped to cameras at
     # their own barangay_id -- a Precinct Captain and their paired Barangay
     # Captain share the same barangay_id (enforced by the one-per-barangay
-    # unique indexes in schema_final.sql), so this is what actually gives
-    # police visibility into "cameras under their precinct."
+    # unique indexes in schema_final.sql/schema_sqlite.sql), so this is
+    # what actually gives police visibility into "cameras under their
+    # precinct."
     if payload["role"] != "DEVTEAM" and payload.get("barangay_id"):
         cursor.execute("SELECT * FROM cameras WHERE LOWER(barangay_id) = ?", (payload["barangay_id"].lower(),))
     else:
@@ -527,7 +566,7 @@ async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(No
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "manage_cameras")
-    cam_id = str(uuid.uuid4())[:8]
+    cam_id = str(uuid.uuid4())
     try:
         cursor.execute(
             "INSERT INTO cameras (id, name, url, status, barangay_id) VALUES (?, ?, ?, 'online', ?)",
@@ -609,7 +648,16 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
 
 @app.post("/api/incidents")
 async def add_incident(incident: IncidentSchema, authorization: Optional[str] = Header(None)):
-    require_auth(authorization)
+    payload = require_auth(authorization)
+    # Never trust the client's barangay_id for anyone but DEVTEAM -- force
+    # it to the authenticated user's own assignment so a tampered/buggy
+    # request can't pin an incident to a location the user isn't part of.
+    if payload["role"] != "DEVTEAM":
+        if not payload.get("barangay_id"):
+            raise HTTPException(status_code=403, detail="Your account has no assigned location.")
+        effective_barangay_id = payload["barangay_id"]
+    else:
+        effective_barangay_id = incident.barangay_id
     conn = get_conn()
     cursor = conn.cursor()
     try:
@@ -620,7 +668,7 @@ async def add_incident(incident: IncidentSchema, authorization: Optional[str] = 
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL')""",
             (incident.id, incident.case_id, incident.type, incident.severity, incident.status,
              incident.lat, incident.lng, incident.location_name, incident.occurred_date, incident.occurred_time,
-             incident.confidence, incident.officer, incident.barangay_id.lower()),
+             incident.confidence, incident.officer, effective_barangay_id.lower()),
         )
         cursor.execute(
             """INSERT INTO incident_details (incident_id, narrative, nature_of_call, arrival_reason, additional_officers)
@@ -645,8 +693,8 @@ async def ai_trigger(data: AiTriggerSchema):
     # pipeline (main.py on 8001), not a browser. Protected only by being
     # localhost-reachable in this deployment; give it its own service
     # credential if this backend is ever exposed beyond localhost.
-    incident_id = data.id if data.id else str(uuid.uuid4())[:8]
-    case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
+    incident_id = data.id if data.id else str(uuid.uuid4())
+    case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4()).replace('-', '')[:8].upper()}"
     now = datetime.now()
     screenshot_url = data.screenshot_path or ""
 
@@ -680,8 +728,8 @@ async def ai_trigger(data: AiTriggerSchema):
 
 @app.post("/api/panic_trigger")
 async def panic_trigger(data: PanicSchema):
-    incident_id = str(uuid.uuid4())[:8]
-    case_id = f"PANIC-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
+    incident_id = str(uuid.uuid4())
+    case_id = f"PANIC-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4()).replace('-', '')[:8].upper()}"
     now = datetime.now()
 
     screenshot_url = ""
@@ -766,6 +814,7 @@ async def archive_incident(incident_id: str, authorization: Optional[str] = Head
 @app.post("/api/incidents/{incident_id}/confirm-and-report")
 async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
+    require_role(payload, POLICE_SIDE_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
@@ -774,13 +823,62 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
         cursor.execute("UPDATE incidents SET status = ?, officer = ? WHERE id = ?", (data.status, officer, incident_id))
     else:
         cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
-    conn.commit()
     updated = cursor.rowcount
-    conn.close()
     if not updated:
+        conn.close()
         raise HTTPException(status_code=404, detail="Incident not found")
+
+    details = data.report_details or {}
+    cursor.execute(
+        """INSERT INTO incident_reports
+           (id, incident_id, reported_by, narrative, nature_of_call, arrival_reason, additional_officers)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (str(uuid.uuid4()), incident_id, payload["id"],
+         details.get("narrative"), details.get("nature_of_call"),
+         details.get("arrival_reason"), details.get("additional_officers")),
+    )
+    conn.commit()
+    conn.close()
     await manager.broadcast({"channel": "incidents", "id": incident_id, "event": "confirmed_and_reported"})
     return {"status": "confirmed_and_reported", "id": incident_id}
+
+@app.get("/api/incidents/{incident_id}/reports")
+async def list_incident_reports(incident_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, POLICE_SIDE_ROLES)
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT r.*, u.username AS reported_by_username
+           FROM incident_reports r JOIN users u ON u.id = r.reported_by
+           WHERE r.incident_id = ? ORDER BY r.created_at ASC""",
+        (incident_id,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/incidents/{incident_id}/reports")
+async def add_incident_report(incident_id: str, data: IncidentReportSchema, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, POLICE_SIDE_ROLES)
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM incidents WHERE id = ?", (incident_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Incident not found")
+    report_id = str(uuid.uuid4())
+    cursor.execute(
+        """INSERT INTO incident_reports
+           (id, incident_id, reported_by, narrative, nature_of_call, arrival_reason, additional_officers)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (report_id, incident_id, payload["id"], data.narrative, data.nature_of_call,
+         data.arrival_reason, data.additional_officers),
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "report_added", "id": report_id}
 
 @app.post("/siren/activate")
 async def siren_activate(authorization: Optional[str] = Header(None)):
@@ -834,7 +932,7 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
     require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
-    rid = str(uuid.uuid4())[:8]
+    rid = str(uuid.uuid4())
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     fpath = os.path.join(RECORDINGS_DIR, data.filename)
     try:
@@ -867,7 +965,8 @@ async def update_record_notes(record_id: str, data: RecordNotesSchema, authoriza
 
 # --- AUTH SECTOR CORES ---
 @app.post("/api/signup")
-async def signup(user: UserSignup):
+@limiter.limit("10/minute")
+async def signup(request: Request, user: UserSignup):
     role = user.role.upper()
     if role not in ADMIN_ROLES:
         raise HTTPException(
@@ -920,7 +1019,8 @@ async def signup(user: UserSignup):
         conn.close()
 
 @app.post("/api/login")
-async def login(creds: UserLogin):
+@limiter.limit("5/minute")
+async def login(request: Request, creds: UserLogin):
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE username = ?", (creds.username,))
@@ -1314,4 +1414,12 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     }
 
 if __name__ == "__main__":
-    uvicorn.run("backend:app", host=sys_config["backend"]["host"], port=sys_config["backend"]["port"], reload=sys_config["backend"]["reload"])
+    preferred_port = sys_config["backend"]["port"]
+    actual_port = find_free_port(preferred_port)
+    write_runtime_port("backend", actual_port)
+    uvicorn.run(
+        "backend:app",
+        host=sys_config["backend"]["host"],
+        port=actual_port,
+        reload=sys_config["backend"]["reload"],
+    )

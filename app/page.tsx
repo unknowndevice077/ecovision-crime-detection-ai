@@ -11,7 +11,8 @@ import { useRouter } from 'next/navigation';
 import { 
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin, 
   ShieldAlert, Maximize2, X, Sun, User,
-  BatteryMedium, Thermometer, Zap, Plus, Film, Clock, Users, Terminal
+  BatteryMedium, Thermometer, Zap, Plus, Film, Clock, Users, Terminal,
+  Camera as CameraIcon, Check, Loader2
 } from 'lucide-react';
 
 const CrimeReportsViewAny = CrimeReportsView as any;
@@ -50,6 +51,9 @@ export default function EcoVisionSentinel() {
   const [backendOnline, setBackendOnline] = useState(true);
   const [videoRecordSearchFilter, setVideoRecordSearchQuery] = useState("");
   const [telemetry, setTelemetry] = useState({ battery: 88, solarV: 14.4, tempCPU: 42, tempESP: 38, tempNeural: 51, load: 12.4 });
+  const [camIndexInput, setCamIndexInput] = useState("5");
+  const [availableCameras, setAvailableCameras] = useState<number[]>([]);
+  const [applyState, setApplyState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const router = useRouter();
   
   useEffect(() => {
@@ -72,6 +76,39 @@ export default function EcoVisionSentinel() {
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    const fetchAvailableCameras = async () => {
+      try {
+        const res = await fetch("http://localhost:8001/available_cameras");
+        const data = await res.json();
+        setAvailableCameras(data.available_cameras);
+        setCamIndexInput(data.current_index.toString());
+      } catch (e) {
+        console.error("Failed to fetch available cameras:", e);
+      }
+    };
+    fetchAvailableCameras();
+  }, []);
+
+  const handleApplyCameraIndex = async () => {
+    const idx = parseInt(camIndexInput, 10);
+    if (Number.isNaN(idx) || idx < 0) return;
+    setApplyState('saving');
+    try {
+      const res = await fetch("http://localhost:8001/set_camera_index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index: idx })
+      });
+      const data = await res.json();
+      setApplyState(data.status === "reopened" ? 'saved' : 'error');
+    } catch (e) {
+      console.error("Camera index swap failed:", e);
+      setApplyState('error');
+    }
+    setTimeout(() => setApplyState('idle'), 2000);
+  };
+
 const fetchCameras = async (userObj: any) => {
     try {
       const barangay = userObj.barangayId && userObj.barangayId !== 'undefined' ? userObj.barangayId : 'cogon';
@@ -91,7 +128,6 @@ const fetchCameras = async (userObj: any) => {
   const fetchStats = async () => {
     if (!currentUser) return;
     try {
-      // FIXED: Checks for invalid properties and defaults to 'cogon' to prevent passing literal 'undefined' strings
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
@@ -112,7 +148,6 @@ const fetchCameras = async (userObj: any) => {
   const fetchActiveAlertCache = async () => {
     if (!currentUser) return;
     try {
-      // FIXED: Sanitizes query context variables before initiating the HTTP request
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
@@ -216,11 +251,14 @@ const fetchCameras = async (userObj: any) => {
       const res = await fetch("http://localhost:8000/api/cameras", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name, url, barangayId: barangay })
+        body: JSON.stringify({ name, url, barangay_id: barangay })
       });
       if (res.ok) {
         fetchCameras(currentUser);
         setShowModal(false);
+      } else {
+        const errBody = await res.text();
+        console.error("Camera creation failed:", res.status, errBody);
       }
     } catch (e) { console.error(e); }
   };
@@ -295,7 +333,6 @@ const fetchCameras = async (userObj: any) => {
         .battery-fill { width: var(--battery-width); }
       `}</style>
 
-      {/* ─── LEFT SIDEBAR PANEL ─── */}
       <aside className="w-64 bg-[#0E131F]/80 border border-white/[0.04] backdrop-blur-xl rounded-2xl flex flex-col p-5 shrink-0 shadow-2xl z-20 justify-between">
         <div className="flex flex-col flex-1 min-h-0">
           <div className="flex items-center gap-3 mb-6 pb-5 border-b border-white/[0.04]">
@@ -335,7 +372,6 @@ const fetchCameras = async (userObj: any) => {
           </nav>
         </div>
         
-        {/* SIDEBAR FOOTER METRICS LAYER */}
         <div className="pt-4 border-t border-white/[0.04] space-y-3 shrink-0">
           <div className="flex items-center justify-between px-4 py-2.5 rounded-xl border border-white/[0.03] bg-black/40 shadow-inner">
             <div className="flex items-center gap-2 text-[9px] font-mono text-slate-500 uppercase tracking-widest font-black">
@@ -360,7 +396,6 @@ const fetchCameras = async (userObj: any) => {
         </div>
       </aside>
 
-      {/* ─── MAIN APP CONTENT SURFACE ─── */}
       <main className="flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 overflow-hidden grid grid-cols-12 gap-4">
           <div className={`${activeTab === 'dashboard' ? 'col-span-8' : 'col-span-12'} h-full flex flex-col min-h-0 transition-all duration-500`}>
@@ -376,6 +411,30 @@ const fetchCameras = async (userObj: any) => {
                     )}
                   </div>
                   <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 bg-black/40 border border-white/[0.04] rounded-lg px-2 py-1 mr-1">
+                      <CameraIcon size={12} className="text-slate-500" />
+                      <input
+                        type="number"
+                        min={0}
+                        value={camIndexInput}
+                        onChange={(e) => setCamIndexInput(e.target.value)}
+                        title="Camera device index (type any index -- scan below is just a hint)"
+                        className="w-10 bg-transparent border-none text-[10px] font-mono text-white outline-none text-center"
+                      />
+                      {availableCameras.length > 0 && (
+                        <span className="text-[8px] text-slate-500 font-mono">found: {availableCameras.join(",")}</span>
+                      )}
+                      <button
+                        onClick={handleApplyCameraIndex}
+                        disabled={applyState === 'saving'}
+                        title="Apply camera index"
+                        className="p-1 rounded bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-black border border-emerald-500/20 transition-all disabled:opacity-40"
+                      >
+                        {applyState === 'saving' ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                      </button>
+                      {applyState === 'saved' && <span className="text-[8px] text-emerald-400 font-mono">OK</span>}
+                      {applyState === 'error' && <span className="text-[8px] text-red-400 font-mono">FAIL</span>}
+                    </div>
                     <button title="Maximize Display Grid" onClick={() => setIsFullscreenGrid(true)} className="p-1.5 hover:bg-white/5 border border-white/[0.04] rounded-lg text-slate-400 hover:text-white transition-colors shadow-sm"><Maximize2 size={13} /></button>
                     {selectedCam && <button onClick={() => setSelectedCam(null)} className="text-[9px] font-bold uppercase tracking-wider text-emerald-400 px-2.5 py-1 rounded-lg border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/15 transition-all">Reset Focus</button>}
                   </div>
@@ -479,7 +538,6 @@ const fetchCameras = async (userObj: any) => {
             {activeTab === 'profile' && <ProfileView currentUser={currentUser} time={time} onLogout={handleLogout} />}
           </div>
 
-          {/* ─── RIGHT SIDE LIVE CRIME LOG FEED ─── */}
           {activeTab === 'dashboard' && (
             <div className="col-span-4 bg-[#0E131F]/40 border border-white/[0.04] backdrop-blur-md rounded-2xl flex flex-col overflow-hidden shadow-2xl animate-in slide-in-from-right duration-500">
               <div className="p-4 border-b border-white/[0.04] bg-white/[0.01] flex items-center justify-between">
@@ -504,7 +562,6 @@ const fetchCameras = async (userObj: any) => {
         </div>
       </main>
 
-      {/* ─── GRID EXPANSION OVERLAYS ─── */}
       {isFullscreenGrid && (
         <div className="fixed inset-0 z-[100] bg-[#0B0F17]/96 backdrop-blur-2xl p-6 flex flex-col animate-in fade-in duration-300">
           <div className="flex justify-between items-center mb-6 pb-4 border-b border-white/[0.04]">

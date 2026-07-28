@@ -1,0 +1,18 @@
+# .dockerignore
+node_modules
+.next
+.git
+.venv
+python-env
+dist
+build
+*.pt
+*.engine
+*.mp4
+*.db
+*.log
+__pycache__
+*.pyc
+.env
+.env.*
+eval_report_*

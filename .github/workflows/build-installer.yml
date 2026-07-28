@@ -57,7 +57,7 @@ jobs:
 
       # ---------------------------------------------------------------
       # 1. PYTHON SIDE -- build a real venv that gets shipped as-is
-      #    (this matches your package.json's extraFiles: ".venv/**/*")
+      #    (this matches your package.json's extraFiles: "python-env/**/*")
       # ---------------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -68,42 +68,45 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\pip\Cache
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.ci.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Create venv and install dependencies
         run: |
-          python -m venv .venv
-          .venv\Scripts\pip install --upgrade pip
-          .venv\Scripts\pip install -r requirements.ci.txt --extra-index-url https://download.pytorch.org/whl/cu130
+          python -m venv python-env
+          python-env\Scripts\pip install --upgrade pip
+          python-env\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+          # NCCL is for multi-GPU distributed training/inference -- this is a
+          # single-GPU edge inference app, so it's dead weight (~200-300MB).
+          python-env\Scripts\pip uninstall -y nvidia-nccl-cu12
 
-      - name: Prune .venv to minimum size
+      - name: Prune python-env to minimum size
         shell: powershell
         run: |
-          Write-Host "=== .venv size BEFORE pruning ==="
-          $sizeBefore = (Get-ChildItem ".venv" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
+          Write-Host "=== python-env size BEFORE pruning ==="
+          $sizeBefore = (Get-ChildItem "python-env" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
           Write-Host "$([math]::Round($sizeBefore, 2)) GB"
 
-          Remove-Item -Recurse -Force ".venv\Lib\site-packages\pip*" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force ".venv\Scripts\pip*" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "python-env\Lib\site-packages\pip*" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "python-env\Scripts\pip*" -ErrorAction SilentlyContinue
 
-          Get-ChildItem ".venv" -Directory -Filter "__pycache__" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem ".venv" -Filter "*.pyc" -Recurse | Remove-Item -Force
-          Get-ChildItem ".venv" -Directory -Filter "tests" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem ".venv" -Directory -Filter "test" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem ".venv" -Directory -Filter "docs" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem ".venv" -Directory -Filter "doc" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem ".venv" -Directory -Filter "examples" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem ".venv" -Filter "*.whl" -Recurse | Remove-Item -Force
+          Get-ChildItem "python-env" -Directory -Filter "__pycache__" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem "python-env" -Filter "*.pyc" -Recurse | Remove-Item -Force
+          Get-ChildItem "python-env" -Directory -Filter "tests" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem "python-env" -Directory -Filter "test" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem "python-env" -Directory -Filter "docs" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem "python-env" -Directory -Filter "doc" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem "python-env" -Directory -Filter "examples" -Recurse | Remove-Item -Recurse -Force
+          Get-ChildItem "python-env" -Filter "*.whl" -Recurse | Remove-Item -Force
 
-          Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\include" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\share" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force ".venv\Lib\site-packages\torch\lib\*.h" -ErrorAction SilentlyContinue
-          Get-ChildItem ".venv\Lib\site-packages" -Directory -Filter "nvcc" -Recurse | Remove-Item -Recurse -Force
+          Remove-Item -Recurse -Force "python-env\Lib\site-packages\torch\include" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "python-env\Lib\site-packages\torch\share" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "python-env\Lib\site-packages\torch\lib\*.h" -ErrorAction SilentlyContinue
+          Get-ChildItem "python-env\Lib\site-packages" -Directory -Filter "nvcc" -Recurse | Remove-Item -Recurse -Force
 
-          Write-Host "=== .venv size AFTER pruning ==="
-          $sizeAfter = (Get-ChildItem ".venv" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
+          Write-Host "=== python-env size AFTER pruning ==="
+          $sizeAfter = (Get-ChildItem "python-env" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
           Write-Host "$([math]::Round($sizeAfter, 2)) GB"
 
       - name: Check disk space after venv install
@@ -151,29 +154,25 @@ jobs:
           Write-Host "$([math]::Round($sizeAfter, 2)) GB"
 
       # ---------------------------------------------------------------
-      # 3. ELECTRON -- package into a portable win-unpacked folder
+      # 3. ELECTRON -- package into the real NSIS setup.exe (package.json's
+      #    "win.target" is "nsis"). extraResources now includes "python-env",
+      #    so this .exe ships the fully-built GPU environment -- no
+      #    internet/Python-install step needed on the end user's machine.
       # ---------------------------------------------------------------
-      - name: Package Electron app (portable)
-        run: npx electron-builder --win --dir
+      - name: Package Electron app (NSIS installer)
+        run: npx electron-builder --win --publish never
 
-      # ---------------------------------------------------------------
-      # 4. COMPRESS
-      # ---------------------------------------------------------------
-      - name: Compress build into zip archive
+      - name: Check disk space after packaging
         shell: powershell
-        run: |
-          Write-Host "=== Compressing win-unpacked into zip ==="
-          Compress-Archive -Path "dist\win-unpacked\*" -DestinationPath "dist\EcoVisionSentinel-2.0.0-win64.zip" -CompressionLevel Optimal
-          $zipSize = (Get-Item "dist\EcoVisionSentinel-2.0.0-win64.zip").Length / 1GB
-          Write-Host "Zip size: $([math]::Round($zipSize, 2)) GB"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
-      # 5. ARTIFACT ONLY -- no auto-release. Download the zip from this
+      # 4. ARTIFACT ONLY -- no auto-release. Download the .exe from this
       #    run's Artifacts tab and create/attach the GitHub Release
       #    yourself, on your own schedule, with your own notes.
       # ---------------------------------------------------------------
-      - name: Upload portable build artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EcoVisionSentinel-Portable
-          path: dist/EcoVisionSentinel-*.zip
+          name: EcoVisionSentinel-Installer
+          path: dist/EcoVisionSentinel-Setup-*.exe

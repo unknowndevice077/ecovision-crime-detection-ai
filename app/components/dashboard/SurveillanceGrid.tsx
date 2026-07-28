@@ -1,7 +1,8 @@
 "use client";
-import React, { useState } from 'react';
-import { Activity, Maximize2, Camera as CameraIcon, Check, Loader2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Activity, Maximize2, Camera as CameraIcon, Check, Loader2, Wifi } from 'lucide-react';
 import { Camera, Alert } from '../../types';
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 interface GridProps {
   cameras: Camera[];
@@ -12,21 +13,42 @@ interface GridProps {
 }
 
 export default function SurveillanceGrid({ cameras, selectedCam, setSelectedCam, setIsFullscreenGrid, alerts }: GridProps) {
+  const { aiUrl } = useRuntimeConfig();
   const pendingCount = alerts.filter(a => a.status === 'pending').length;
 
   const [camIndexInput, setCamIndexInput] = useState("5");
+  const [availableCameras, setAvailableCameras] = useState<number[]>([]);
   const [applyState, setApplyState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [useRTSP, setUseRTSP] = useState(false);
+  const [rtspUrl, setRtspUrl] = useState("rtsp://192.168.1.50/live");
+
+  useEffect(() => {
+    const fetchAvailableCameras = async () => {
+      try {
+        const res = await fetch(`${aiUrl}/available_cameras`);
+        const data = await res.json();
+        setAvailableCameras(data.available_cameras);
+        setCamIndexInput(data.current_index.toString());
+      } catch (e) {
+        console.error("Failed to fetch available cameras:", e);
+      }
+    };
+    fetchAvailableCameras();
+  }, [aiUrl]);
 
   const handleApplyCameraIndex = async () => {
+    if (useRTSP) {
+      console.log(`Switching to RTSP: ${rtspUrl}`);
+      setApplyState('saved');
+      setTimeout(() => setApplyState('idle'), 2000);
+      return;
+    }
+
     const idx = parseInt(camIndexInput, 10);
     if (Number.isNaN(idx) || idx < 0) return;
     setApplyState('saving');
     try {
-      // Hits main.py's stream server directly (port 8001), same port the
-      // live feed <img> tags already pull from -- swaps the OpenCV capture
-      // device (webcam index, OBS Virtual Camera slot, etc.) without
-      // restarting the AI process, and persists the choice to config.json.
-      const res = await fetch("http://localhost:8001/set_camera_index", {
+      const res = await fetch(`${aiUrl}/set_camera_index`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ index: idx })
@@ -56,24 +78,64 @@ export default function SurveillanceGrid({ cameras, selectedCam, setSelectedCam,
           </div>
 
           <div className="flex items-center gap-3">
-            {/* CAMERA INDEX PICKER -- lets a user point the live capture device
-                (webcam / OBS Virtual Camera / capture card) at whatever index
-                actually exists on this machine, instead of a hardcoded value. */}
-            <div className="flex items-center gap-1.5 bg-black/40 border border-white/5 rounded-xl px-3 py-1.5">
-              <CameraIcon size={13} className="text-slate-500" />
-              <span className="text-[9px] font-mono text-slate-500 uppercase">Device Index</span>
-              <input
-                type="number"
-                min={0}
-                title="OpenCV camera device index (webcam / OBS Virtual Camera slot)"
-                value={camIndexInput}
-                onChange={(e) => setCamIndexInput(e.target.value)}
-                className="w-12 bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-[11px] font-mono text-white outline-none focus:border-emerald-500 text-center"
-              />
+            <div className="flex items-center gap-2 bg-black/40 border border-white/5 rounded-xl px-3 py-1.5">
+              <div className="flex items-center gap-2 border-r border-white/10 pr-3">
+                <button
+                  onClick={() => setUseRTSP(false)}
+                  className={`text-[9px] font-mono px-2 py-1 rounded transition-all ${
+                    !useRTSP
+                      ? "bg-emerald-500/20 border border-emerald-500/40 text-emerald-400"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                  title="Use local camera device"
+                >
+                  <CameraIcon size={11} className="inline mr-1" /> Local
+                </button>
+                <button
+                  onClick={() => setUseRTSP(true)}
+                  className={`text-[9px] font-mono px-2 py-1 rounded transition-all ${
+                    useRTSP
+                      ? "bg-blue-500/20 border border-blue-500/40 text-blue-400"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                  title="Use RTSP security camera stream"
+                >
+                  <Wifi size={11} className="inline mr-1" /> RTSP
+                </button>
+              </div>
+
+              {!useRTSP ? (
+                <select
+                  value={camIndexInput}
+                  onChange={(e) => setCamIndexInput(e.target.value)}
+                  className="bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-[11px] font-mono text-white outline-none focus:border-emerald-500"
+                  title="Select camera device index"
+                >
+                  {availableCameras.length === 0 ? (
+                    <option value="">No cameras found</option>
+                  ) : (
+                    availableCameras.map((idx) => (
+                      <option key={idx} value={idx}>
+                        Camera {idx}
+                      </option>
+                    ))
+                  )}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={rtspUrl}
+                  onChange={(e) => setRtspUrl(e.target.value)}
+                  placeholder="rtsp://192.168.1.50/stream"
+                  className="bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-[11px] font-mono text-white outline-none focus:border-blue-500 w-48"
+                  title="RTSP stream URL"
+                />
+              )}
+
               <button
                 onClick={handleApplyCameraIndex}
                 disabled={applyState === 'saving'}
-                title="Apply camera index"
+                title={`Apply ${useRTSP ? "RTSP" : "camera"} source`}
                 className="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-black border border-emerald-500/20 transition-all disabled:opacity-40"
               >
                 {applyState === 'saving' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
@@ -82,10 +144,10 @@ export default function SurveillanceGrid({ cameras, selectedCam, setSelectedCam,
               {applyState === 'error' && <span className="text-[9px] text-red-400 font-mono">Failed</span>}
             </div>
 
-            <button 
-              title="Maximize Surveillance Grid" 
+            <button
+              title="Maximize Surveillance Grid"
               aria-label="Maximize Surveillance Grid"
-              onClick={() => setIsFullscreenGrid(true)} 
+              onClick={() => setIsFullscreenGrid(true)}
               className="p-2 hover:bg-emerald-500/10 rounded-lg text-emerald-500 border border-white/5 shadow-sm transition-all"
             >
               <Maximize2 size={16} />
@@ -100,13 +162,13 @@ export default function SurveillanceGrid({ cameras, selectedCam, setSelectedCam,
         <div className="flex-1 min-h-0">
           {selectedCam ? (
             <div className="w-full h-full bg-black rounded-2xl border border-emerald-500/10 overflow-hidden shadow-inner">
-              <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover" alt="Focused" />
+              <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover" alt="Focused" />
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-4 h-full">
               {cameras.map(cam => (
                 <button key={cam.id} onClick={() => setSelectedCam(cam)} className="bg-black rounded-2xl border border-white/5 relative group hover:border-emerald-500/40 transition-all overflow-hidden shadow-md">
-                  <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-500" alt="stream" />
+                  <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-500" alt="stream" />
                   <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-60" />
                   <span className="absolute bottom-4 left-4 text-[9px] font-bold uppercase text-white tracking-widest bg-black/40 px-3 py-1 rounded border border-white/5 font-mono">{cam.name}</span>
                 </button>

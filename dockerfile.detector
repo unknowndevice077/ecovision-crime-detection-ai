@@ -1,0 +1,31 @@
+# dockerfile.detector
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-detector.txt .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r requirements-detector.txt \
+    && pip uninstall -y opencv-python \
+    && pip install --no-cache-dir --force-reinstall opencv-python-headless==4.13.0.92
+
+COPY config.json config.json
+
+COPY maincode/main.py maincode/main.py
+COPY maincode/robbery_vandalism.py maincode/robbery_vandalism.py
+COPY maincode/x3d_violence_detector.py maincode/x3d_violence_detector.py
+COPY maincode/pose_landmarker_heavy.task maincode/pose_landmarker_heavy.task
+
+COPY weights/x3d_xs_violence_best.pt weights/x3d_xs_violence_best.pt
+COPY weights/yolo11s-pose.pt weights/yolo11s-pose.pt
+COPY weights/yolo11s-pose.engine weights/yolo11s-pose.engine
+COPY weights/weapon_signs.pt weights/weapon_signs.pt
+COPY weights/weapon_signs.engine weights/weapon_signs.engine
+
+EXPOSE 8001
+
+CMD ["python", "maincode/main.py"]

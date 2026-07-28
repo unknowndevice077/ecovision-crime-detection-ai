@@ -17,6 +17,13 @@ const RESOURCES_ROOT = isPackaged ? process.resourcesPath : path.join(__dirname,
 const CONFIG_PATH = path.join(app.getPath("userData"), "env_config.json");
 const INSTALL_FOLDER_NAME = "EcoVisionSentinel";
 
+const BACKEND_DESIRED_PORT = 8000;
+const AI_CORE_DESIRED_PORT = 8001;
+const FRONTEND_DESIRED_PORT = 3000;
+const HOST = "127.0.0.1";
+const MAX_PORT_WAIT_ATTEMPTS = 20;
+const PORT_POLL_INTERVAL_MS = 500;
+
 function isWritable(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -29,12 +36,6 @@ function isWritable(dir) {
   }
 }
 
-// Everything lives in one place by default: the venv goes right inside
-// the app's own install folder (RESOURCES_ROOT), next to backend/,
-// maincode/, weights/, etc. Only falls back to a separate per-user
-// AppData folder if the install location turns out to be read-only
-// (e.g. Program Files without admin rights) -- no folder picker, no
-// second location for the user to think about.
 function resolveVenvInstallDir() {
   if (isWritable(RESOURCES_ROOT)) {
     return RESOURCES_ROOT;
@@ -53,14 +54,9 @@ function getVenvDir() {
       console.error("Failed to read env_config.json", e);
     }
   }
-  return path.join(RESOURCES_ROOT, ".venv");
+  return path.join(RESOURCES_ROOT, "python-env");
 }
 
-// The folder the user picked in the setup wizard, containing a FULL copy
-// of backend/, maincode/, weights/, config.json, requirements.txt, and
-// the venv itself -- everything code-related lives here in one place.
-// Falls back to RESOURCES_ROOT (the installer's own resources folder)
-// if setup hasn't recorded a chosen folder yet.
 function getAppDataDir() {
   if (fs.existsSync(CONFIG_PATH)) {
     try {
@@ -71,6 +67,26 @@ function getAppDataDir() {
     }
   }
   return RESOURCES_ROOT;
+}
+
+function getWritableDataDir() {
+  const dir = path.join(app.getPath("userData"), "EcoVisionData");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getRuntimePortsPath() {
+  return path.join(getWritableDataDir(), "runtime_ports.json");
+}
+
+function readRuntimePorts() {
+  const p = getRuntimePortsPath();
+  if (!fs.existsSync(p)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 function getPythonExe(venvDir = getVenvDir()) {
@@ -89,16 +105,20 @@ function getScriptPaths() {
   };
 }
 
+function getWeightsDir() {
+  return path.join(getAppDataDir(), "weights");
+}
+
 let setupWindow = null;
 let launchWindow = null;
+let errorWindow = null;
 
-function spawnPython(scriptPath, cwd) {
+function spawnPython(scriptPath, cwd, extraEnv = {}) {
   if (!fs.existsSync(scriptPath)) {
     throw new Error(`Expected script not found: ${scriptPath}`);
   }
   const pythonExe = getPythonExe();
-  const writableDir = path.join(app.getPath("userData"), "EcoVisionData");
-  fs.mkdirSync(writableDir, { recursive: true });
+  const writableDir = getWritableDataDir();
 
   const proc = spawn(pythonExe, [scriptPath], {
     cwd,
@@ -108,6 +128,8 @@ function spawnPython(scriptPath, cwd) {
       ECOVISION_WRITABLE_DIR: writableDir,
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1",
+      HOST,
+      ...extraEnv,
     },
   });
   const tag = path.basename(scriptPath);
@@ -129,7 +151,42 @@ function getAppRoot() {
   return appPath;
 }
 
-function spawnNextServer() {
+function isPortFree(port, host = HOST) {
+  return new Promise((resolve) => {
+    const tester = require("net")
+      .createServer()
+      .once("error", () => resolve(false))
+      .once("listening", () => tester.close(() => resolve(true)))
+      .listen(port, host);
+  });
+}
+
+async function findFreePortForFrontend(preferred, maxAttempts = MAX_PORT_WAIT_ATTEMPTS) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const candidate = preferred + i;
+    if (await isPortFree(candidate)) return candidate;
+  }
+  throw new Error(`Could not find a free port for the dashboard after ${maxAttempts} attempts starting from ${preferred}.`);
+}
+
+function writeRuntimeConfigForFrontend(apiUrl, aiUrl) {
+  // The dashboard fetches this at load time (see lib/runtime-config.ts) to
+  // discover the real ports the backend/AI core landed on, instead of
+  // hardcoding localhost:8000/8001.
+  const publicDir = path.join(getAppRoot(), "public");
+  try {
+    fs.mkdirSync(publicDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(publicDir, "runtime-config.json"),
+      JSON.stringify({ apiUrl, aiUrl }),
+      "utf8"
+    );
+  } catch (e) {
+    console.error("Failed to write runtime-config.json", e);
+  }
+}
+
+function spawnNextServer(port) {
   const appRoot = getAppRoot();
   let nextBin = path.join(appRoot, "node_modules", "next", "dist", "bin", "next");
 
@@ -140,7 +197,7 @@ function spawnNextServer() {
     }
   }
 
-  const proc = spawn(process.execPath, [nextBin, "start", "-p", "3000"], {
+  const proc = spawn(process.execPath, [nextBin, "start", "-H", HOST, "-p", String(port)], {
     cwd: appRoot,
     windowsHide: true,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -152,11 +209,11 @@ function spawnNextServer() {
   return proc;
 }
 
-function waitForPort(port, timeoutMs = 45000) {
+function waitForPort(port, host = HOST, timeoutMs = 45000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     (function attempt() {
-      const req = http.get({ host: "127.0.0.1", port, timeout: 1000 }, () => {
+      const req = http.get({ host, port, timeout: 1000 }, () => {
         req.destroy();
         resolve();
       });
@@ -168,7 +225,26 @@ function waitForPort(port, timeoutMs = 45000) {
   });
 }
 
-async function createWindow() {
+// Polls runtime_ports.json (written by backend.py / main.py once they've
+// bound their actual port, which may differ from the desired default if
+// that port was taken) until the given key appears, or gives up after
+// MAX_PORT_WAIT_ATTEMPTS polls.
+function waitForRuntimePort(key, maxAttempts = MAX_PORT_WAIT_ATTEMPTS) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    (function poll() {
+      const ports = readRuntimePorts();
+      if (ports[key]) return resolve(ports[key]);
+      attempts++;
+      if (attempts >= maxAttempts) {
+        return reject(new Error(`Gave up waiting for "${key}" to appear in runtime_ports.json after ${maxAttempts} attempts.`));
+      }
+      setTimeout(poll, PORT_POLL_INTERVAL_MS);
+    })();
+  });
+}
+
+async function createWindow(url) {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -177,6 +253,7 @@ async function createWindow() {
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, backgroundThrottling: false },
   });
+  mainWindow.loadURL(url);
 }
 
 function openLaunchWindow() {
@@ -209,6 +286,32 @@ function sendLaunchStep(step, state) {
 }
 function sendLaunchError(msg) {
   if (launchWindow && !launchWindow.isDestroyed()) launchWindow.webContents.send("launch:error", msg);
+  openErrorWindow(msg);
+}
+
+// Visible, non-hanging error surface: instead of leaving the launch
+// window stuck or the app silently blank, pop a dedicated always-on-top
+// window with the real failure reason plus a "Quit" action.
+function openErrorWindow(message) {
+  if (errorWindow && !errorWindow.isDestroyed()) {
+    errorWindow.webContents.send("error:message", message);
+    return;
+  }
+  errorWindow = new BrowserWindow({
+    width: 560,
+    height: 420,
+    resizable: true,
+    autoHideMenuBar: true,
+    backgroundColor: "#0B0F17",
+    webPreferences: { contextIsolation: true },
+  });
+  const html = `
+    <html><body style="background:#0B0F17;color:#f87171;font-family:Consolas,monospace;padding:24px;">
+      <h2 style="color:#fff;">EcoVision Sentinel failed to start</h2>
+      <pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6;">${message.replace(/</g, "&lt;")}</pre>
+      <p style="color:#5b6572;font-size:11px;">Check the logs above, fix the issue, then relaunch the app.</p>
+    </body></html>`;
+  errorWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
 }
 
 function openSetupWindow() {
@@ -290,12 +393,27 @@ async function installPythonAutomatically() {
   sendProgress(8, "Downloading Python 3.11...");
   sendLog("Downloading Python 3.11.9 installer from python.org...");
 
+  const EXPECTED_PYTHON_SHA256 = ""; // <-- put the verified hash here before shipping
+
   const psScript = `
 $ProgressPreference = 'SilentlyContinue'
 $installerPath = Join-Path $env:TEMP "python-3.11.9-amd64.exe"
+$expectedHash = "${EXPECTED_PYTHON_SHA256}"
 Write-Output "Downloading Python 3.11.9..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe" -OutFile $installerPath
+if ($expectedHash -ne "") {
+    Write-Output "Verifying installer checksum..."
+    $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
+    if ($actualHash -ne $expectedHash) {
+        Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+        Write-Error "Python installer checksum mismatch (expected $expectedHash, got $actualHash) -- refusing to run it."
+        exit 1
+    }
+    Write-Output "Checksum verified."
+} else {
+    Write-Output "WARNING: no expected checksum configured -- skipping verification."
+}
 Write-Output "Installing Python 3.11.9 silently..."
 Start-Process -FilePath $installerPath -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1", "SimpleInstall=1" -Wait
 Remove-Item $installerPath -Force
@@ -330,12 +448,8 @@ async function runFirstTimeSetup(targetVenvDir, requirementsPath) {
   sendProgress(30, "Upgrading pip...");
   await runStep(pythonExe, ["-m", "pip", "install", "--upgrade", "pip"], RESOURCES_ROOT);
 
-  sendProgress(40, "Installing dependencies & GPU binaries...");
-  await runStep(
-    pythonExe,
-    ["-m", "pip", "install", "-r", requirementsPath, "--extra-index-url", "https://download.pytorch.org/whl/cu121"],
-    RESOURCES_ROOT
-  );
+  sendProgress(40, "Installing dependencies (CPU build)...");
+  await runStep(pythonExe, ["-m", "pip", "install", "-r", requirementsPath], RESOURCES_ROOT);
 
   sendProgress(100, "Setup complete.");
 }
@@ -357,12 +471,6 @@ ipcMain.handle("setup:select-directory", async () => {
 });
 
 function copyAppResourcesInto(targetDir) {
-  // Copies everything code/model-related from the installer's resources
-  // folder into the folder the user picked, so that folder ends up
-  // self-contained: backend/, maincode/, weights/, config.json,
-  // requirements.txt, AND (after runFirstTimeSetup) .venv/ all sitting
-  // next to each other. Skips re-copying if already present from a
-  // previous run/retry.
   const entries = [
     { from: path.join(RESOURCES_ROOT, "backend"), to: path.join(targetDir, "backend") },
     { from: path.join(RESOURCES_ROOT, "maincode"), to: path.join(targetDir, "maincode") },
@@ -374,6 +482,34 @@ function copyAppResourcesInto(targetDir) {
     if (!fs.existsSync(from)) continue;
     sendLog(`Copying ${path.basename(from)}...`);
     fs.cpSync(from, to, { recursive: true, force: true });
+  }
+}
+
+// Writes DEVTEAM bootstrap credentials to a plain text file next to the
+// install folder AND shows a blocking dialog, instead of only printing to
+// a console window that closes on exit.
+function surfaceBootstrapCredentials(appDataDir) {
+  try {
+    const ports = readRuntimePorts();
+    const backendPort = ports.backend || BACKEND_DESIRED_PORT;
+    const credFile = path.join(appDataDir, "devteam_credentials.txt");
+    // backend.py prints bootstrap creds to stdout on first run only; we
+    // can't recover them after the fact here, so this just ensures the
+    // *file location* is visible/known. The actual write of this file is
+    // done from backend.py itself on bootstrap (see backend.py's
+    // init_db()) -- if it exists, surface it prominently.
+    if (fs.existsSync(credFile)) {
+      const contents = fs.readFileSync(credFile, "utf8");
+      dialog.showMessageBoxSync({
+        type: "info",
+        title: "EcoVision Sentinel — First-Run Credentials",
+        message: "A DevTeam account was created on first run.",
+        detail: `${contents}\n\nSaved to:\n${credFile}\n\nThis will not be shown again after this dialog.`,
+        buttons: ["OK"],
+      });
+    }
+  } catch (e) {
+    console.error("Failed to surface bootstrap credentials", e);
   }
 }
 
@@ -404,61 +540,85 @@ async function launchMainApp() {
   killAll();
   try {
     const { backendDir, backendScript, maincodeDir, aiScript } = getScriptPaths();
+    const appDataDir = getAppDataDir();
+
+    // Clear stale runtime_ports.json from a previous run so we don't read
+    // an old port before the fresh processes have written their own.
+    try { fs.unlinkSync(getRuntimePortsPath()); } catch {}
 
     let backendLog = "";
     let nextLog = "";
 
     sendLaunchProgress(10, "Starting backend API...");
     sendLaunchStep("backend", "active");
-    backendProc = spawnPython(backendScript, backendDir);
+    backendProc = spawnPython(backendScript, backendDir, {
+      APP_ENV: "production",
+      PORT: String(BACKEND_DESIRED_PORT),
+    });
     backendProc.stderr.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
     backendProc.stdout.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
 
-    sendLaunchProgress(35, "Starting AI detection core...");
+    let backendPort, aiPort, frontendPort;
+
+    try {
+      backendPort = await waitForRuntimePort("backend");
+      await waitForPort(backendPort, HOST, 60000);
+      sendLaunchStep("backend", "done");
+      sendLaunchProgress(35, "Backend ready. Starting AI detection core...");
+    } catch (portErr) {
+      sendLaunchStep("backend", "error");
+      throw new Error(`${portErr.message}\n\nBackend stderr (last 2000 chars):\n${backendLog.slice(-2000)}`);
+    }
+
     sendLaunchStep("ai", "active");
-    aiProc = spawnPython(aiScript, maincodeDir);
+    aiProc = spawnPython(aiScript, maincodeDir, {
+      APP_ENV: "production",
+      AI_CORE_PORT: String(AI_CORE_DESIRED_PORT),
+      WEIGHTS_DIR: getWeightsDir(),
+      BACKEND_URL: `http://${HOST}:${backendPort}`,
+    });
     aiProc.stderr.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
     aiProc.stdout.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
 
-    sendLaunchProgress(60, "Starting dashboard...");
+    try {
+      aiPort = await waitForRuntimePort("ai_core");
+      await waitForPort(aiPort, HOST, 60000);
+      sendLaunchStep("ai", "done");
+      sendLaunchProgress(60, "AI core ready. Starting dashboard...");
+    } catch (portErr) {
+      sendLaunchStep("ai", "error");
+      throw new Error(portErr.message);
+    }
+
     sendLaunchStep("next", "active");
-    nextProc = spawnNextServer();
+    try {
+      frontendPort = await findFreePortForFrontend(FRONTEND_DESIRED_PORT);
+    } catch (portErr) {
+      sendLaunchStep("next", "error");
+      throw portErr;
+    }
+
+    writeRuntimeConfigForFrontend(`http://${HOST}:${backendPort}`, `http://${HOST}:${aiPort}`);
+
+    nextProc = spawnNextServer(frontendPort);
     if (nextProc) {
       nextProc.stderr.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
       nextProc.stdout.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
     }
 
     try {
-      await waitForPort(8000, 60000);
-      sendLaunchStep("backend", "done");
-      sendLaunchProgress(70, "Backend ready. Waiting on AI core...");
-
-      await waitForPort(8001, 60000);
-      sendLaunchStep("ai", "done");
-      sendLaunchProgress(85, "AI core ready. Waiting on dashboard...");
-
-      await waitForPort(3000, 60000);
+      await waitForPort(frontendPort, HOST, 60000);
       sendLaunchStep("next", "done");
       sendLaunchProgress(100, "Ready.");
     } catch (portErr) {
-      if (portErr.message.includes("8000")) sendLaunchStep("backend", "error");
-      else if (portErr.message.includes("8001")) sendLaunchStep("ai", "error");
-      else if (portErr.message.includes("3000")) sendLaunchStep("next", "error");
-
-      let detail = portErr.message;
-      if (portErr.message.includes("3000") && nextLog) {
-        detail += `\n\nNext.js Output (last 2000 chars):\n${nextLog.slice(-2000)}`;
-      } else if (portErr.message.includes("8000") && backendLog) {
-        detail += `\n\nBackend stderr (last 2000 chars):\n${backendLog.slice(-2000)}`;
-      }
-      throw new Error(detail);
+      sendLaunchStep("next", "error");
+      throw new Error(`${portErr.message}\n\nNext.js Output (last 2000 chars):\n${nextLog.slice(-2000)}`);
     }
 
-    await createWindow();
+    surfaceBootstrapCredentials(appDataDir);
+
+    await createWindow(`http://${HOST}:${frontendPort}`);
     if (launchWindow && !launchWindow.isDestroyed()) launchWindow.close();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.loadURL("http://localhost:3000");
-    }
   } catch (err) {
     sendLaunchError(err.message);
   }

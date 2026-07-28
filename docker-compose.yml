@@ -1,0 +1,71 @@
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ecovision
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ecovision
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecovision"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql://ecovision:${POSTGRES_PASSWORD}@postgres:5432/ecovision
+      SECRET_KEY: ${SECRET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      DEVTEAM_BOOTSTRAP_USERNAME: ${DEVTEAM_BOOTSTRAP_USERNAME}
+      DEVTEAM_BOOTSTRAP_PASSWORD: ${DEVTEAM_BOOTSTRAP_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  detector:
+    build:
+      context: .
+      dockerfile: dockerfile.detector
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      ECOVISION_WRITABLE_DIR: /data
+    volumes:
+      - detector_data:/data
+    depends_on:
+      - backend
+    ports:
+      - "8001:8001"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  detector_data:
