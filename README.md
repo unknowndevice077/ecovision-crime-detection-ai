@@ -1,4 +1,4 @@
-# EcoVision Security Sentinel
+# EcoVision Security Sentinel - does not work yet
 
 Real-time AI-powered security monitoring and threat detection system. It watches a live camera feed, tracks people, detects weapons and violent behavior, and raises alerts — all through a single desktop app with a live dashboard.
 
