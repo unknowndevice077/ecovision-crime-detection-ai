@@ -1,12 +1,11 @@
 """
-EcoVision -- X3D-XS Live Inference Wrapper with Coordinate Registry
-==================================================================
-Loads your trained x3d_xs_violence_best.pt and runs it against a
-ROLLING BUFFER of recent frames, not every single frame -- this is
-the "triggered, not continuous" design locked in earlier.
+x3d_violence_detector.py -- stabilized version with EMA smoothing,
+configurable hysteresis, and full diagnostic logging.
 """
 
 import os
+import csv
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,46 +17,30 @@ try:
 except ImportError:
     raise SystemExit("Missing pytorchvideo. Run: pip install pytorchvideo")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────────────────────────────────────
 DETECTOR_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DETECTOR_PROJECT_ROOT = os.path.dirname(DETECTOR_CURRENT_DIR)
 
-MODEL_PATH        = os.path.join(DETECTOR_PROJECT_ROOT, "weights", "x3d_xs_violence_best.pt")
-CLIP_FRAMES        = 13
-FRAME_SIZE         = 160
-BUFFER_SPAN         = 45     
-X3D_CHECK_INTERVAL  = 15
-VIOLENCE_CONFIDENCE_THRESHOLD = 0.40   # LOCKED (true held-out test, test_x3d_true_heldout.py):
-                                        # 76.5% recall / 63.3% precision / 67.0% acc / 42.0% FPR.
-                                        # A separate 0.50 sweep exists in old notes (70.5% acc,
-                                        # 23.3% FPR, ~10pt recall drop) but was NOT run through
-                                        # the true held-out split -- 0.40 is the number cited in
-                                        # the thesis and is the deployed value. Do not change
-                                        # without re-running test_x3d_true_heldout.py.
+MODEL_PATH = os.path.join(DETECTOR_PROJECT_ROOT, "weights", "x3d_xs_violence_best.pt")
+CLIP_FRAMES = 13
+FRAME_SIZE = 160
+BUFFER_SPAN = 45
+X3D_CHECK_INTERVAL = 15
+VIOLENCE_CONFIDENCE_THRESHOLD = 0.40
 
-# Live-deployment-only hysteresis. Does NOT change the model, the threshold,
-# or the thesis-cited accuracy numbers above (those are per-inference, still
-# computed the same way) -- this just requires the SAME track to trip the
-# threshold on CONSECUTIVE checks (spaced X3D_CHECK_INTERVAL frames apart)
-# before main.py is told "violent". A lone noisy window (jitter, a gesture,
-# a bystander's motion leaking into the crop) no longer flips state by itself.
 VIOLENCE_CONSECUTIVE_REQUIRED = 2
-
-# How far (in multiples of the person's own box size) to search for a nearby
-# second person to merge into the crop. This used to be 3x, which routinely
-# pulled in unrelated bystanders several body-lengths away and fed their
-# motion into a "standing still" track's clip. 1.3x keeps the intent (catch
-# a genuine close-contact pair) without grabbing everyone in the frame.
 BYSTANDER_MERGE_RADIUS_MULT = 1.3
 
-class X3DViolenceDetector:
-    """
-    Wraps your trained X3D-XS checkpoint for live, per-track inference.
-    One instance is created once in main.py and reused across the whole run.
-    """
+# --- NEW: EMA smoothing on raw confidence, per track ---
+EMA_ALPHA = 0.35          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
+# --- NEW: separate release threshold, prevents flapping right at the line ---
+RELEASE_HYSTERESIS_MARGIN = 0.07   # confidence must drop this far below threshold to release
 
+# --- NEW: diagnostic logging ---
+ENABLE_DIAGNOSTIC_LOG = True
+DIAGNOSTIC_LOG_PATH = os.path.join(DETECTOR_PROJECT_ROOT, "logs", "x3d_confidence_trace.csv")
+
+
+class X3DViolenceDetector:
     def __init__(self, model_path: str = MODEL_PATH, device: str = None):
         if device is None:
             resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,21 +65,42 @@ class X3DViolenceDetector:
 
         print(f"[X3D] Model loaded successfully from {model_path}")
 
-        # Per-track rolling frame buffers and cached results
         self._frame_buffers: dict[int, deque] = {}
         self._last_check_frame: dict[int, int] = {}
-        self._cached_result: dict[int, tuple] = {}   
-        self._real_inference_count: dict[int, int] = {}   
+        self._cached_result: dict[int, tuple] = {}
+        self._real_inference_count: dict[int, int] = {}
         self._latest_live_crops: dict[int, np.ndarray] = {}
-        self._consecutive_hits: dict[int, int] = {}   # per-track raw-positive streak, for hysteresis
-        
-        # SUPPORT EXTENSION: In-memory dictionary tracking coordinates fed to the model
+        self._consecutive_hits: dict[int, int] = {}
         self._active_crop_boxes: dict[int, tuple] = {}
 
+        # NEW: EMA state per track
+        self._ema_conf: dict[int, float] = {}
+        # NEW: sticky confirmed state per track (survives release margin)
+        self._confirmed_state: dict[int, bool] = {}
+
+        if ENABLE_DIAGNOSTIC_LOG:
+            os.makedirs(os.path.dirname(DIAGNOSTIC_LOG_PATH), exist_ok=True)
+            self._log_file = open(DIAGNOSTIC_LOG_PATH, "a", newline="")
+            self._log_writer = csv.writer(self._log_file)
+            if self._log_file.tell() == 0:
+                self._log_writer.writerow([
+                    "timestamp", "track_id", "frame_count", "raw_conf",
+                    "ema_conf", "consecutive_hits", "confirmed", "buffer_fill"
+                ])
+        else:
+            self._log_file = None
+            self._log_writer = None
+
+    def _log_row(self, tid, frame_count, raw_conf, ema_conf, hits, confirmed, buf_fill):
+        if self._log_writer is None:
+            return
+        self._log_writer.writerow([
+            round(time.time(), 3), tid, frame_count,
+            round(raw_conf, 4), round(ema_conf, 4), hits, confirmed, buf_fill
+        ])
+        self._log_file.flush()
+
     def _crop_person(self, frame: np.ndarray, p_box, all_boxes=None, tid: int = None) -> np.ndarray:
-        """
-        Crops the frame around a person's bbox, padded generously enough to include a nearby second person.
-        """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = [int(v) for v in p_box]
 
@@ -125,7 +129,6 @@ class X3DViolenceDetector:
         cx1, cy1 = max(0, cx1), max(0, cy1)
         cx2, cy2 = min(w, cx2), min(h, cy2)
 
-        # Cache coordinates directly inside track mapping storage vectors
         if tid is not None:
             self._active_crop_boxes[tid] = (cx1, cy1, cx2, cy2)
 
@@ -140,8 +143,9 @@ class X3DViolenceDetector:
             self._frame_buffers[tid] = deque(maxlen=BUFFER_SPAN)
             self._last_check_frame[tid] = -X3D_CHECK_INTERVAL
             self._cached_result[tid] = (False, 0.0)
+            self._ema_conf[tid] = 0.0
+            self._confirmed_state[tid] = False
 
-        # Adjusted call parameters to pass the unique Track ID into coordinate matrices
         cropped = self._crop_person(frame, p_box, all_boxes=all_boxes, tid=tid)
         self._frame_buffers[tid].append(cropped)
         self._latest_live_crops[tid] = cropped
@@ -153,15 +157,32 @@ class X3DViolenceDetector:
             self._last_check_frame[tid] = frame_count
             raw_is_violent, raw_conf = self._run_inference(self._frame_buffers[tid], tid=tid)
 
-            if raw_is_violent:
+            # --- EMA smoothing ---
+            prev_ema = self._ema_conf.get(tid, raw_conf)
+            ema = EMA_ALPHA * prev_ema + (1 - EMA_ALPHA) * raw_conf
+            self._ema_conf[tid] = ema
+
+            # --- consecutive-hit counter now runs off the smoothed value ---
+            if ema >= VIOLENCE_CONFIDENCE_THRESHOLD:
                 self._consecutive_hits[tid] = self._consecutive_hits.get(tid, 0) + 1
             else:
                 self._consecutive_hits[tid] = 0
 
-            confirmed = self._consecutive_hits[tid] >= VIOLENCE_CONSECUTIVE_REQUIRED
-            # Confidence shown/logged is still the raw model probability --
-            # only the boolean alert state is gated by hysteresis.
+            was_confirmed = self._confirmed_state.get(tid, False)
+
+            if not was_confirmed:
+                confirmed = self._consecutive_hits[tid] >= VIOLENCE_CONSECUTIVE_REQUIRED
+            else:
+                # sticky release: only drop out once EMA falls well below threshold
+                confirmed = ema >= (VIOLENCE_CONFIDENCE_THRESHOLD - RELEASE_HYSTERESIS_MARGIN)
+
+            self._confirmed_state[tid] = confirmed
             self._cached_result[tid] = (confirmed, raw_conf)
+
+            self._log_row(
+                tid, frame_count, raw_conf, ema,
+                self._consecutive_hits[tid], confirmed, len(self._frame_buffers[tid])
+            )
 
         return self._cached_result[tid]
 
@@ -190,7 +211,6 @@ class X3DViolenceDetector:
         return is_violent, violence_prob
 
     def get_crop_box(self, tid: int) -> tuple:
-        """Exposes coordinates to main.py to fulfill patch execution boundaries."""
         return self._active_crop_boxes.get(tid, None)
 
     def get_latest_live_crop(self, tid: int) -> np.ndarray:
@@ -199,11 +219,15 @@ class X3DViolenceDetector:
     def get_inference_count(self, tid: int) -> int:
         return self._real_inference_count.get(tid, 0)
 
+    def get_ema_confidence(self, tid: int) -> float:
+        return self._ema_conf.get(tid, 0.0)
+
     def get_debug_info(self, tid: int) -> dict:
         is_violent, conf = self._cached_result.get(tid, (False, 0.0))
         buf_len = len(self._frame_buffers.get(tid, []))
         return {
             "confidence": conf,
+            "ema_confidence": self._ema_conf.get(tid, 0.0),
             "is_violent": is_violent,
             "buffer_fill": buf_len,
             "buffer_target": BUFFER_SPAN,
@@ -226,3 +250,9 @@ class X3DViolenceDetector:
         self._latest_live_crops.pop(tid, None)
         self._active_crop_boxes.pop(tid, None)
         self._consecutive_hits.pop(tid, None)
+        self._ema_conf.pop(tid, None)
+        self._confirmed_state.pop(tid, None)
+
+    def close(self):
+        if self._log_file:
+            self._log_file.close()
