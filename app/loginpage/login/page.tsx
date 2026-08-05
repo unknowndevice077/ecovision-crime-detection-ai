@@ -4,10 +4,10 @@ import React, { useState } from 'react';
 import { Shield, Lock, User, ArrowRight } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 export default function LoginPage() {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [creds, setCreds] = useState({ username: '', password: '' });
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);

@@ -8,8 +8,7 @@ import {
 } from 'lucide-react';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useWebSocketContext } from '../../context/WebSocketContext';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 type SidebarProps = {
   currentUser: {
@@ -38,6 +37,7 @@ export default function Sidebar({
   activeTab,
   setActiveTab
 }: SidebarProps) {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const router = useRouter();
   const pathname = usePathname();
   const { can } = usePermissions();

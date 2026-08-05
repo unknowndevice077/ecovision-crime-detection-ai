@@ -9,7 +9,9 @@ USAGE
     python calibrate_threshold.py --device 0
 """
 
+import csv
 import itertools
+import time
 from pathlib import Path
 from collections import defaultdict
 
@@ -23,6 +25,8 @@ from test_x3d_true_heldout import (
     POSE_IMGSZ, POSE_MODEL_PATH,
     DEFAULT_RWF_ROOT, DEFAULT_SCVD_ROOT,
 )
+
+OUTPUT_CSV = "calibration_results.csv"
 
 THRESHOLDS = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55]
 CONSECUTIVE_OPTIONS = [1, 2, 3]
@@ -51,7 +55,8 @@ def evaluate_clip_raw(video_path, pose_model, x3d_detector, device):
         frame_count += 1
         try:
             pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, device=device)
-        except Exception:
+        except Exception as e:
+            print(f"  [WARN] pose_model.track() raised on frame {frame_count} of {video_path.name}: {e}")
             continue
         if not (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None):
             continue
@@ -65,9 +70,14 @@ def evaluate_clip_raw(video_path, pose_model, x3d_detector, device):
             cropped = x3d_detector._crop_person(frame, p_box, all_boxes=boxes, tid=tid)
             x3d_detector._frame_buffers[tid].append(cropped)
 
-            buffer_full = len(x3d_detector._frame_buffers[tid]) == x3d_mod.BUFFER_SPAN
+            # Mirrors the live detector's gating (see x3d_violence_detector.py) --
+            # ready once MIN_BUFFER_FOR_INFERENCE frames are buffered, not only
+            # once the full BUFFER_SPAN is reached. Keeping this in sync matters:
+            # calibrating thresholds against a gate the live pipeline doesn't
+            # actually use would pick numbers tuned for different data.
+            buffer_ready = len(x3d_detector._frame_buffers[tid]) >= x3d_mod.MIN_BUFFER_FOR_INFERENCE
             due = (frame_count - x3d_detector._last_check_frame[tid]) >= x3d_mod.X3D_CHECK_INTERVAL
-            if buffer_full and due:
+            if buffer_ready and due:
                 x3d_detector._last_check_frame[tid] = frame_count
                 _, raw_conf = x3d_detector._run_inference(x3d_detector._frame_buffers[tid], tid=tid)
                 track_confidences[tid].append(raw_conf)
@@ -131,9 +141,15 @@ def main(device: str):
     print(f"{'threshold':>9} {'consec':>7} {'acc%':>7} {'recall%':>9} {'prec%':>8} {'fpr%':>7}")
     print("=" * 90)
     best = None
+    sweep_rows = []
     for threshold, consec in itertools.product(THRESHOLDS, CONSECUTIVE_OPTIONS):
         acc, recall, precision, fpr = score_combo(all_clip_traces, threshold, consec)
         print(f"{threshold:>9.2f} {consec:>7d} {acc:>7.1f} {recall:>9.1f} {precision:>8.1f} {fpr:>7.1f}")
+        sweep_rows.append({
+            "threshold": threshold, "consecutive_required": consec,
+            "accuracy_pct": round(acc, 2), "recall_pct": round(recall, 2),
+            "precision_pct": round(precision, 2), "fpr_pct": round(fpr, 2),
+        })
         # simple scoring heuristic: maximize acc - fpr penalty
         score = acc - fpr * 0.5
         if best is None or score > best[0]:
@@ -143,9 +159,20 @@ def main(device: str):
     _, threshold, consec, acc, recall, precision, fpr = best
     print(f"  threshold={threshold}  consecutive_required={consec}")
     print(f"  acc={acc:.1f}%  recall={recall:.1f}%  precision={precision:.1f}%  fpr={fpr:.1f}%")
-    print("\nUpdate VIOLENCE_CONFIDENCE_THRESHOLD and VIOLENCE_CONSECUTIVE_REQUIRED")
-    print("in x3d_violence_detector.py to these values, then re-run")
-    print("test_x3d_true_heldout.py to confirm the final number.")
+    print(f"\nUpdate detection.violence.confidence_threshold and")
+    print(f"detection.violence.consecutive_required in config.json to these")
+    print(f"values, then re-run test_x3d_true_heldout.py to confirm the final number.")
+
+    # Persist the sweep so the recommended operating point isn't lost the
+    # moment this terminal closes -- previously this script only printed to
+    # stdout, so nothing on disk showed what a past sweep actually found.
+    with open(OUTPUT_CSV, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(sweep_rows[0].keys()) + ["is_best"])
+        writer.writeheader()
+        for row in sweep_rows:
+            is_best = (row["threshold"] == threshold and row["consecutive_required"] == consec)
+            writer.writerow({**row, "is_best": is_best})
+    print(f"\nFull sweep written to {OUTPUT_CSV} (run at {time.strftime('%Y-%m-%d %H:%M:%S')}).")
 
 
 if __name__ == "__main__":

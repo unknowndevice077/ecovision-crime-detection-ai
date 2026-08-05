@@ -134,18 +134,16 @@ git push origin v1.0.0
 
 Pushing a `v*` tag triggers the workflow, which:
 - Builds the frontend
-- Packages with electron-builder
-- Creates a portable `.zip` file
+- Packages with electron-builder into a **portable single `.exe`** (no install wizard, no admin elevation — just download and run)
 
 Download from:
-- The tagged **GitHub Release** page (auto-attached)
-- The workflow run's **Artifacts** tab
+- The workflow run's **Artifacts** tab (there is no auto-created GitHub Release — download the artifact and create/attach a Release yourself if you want one)
 
 You can also manually trigger a build from the **Actions** tab without pushing a tag.
 
 ### Run a Release Build
 
-Unzip `EcoVisionSentinel-<version>-win64.zip` anywhere and run `EcoVisionSentinel.exe`. The app:
+Run `EcoVisionSentinel-<version>-portable.exe` directly — no unzip, no install step. The app:
 - Spawns backend and AI processes locally
 - Waits for both to be ready
 - Opens the dashboard
@@ -155,7 +153,7 @@ Unzip `EcoVisionSentinel-<version>-win64.zip` anywhere and run `EcoVisionSentine
 
 ⚠️ **GPU Recommended** — Violence detector and detection models use CUDA if available, CPU inference may not keep up with 24/7 live feeds
 
-⚠️ **Build Size** — Expect 500 MB to several GB depending on PyTorch/CUDA bundle. This is normal for ML-heavy applications.
+⚠️ **Build Size** — The bundled python-env (CUDA PyTorch + Ultralytics + PyTorchVideo) alone is several GB; expect a finished portable exe in the 3–5GB+ range. This is normal for ML-heavy applications, but it is not a small download.
 
 ⚠️ **Unsigned Build** — Not code-signed; Windows SmartScreen may show a warning on first run
 

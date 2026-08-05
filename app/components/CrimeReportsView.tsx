@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { 
+import {
   X, MapPin, ShieldCheck, Trash2, Plus,
   Info, AlertCircle, FileSignature, FileText,
   Calendar, ListFilter, ShieldAlert, Radio, Check, Video, ArrowLeft, Globe, ImageIcon
 } from 'lucide-react';
+import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 
 type SmartpoleNode = {
   id: string; name: string; street: string; lat: number; lng: number;
@@ -60,6 +61,7 @@ interface CrimeReportsViewProps {
 }
 
 export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsViewProps) {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
   const selectedPole = useMemo<SmartpoleNode | null>(() => {
     return selectedPoleId ? SMARTPOLE_LOCATIONS.find(p => p.id === selectedPoleId) ?? null : null;
@@ -96,7 +98,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   const incidentMarkersRef = useRef<any[]>([]);
   const selectedPoleIdRef = useRef<string | null>(null);
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   const filteredIncidents = useMemo(() => {
     return incidents.filter(inc => {
       // Expunged from this view only -- Crime History still has it.

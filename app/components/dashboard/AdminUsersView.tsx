@@ -3,9 +3,8 @@
 import React, { useState } from 'react';
 import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonList } from './Skeleton';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type ManagedUser = {
   id: number;
@@ -31,6 +30,7 @@ function authHeaders() {
 }
 
 export default function AdminUsersView() {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);

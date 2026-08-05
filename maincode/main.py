@@ -75,9 +75,19 @@ except ImportError:
 # user as "Timed out waiting on port 8000" once the backend also fails
 # for the identical reason.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SHIPPED_CONFIG_PATH = os.path.join(os.path.dirname(BASE_DIR), "config.json")
+WORKSPACE_ROOT = os.path.dirname(BASE_DIR)
+
+# APP_ENV-aware, matching app/backend.py's loader exactly: prefer
+# config.<APP_ENV>.json (e.g. config.production.json under docker-compose,
+# which sets APP_ENV=production) and fall back to config.json if that
+# env-specific file isn't shipped. Previously this always loaded config.json
+# unconditionally, so APP_ENV=production silently had zero effect here --
+# the detector container was running dev settings in "production".
+APP_ENV = os.environ.get("APP_ENV", "development")
+_ENV_CONFIG_PATH = os.path.join(WORKSPACE_ROOT, f"config.{APP_ENV}.json")
+SHIPPED_CONFIG_PATH = _ENV_CONFIG_PATH if os.path.exists(_ENV_CONFIG_PATH) else os.path.join(WORKSPACE_ROOT, "config.json")
 if not os.path.exists(SHIPPED_CONFIG_PATH):
-    sys.exit(f"❌ Central configuration file 'config.json' not found at workspace root: {SHIPPED_CONFIG_PATH}")
+    sys.exit(f"❌ Central configuration file not found at workspace root: {SHIPPED_CONFIG_PATH}")
 
 with open(SHIPPED_CONFIG_PATH, 'r') as f:
     sys_config = json.load(f)
@@ -183,6 +193,20 @@ GRIP_RADIUS_BOX_FRAC   = 0.35
 GRIP_STICKY_MARGIN     = 0.80
 
 ESP32_IP    = sys_config["esp32"].get("ip_override") or "192.168.254.152"
+
+# config.production.json's networking.api_url is "127.0.0.1" because that's
+# correct for the shipped Electron desktop build (backend + detector are
+# local processes on the same machine). Under docker-compose, backend and
+# detector are separate containers and "127.0.0.1" wouldn't resolve to the
+# backend container at all -- BACKEND_API_URL_OVERRIDE (set in
+# docker-compose.yml to the "backend" service hostname) lets that deployment
+# override just this value without the JSON file having to serve both
+# environments' conflicting networking needs. Mirrors CORS_ORIGINS_ENV's
+# override pattern in app/backend.py.
+_BACKEND_API_URL_OVERRIDE = os.environ.get("BACKEND_API_URL_OVERRIDE")
+if _BACKEND_API_URL_OVERRIDE:
+    sys_config.setdefault("networking", {})["api_url"] = _BACKEND_API_URL_OVERRIDE
+
 BACKEND_URL = f"{sys_config['networking']['api_url'].rstrip('/')}/api/ai_trigger"
 
 STREAM_JPEG_QUALITY    = 90
@@ -230,7 +254,11 @@ def video_feed():
 def _start_stream_server():
     preferred_port = 8001
     actual_port = find_free_port(preferred_port)
-    write_runtime_port("detector", actual_port)
+    # Key MUST be "ai_core" -- electron/main.js:584's waitForRuntimePort("ai_core")
+    # polls for exactly this key. It previously said "detector" here, which never
+    # matched, so Electron always concluded the AI core failed to start (even
+    # though it was running fine) and aborted the launch every time.
+    write_runtime_port("ai_core", actual_port)
     print(f"📡 Dynamic Stream server live → http://localhost:{actual_port}/video_feed")
     uvicorn.run(stream_app, host=sys_config["backend"]["host"], port=actual_port, log_level="error")
 
@@ -1053,7 +1081,23 @@ while _running:
 
             cooldown = SCENE_COOLDOWN_ARMED if state == "ARMED" else SCENE_COOLDOWN_ASSAULT
             if ts.should_alert(frame_count, scene_last_alert_frame, cooldown):
-                conf = 0.932 if state == "ARMED" else min(1.0, sum(ts.evidence_buf) / EVIDENCE_WINDOW + 0.55)
+                # Surface the real detector confidence instead of a fixed
+                # placeholder wherever one is available, so "confidence" sent
+                # downstream reflects what actually triggered the alert:
+                #   ARMED   -> the weapon detector's own confidence for this
+                #              track's assigned weapon(s), if any were matched.
+                #   ASSAULT -> the X3D model's own (EMA-smoothed) probability,
+                #              or the evidence-window density when the alert
+                #              was driven mainly by the vbox/weapon-zone
+                #              heuristic rather than the model itself.
+                # 0.932 / the density-only formula remain as fallbacks for the
+                # rare case neither signal is available.
+                if state == "ARMED":
+                    armed_weapon_confs = [w["conf"] for w in weapon_assigns.get(tid, []) if "conf" in w]
+                    conf = max(armed_weapon_confs) if armed_weapon_confs else 0.932
+                else:
+                    evidence_density = min(1.0, sum(ts.evidence_buf) / EVIDENCE_WINDOW + 0.55)
+                    conf = max(x3d_conf, evidence_density)
                 ts.mark_alerted(frame_count)
                 scene_last_alert_frame = frame_count
                 

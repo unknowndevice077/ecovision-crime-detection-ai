@@ -95,6 +95,7 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
     cap = cv2.VideoCapture(str(video_path))
     frame_count = 0
     frames_with_pose = 0
+    pose_exceptions = 0
     any_violence_detected = False
     max_confidence_seen = 0.0
 
@@ -110,7 +111,12 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
         frame_count += 1
         try:
             pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, device=device)
-        except Exception:
+        except Exception as e:
+            # Logged (not silently swallowed) so "pose never found a person"
+            # and "pose_model.track() kept throwing" are distinguishable --
+            # previously both looked identical (frames_with_pose == 0).
+            pose_exceptions += 1
+            print(f"  [WARN] pose_model.track() raised on frame {frame_count} of {video_path.name}: {e}")
             continue
         if not (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None):
             continue
@@ -154,6 +160,7 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
         "max_confidence": max_confidence_seen,
         "frame_count": frame_count,
         "frames_with_pose": frames_with_pose,
+        "pose_exceptions": pose_exceptions,
         "had_any_buffer": had_any_buffer,
         "forced_flush": forced_flush,
         "pose_detection_rate": round(pose_rate, 3),
@@ -161,7 +168,7 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
     }
 
 
-def run_test(roots: list, device: str):
+def run_test(roots: list, device: str, notes: str = ""):
     print("Recreating EXACT train/val split from train_x3d_full.py (seed=42)...")
     all_clips = gather_all_clips_EXACT_TRAINING_LOGIC(roots)
 
@@ -207,6 +214,7 @@ def run_test(roots: list, device: str):
             "max_confidence": round(result["max_confidence"], 3),
             "frame_count": result["frame_count"],
             "frames_with_pose": result.get("frames_with_pose", "n/a"),
+            "pose_exceptions": result.get("pose_exceptions", 0),
             "pose_detection_rate": result.get("pose_detection_rate", "n/a"),
             "real_inference_count": result.get("real_inference_count", "n/a"),
             "had_any_buffer": result.get("had_any_buffer", "n/a"),
@@ -241,14 +249,18 @@ def run_test(roots: list, device: str):
     print(f"\nThis is the number to cite as your model's true generalization")
     print(f"performance through the live deployed pipeline.")
 
+    from eval_history import log_run
+    log_run("test_x3d_true_heldout", split="val", tp=tp, fp=fp, tn=tn, fn=fn, notes=notes)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--rwf-root", type=str, default=DEFAULT_RWF_ROOT)
     parser.add_argument("--scvd-root", type=str, default=DEFAULT_SCVD_ROOT)
     parser.add_argument("--device", type=str, default="0")
+    parser.add_argument("--notes", type=str, default="", help="Free-text note saved into eval_history.csv for this run (e.g. 'after buffer-gating fix')")
     args = parser.parse_args()
     roots = [r for r in [args.rwf_root, args.scvd_root] if r is not None]
     if not roots:
         raise SystemExit("Provide at least one of --rwf-root or --scvd-root")
-    run_test(roots, args.device)
+    run_test(roots, args.device, notes=args.notes)

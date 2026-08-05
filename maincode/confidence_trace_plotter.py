@@ -18,6 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from x3d_violence_detector import VIOLENCE_CONFIDENCE_THRESHOLD
+
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "x3d_confidence_trace.csv")
 OUT_DIR = "confidence_plots"
 
@@ -46,7 +48,8 @@ def plot_track(tid, rows):
     fig, ax1 = plt.subplots(figsize=(12, 4))
     ax1.plot(frames, raw, label="raw confidence", alpha=0.5, color="gray")
     ax1.plot(frames, ema, label="EMA confidence", color="blue", linewidth=2)
-    ax1.axhline(0.40, color="red", linestyle="--", linewidth=1, label="threshold (0.40)")
+    ax1.axhline(VIOLENCE_CONFIDENCE_THRESHOLD, color="red", linestyle="--", linewidth=1,
+                label=f"threshold ({VIOLENCE_CONFIDENCE_THRESHOLD:.2f})")
     ax1.set_ylim(0, 1)
     ax1.set_xlabel("frame")
     ax1.set_ylabel("confidence")

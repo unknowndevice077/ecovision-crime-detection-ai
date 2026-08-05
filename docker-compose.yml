@@ -47,6 +47,10 @@ services:
     environment:
       APP_ENV: production
       ECOVISION_WRITABLE_DIR: /data
+      # config.production.json's networking.api_url is "127.0.0.1" (correct
+      # for the Electron desktop build) -- override it here to the Compose
+      # service name so the detector container can actually reach backend.
+      BACKEND_API_URL_OVERRIDE: http://backend:8000
     volumes:
       - detector_data:/data
     depends_on:

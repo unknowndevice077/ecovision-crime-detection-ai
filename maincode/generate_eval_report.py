@@ -83,6 +83,7 @@ def evaluate_clip_with_snapshot(video_path: Path, pose_model, x3d_detector, devi
     cap = cv2.VideoCapture(str(video_path))
     frame_count = 0
     frames_with_pose = 0
+    pose_exceptions = 0
     any_violence_detected = False
     max_confidence_seen = 0.0
 
@@ -105,7 +106,12 @@ def evaluate_clip_with_snapshot(video_path: Path, pose_model, x3d_detector, devi
 
         try:
             pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, device=device)
-        except Exception:
+        except Exception as e:
+            # Logged (not silently swallowed) so "pose never found a person"
+            # and "pose_model.track() kept throwing" are distinguishable --
+            # previously both looked identical (frames_with_pose == 0).
+            pose_exceptions += 1
+            print(f"  [WARN] pose_model.track() raised on frame {frame_count} of {video_path.name}: {e}")
             continue
         if not (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None):
             continue
@@ -130,7 +136,6 @@ def evaluate_clip_with_snapshot(video_path: Path, pose_model, x3d_detector, devi
     # counter incremented only inside _run_inference itself).
     forced_flush = False
     had_any_buffer = len(x3d_detector._frame_buffers) > 0
-    total_real_inferences = sum(x3d_detector._real_inference_count.values())
 
     for tid in list(x3d_detector._frame_buffers.keys()):
         if x3d_detector.get_inference_count(tid) == 0:
@@ -145,12 +150,21 @@ def evaluate_clip_with_snapshot(video_path: Path, pose_model, x3d_detector, devi
                 if live_crop is not None:
                     best_crop = live_crop.copy()
 
+    # NOTE: this snapshot must be taken AFTER the forced-flush loop above,
+    # not before it -- force_inference() calls _run_inference() which DOES
+    # increment _real_inference_count, so snapshotting earlier silently
+    # undercounts every clip that only got a real inference via flush. See
+    # the identical fix (and its explanation) in test_x3d_true_heldout.py --
+    # this script had regressed the same bug.
+    total_real_inferences = sum(x3d_detector._real_inference_count.values())
+
     pose_rate = frames_with_pose / frame_count if frame_count > 0 else 0
     return {
         "detected": any_violence_detected,
         "max_confidence": max_confidence_seen,
         "frame_count": frame_count,
         "frames_with_pose": frames_with_pose,
+        "pose_exceptions": pose_exceptions,
         "had_any_buffer": had_any_buffer,
         "forced_flush": forced_flush,
         "pose_detection_rate": round(pose_rate, 3),
@@ -211,7 +225,7 @@ def render_labeled_jpg(result: dict, meta: dict) -> np.ndarray:
 # MAIN REPORT RUN
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_report(roots: list, device: str, output_dir: str, split: str = "val", limit: int = None):
+def run_report(roots: list, device: str, output_dir: str, split: str = "val", limit: int = None, notes: str = ""):
     out_root = Path(output_dir)
     for sub in ("TP", "FP", "TN", "FN"):
         (out_root / sub).mkdir(parents=True, exist_ok=True)
@@ -255,6 +269,7 @@ def run_report(roots: list, device: str, output_dir: str, split: str = "val", li
     confusion = defaultdict(int)
     conf_by_outcome = defaultdict(list)
     no_inference_count = 0
+    total_pose_exceptions = 0
     run_start = time.time()
 
     for i, (video_path, ground_truth_violent) in enumerate(target_clips):
@@ -273,6 +288,7 @@ def run_report(roots: list, device: str, output_dir: str, split: str = "val", li
         conf_by_outcome[outcome].append(result["max_confidence"])
         if result["best_crop"] is None:
             no_inference_count += 1
+        total_pose_exceptions += result.get("pose_exceptions", 0)
 
         meta = {
             "file": video_path.name,
@@ -295,6 +311,7 @@ def run_report(roots: list, device: str, output_dir: str, split: str = "val", li
             **meta,
             "frame_count": result["frame_count"],
             "frames_with_pose": result.get("frames_with_pose", "n/a"),
+            "pose_exceptions": result.get("pose_exceptions", 0),
             "had_any_buffer": result.get("had_any_buffer", "n/a"),
             "forced_flush": result.get("forced_flush", "n/a"),
             "image_file": f"{outcome}/{jpg_name}",
@@ -359,6 +376,10 @@ def run_report(roots: list, device: str, output_dir: str, split: str = "val", li
     lines.append(f"(these clips' JPGs show a fallback raw frame labeled 'NO INFERENCE' --")
     lines.append(f" worth a manual look, since these are likely pose-tracking failures, not")
     lines.append(f" model failures)")
+    lines.append(f"Frames where pose_model.track() raised an exception: {total_pose_exceptions}")
+    lines.append(f"(previously silently swallowed -- a nonzero count here means some")
+    lines.append(f" 'no inference' clips above are actual tracker crashes, not just")
+    lines.append(f" 'no person ever detected'; see per-clip pose_exceptions in results.csv)")
     lines.append("")
     lines.append("-- Output layout --")
     lines.append(f"  {output_dir}/TP/*.jpg, FP/*.jpg, TN/*.jpg, FN/*.jpg")
@@ -370,6 +391,10 @@ def run_report(roots: list, device: str, output_dir: str, split: str = "val", li
         f.write(summary_text + "\n")
 
     print("\n" + summary_text)
+
+    if split == "val":
+        from eval_history import log_run
+        log_run("generate_eval_report", split=split, tp=tp, fp=fp, tn=tn, fn=fn, notes=notes)
 
 
 if __name__ == "__main__":
@@ -384,6 +409,7 @@ if __name__ == "__main__":
                               "'train' and 'all' include clips the model trained on -- overfitting "
                               "diagnostics only, never the number to cite as real performance.")
     parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N clips in the chosen split (smoke test)")
+    parser.add_argument("--notes", type=str, default="", help="Free-text note saved into eval_history.csv for this run (e.g. 'after buffer-gating fix')")
     args = parser.parse_args()
 
     roots = [r for r in [args.rwf_root, args.scvd_root] if r is not None]
@@ -391,4 +417,4 @@ if __name__ == "__main__":
         raise SystemExit("Provide at least one of --rwf-root or --scvd-root")
 
     output_dir = args.output_dir or f"eval_report_{args.split}"
-    run_report(roots, args.device, output_dir, split=args.split, limit=args.limit)
+    run_report(roots, args.device, output_dir, split=args.split, limit=args.limit, notes=args.notes)

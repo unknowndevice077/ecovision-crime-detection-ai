@@ -45,6 +45,17 @@ yarn-error.log*
 .cache/
 .coverage
 
+# Databases (runtime data, never versioned)
+*.db
+*.sqlite
+*.sqlite3
+
+# Bundled Python venv used for Electron packaging (electron-builder
+# extraResources) -- also has its own internal .gitignore, but that alone
+# is fragile (lost if the venv is ever regenerated wholesale); make the
+# root .gitignore authoritative too.
+python-env/
+
 # Model weights & exports
 *.pt
 *.pth

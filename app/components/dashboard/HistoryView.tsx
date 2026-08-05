@@ -6,11 +6,11 @@ import {
   ListFilter, ArrowUpDown, FileText, Search, ShieldCheck
 } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonRow } from './Skeleton';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 export default function HistoryView() {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [historyRecords, setHistoryRecords] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 

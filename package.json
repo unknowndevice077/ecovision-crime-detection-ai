@@ -65,7 +65,7 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        { "target": "portable", "arch": ["x64"] }
       ]
     },
     "compression": "maximum",
@@ -77,6 +77,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "artifactName": "EcoVisionSentinel-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "EcoVisionSentinel-${version}-portable.exe"
     },
     "files": [
       "electron/**/*",
@@ -96,9 +99,9 @@
       { "from": "maincode/main.py", "to": "maincode/main.py" },
       { "from": "maincode/robbery_vandalism.py", "to": "maincode/robbery_vandalism.py" },
       { "from": "maincode/x3d_violence_detector.py", "to": "maincode/x3d_violence_detector.py" },
-      { "from": "maincode/pose_landmarker_heavy.task", "to": "maincode/pose_landmarker_heavy.task" },
       { "from": "weights", "to": "weights" },
       { "from": "config.json", "to": "config.json" },
+      { "from": "config.production.json", "to": "config.production.json" },
       { "from": "requirements.txt", "to": "requirements.txt" }
     ]
   }

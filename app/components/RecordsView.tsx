@@ -6,9 +6,8 @@ import {
   ListFilter, Calendar, Clock, Scissors, AlertCircle
 } from 'lucide-react';
 import { useLiveChannel } from '../context/WebSocketContext';
+import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 import { SkeletonRow } from './dashboard/Skeleton';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 function authHeaders() {
   const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
@@ -31,6 +30,7 @@ type VideoRecord = {
 };
 
 export default function RecordsView() {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [records, setRecords] = useState<VideoRecord[]>([]);
   const [crimes, setCrimes] = useState<any[]>([]);
   const [subView, setSubView] = useState<'CLIPS' | 'DVR'>('CLIPS');

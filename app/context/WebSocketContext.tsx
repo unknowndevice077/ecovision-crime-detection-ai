@@ -12,8 +12,7 @@
 // wrapper, then any component calls useLiveChannel("incidents", refetchFn).
 
 import React, { createContext, useContext, useEffect, useRef, useCallback, useState } from 'react';
-
-const WS_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/^http/, "ws") + "/ws";
+import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 
 type AlertMessage = {
   status: string;          // "CRITICAL"
@@ -35,6 +34,7 @@ type WebSocketContextValue = {
 const WebSocketContext = createContext<WebSocketContextValue | null>(null);
 
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
+  const { apiUrl } = useRuntimeConfig();
   const [connected, setConnected] = useState(false);
   const [latestAlert, setLatestAlert] = useState<AlertMessage | null>(null);
   const listenersRef = useRef<Map<string, Set<Listener>>>(new Map());
@@ -42,7 +42,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
-    const ws = new WebSocket(WS_URL);
+    // apiUrl starts at the historical default and updates once
+    // runtime-config.json loads (see useRuntimeConfig) -- this effect
+    // re-runs and reconnects to the real URL when that happens, so a
+    // fallback port (backend didn't land on 8000) doesn't leave this
+    // socket permanently pointed at the wrong address.
+    const wsUrl = apiUrl.replace(/^http/, "ws") + "/ws";
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => setConnected(true);
@@ -69,7 +75,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     };
 
     ws.onerror = () => ws.close();
-  }, []);
+  }, [apiUrl]);
 
   useEffect(() => {
     connect();

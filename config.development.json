@@ -3,7 +3,7 @@
   "backend": { "host": "0.0.0.0", "port": 8000, "workers": 1, "reload": true, "log_level": "debug" },
   "frontend": { "port": 3000, "host": "localhost" },
   "database": { "type": "sqlite", "path": "./data", "backup_interval": 3600 },
-  "detection": { "models": { "pose": "yolo11s-pose.pt", "violence": "weights/best.pt" }, "confidence_threshold": 0.6, "detection_interval": 6, "max_unseen_frames": 150 },
+  "detection": { "models": { "pose": "yolo11s-pose.pt", "violence": "weights/x3d_xs_violence_best.pt" }, "confidence_threshold": 0.6, "detection_interval": 6, "max_unseen_frames": 150, "violence": { "model_path": "weights/x3d_xs_violence_best.pt", "confidence_threshold": 0.40, "consecutive_required": 2, "buffer_span": 45, "min_buffer_for_inference": 20, "check_interval": 15, "clip_frames": 13, "frame_size": 160, "ema_alpha": 0.35, "release_hysteresis_margin": 0.07, "bystander_merge_radius_mult": 1.3 } },
   "alert": { "enabled": true, "alert_duration": 90, "cooldown_frames": 150, "sound_enabled": true },
   "camera": { "index": 0, "default_resolution": "1280x720", "fps": 30, "buffer_size": 50 },
   "esp32": { "enabled": false, "heartbeat_interval": 30, "timeout": 60, "max_devices": 100, "auto_registration": true },

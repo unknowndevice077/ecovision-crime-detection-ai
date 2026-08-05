@@ -5,6 +5,7 @@ configurable hysteresis, and full diagnostic logging.
 
 import os
 import csv
+import json
 import time
 import numpy as np
 import torch
@@ -20,22 +21,64 @@ except ImportError:
 DETECTOR_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DETECTOR_PROJECT_ROOT = os.path.dirname(DETECTOR_CURRENT_DIR)
 
-MODEL_PATH = os.path.join(DETECTOR_PROJECT_ROOT, "weights", "x3d_xs_violence_best.pt")
-CLIP_FRAMES = 13
-FRAME_SIZE = 160
-BUFFER_SPAN = 45
-X3D_CHECK_INTERVAL = 15
-VIOLENCE_CONFIDENCE_THRESHOLD = 0.40
+# --- Tunables now live in config.json's detection.violence block so they can
+# be adjusted per-environment (dev/prod) without editing source. These
+# defaults are used whenever config.json is missing, unreadable, or doesn't
+# have that block yet -- keeps this module usable standalone by the
+# calibration/eval scripts, which don't otherwise touch config.json. ---
+_DEFAULT_VIOLENCE_CFG = {
+    "model_path": "weights/x3d_xs_violence_best.pt",
+    "confidence_threshold": 0.40,
+    "consecutive_required": 2,
+    "buffer_span": 45,
+    "min_buffer_for_inference": 20,
+    "check_interval": 15,
+    "clip_frames": 13,
+    "frame_size": 160,
+    "ema_alpha": 0.35,
+    "release_hysteresis_margin": 0.07,
+    "bystander_merge_radius_mult": 1.3,
+}
 
-VIOLENCE_CONSECUTIVE_REQUIRED = 2
-BYSTANDER_MERGE_RADIUS_MULT = 1.3
 
-# --- NEW: EMA smoothing on raw confidence, per track ---
-EMA_ALPHA = 0.35          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
-# --- NEW: separate release threshold, prevents flapping right at the line ---
-RELEASE_HYSTERESIS_MARGIN = 0.07   # confidence must drop this far below threshold to release
+def _load_violence_config() -> dict:
+    cfg_path = os.path.join(DETECTOR_PROJECT_ROOT, "config.json")
+    merged = dict(_DEFAULT_VIOLENCE_CFG)
+    try:
+        with open(cfg_path, "r") as f:
+            root_cfg = json.load(f)
+        merged.update(root_cfg.get("detection", {}).get("violence", {}))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return merged
 
-# --- NEW: diagnostic logging ---
+
+_VIOLENCE_CFG = _load_violence_config()
+
+MODEL_PATH = os.path.normpath(os.path.join(DETECTOR_PROJECT_ROOT, _VIOLENCE_CFG["model_path"]))
+CLIP_FRAMES = _VIOLENCE_CFG["clip_frames"]
+FRAME_SIZE = _VIOLENCE_CFG["frame_size"]
+BUFFER_SPAN = _VIOLENCE_CFG["buffer_span"]
+# Live inference no longer waits for the buffer to hit BUFFER_SPAN before it
+# ever fires -- many source clips (RWF-2000/SCVD) are only ~30 frames long,
+# shorter than the old 45-frame requirement, so short-lived tracks (both in
+# eval clips and in real fast-moving camera footage) previously never got a
+# real sliding-window inference at all and fell back on a single, often
+# buffer-starved, end-of-clip force-flush. Firing once at least this many
+# frames are buffered lets short tracks get scored through the normal path.
+MIN_BUFFER_FOR_INFERENCE = _VIOLENCE_CFG["min_buffer_for_inference"]
+X3D_CHECK_INTERVAL = _VIOLENCE_CFG["check_interval"]
+VIOLENCE_CONFIDENCE_THRESHOLD = _VIOLENCE_CFG["confidence_threshold"]
+
+VIOLENCE_CONSECUTIVE_REQUIRED = _VIOLENCE_CFG["consecutive_required"]
+BYSTANDER_MERGE_RADIUS_MULT = _VIOLENCE_CFG["bystander_merge_radius_mult"]
+
+# --- EMA smoothing on raw confidence, per track ---
+EMA_ALPHA = _VIOLENCE_CFG["ema_alpha"]          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
+# --- Separate release threshold, prevents flapping right at the line ---
+RELEASE_HYSTERESIS_MARGIN = _VIOLENCE_CFG["release_hysteresis_margin"]   # confidence must drop this far below threshold to release
+
+# --- diagnostic logging ---
 ENABLE_DIAGNOSTIC_LOG = True
 DIAGNOSTIC_LOG_PATH = os.path.join(DETECTOR_PROJECT_ROOT, "logs", "x3d_confidence_trace.csv")
 
@@ -150,10 +193,10 @@ class X3DViolenceDetector:
         self._frame_buffers[tid].append(cropped)
         self._latest_live_crops[tid] = cropped
 
-        buffer_full = len(self._frame_buffers[tid]) == BUFFER_SPAN
+        buffer_ready = len(self._frame_buffers[tid]) >= MIN_BUFFER_FOR_INFERENCE
         due_for_check = (frame_count - self._last_check_frame[tid]) >= X3D_CHECK_INTERVAL
 
-        if buffer_full and due_for_check:
+        if buffer_ready and due_for_check:
             self._last_check_frame[tid] = frame_count
             raw_is_violent, raw_conf = self._run_inference(self._frame_buffers[tid], tid=tid)
 
@@ -231,6 +274,7 @@ class X3DViolenceDetector:
             "is_violent": is_violent,
             "buffer_fill": buf_len,
             "buffer_target": BUFFER_SPAN,
+            "buffer_min_for_inference": MIN_BUFFER_FOR_INFERENCE,
         }
 
     def force_inference(self, tid: int) -> tuple:

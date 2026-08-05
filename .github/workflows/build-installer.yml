@@ -154,13 +154,16 @@ jobs:
           Write-Host "$([math]::Round($sizeAfter, 2)) GB"
 
       # ---------------------------------------------------------------
-      # 3. ELECTRON -- package into the real NSIS setup.exe (package.json's
-      #    "win.target" is "nsis"). extraResources now includes "python-env",
-      #    so this .exe ships the fully-built GPU environment -- no
-      #    internet/Python-install step needed on the end user's machine.
+      # 3. ELECTRON -- package into a portable single .exe (package.json's
+      #    "win.target" is "portable" -- no install wizard, no admin
+      #    elevation, just download-and-run, matching what README.md
+      #    documents). extraResources includes "python-env" and
+      #    "config.production.json", so this .exe ships the fully-built
+      #    GPU environment and the right runtime config -- no internet/
+      #    Python-install step needed on the end user's machine.
       # ---------------------------------------------------------------
-      - name: Package Electron app (NSIS installer)
-        run: npx electron-builder --win --publish never
+      - name: Package Electron app (portable exe)
+        run: npx electron-builder --win portable --publish never
 
       - name: Check disk space after packaging
         shell: powershell
@@ -171,8 +174,8 @@ jobs:
       #    run's Artifacts tab and create/attach the GitHub Release
       #    yourself, on your own schedule, with your own notes.
       # ---------------------------------------------------------------
-      - name: Upload installer artifact
+      - name: Upload portable exe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EcoVisionSentinel-Installer
-          path: dist/EcoVisionSentinel-Setup-*.exe
+          name: EcoVisionSentinel-Portable
+          path: dist/EcoVisionSentinel-*-portable.exe

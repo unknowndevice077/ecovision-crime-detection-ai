@@ -7,8 +7,7 @@ import {
   Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus, ChevronDown
 } from 'lucide-react';
 import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketContext';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 const PERMISSION_KEYS = [
   { key: "view_map", label: "View Crime Map" },
@@ -68,6 +67,7 @@ type Tab = 'directory' | 'approvals' | 'create' | 'cameras';
 type CameraRow = { id: string; name: string; url: string; status: string; barangay_id: string };
 
 export default function DevteamView() {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [data, setData] = useState<any>(null);
   const [cameras, setCameras] = useState<CameraRow[]>([]);
   const [pendingLocations, setPendingLocations] = useState<PendingLocation[]>([]);

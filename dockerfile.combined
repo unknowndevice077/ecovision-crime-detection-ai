@@ -37,7 +37,6 @@ RUN pip install --no-cache-dir -r requirements-detector.txt \
 COPY maincode/main.py maincode/main.py
 COPY maincode/robbery_vandalism.py maincode/robbery_vandalism.py
 COPY maincode/x3d_violence_detector.py maincode/x3d_violence_detector.py
-COPY maincode/pose_landmarker_heavy.task maincode/pose_landmarker_heavy.task
 COPY weights/x3d_xs_violence_best.pt weights/x3d_xs_violence_best.pt
 COPY weights/yolo11s-pose.engine weights/yolo11s-pose.engine
 COPY weights/weapon_signs.engine weights/weapon_signs.engine
@@ -62,6 +61,7 @@ logfile=/var/log/supervisor/supervisord.log
 command=python /app/app/backend.py
 directory=/app/app
 autorestart=true
+environment=APP_ENV="production"
 stdout_logfile=/var/log/supervisor/backend.log
 stderr_logfile=/var/log/supervisor/backend.err.log
 
@@ -69,6 +69,7 @@ stderr_logfile=/var/log/supervisor/backend.err.log
 command=python /app/maincode/main.py
 directory=/app/maincode
 autorestart=true
+environment=APP_ENV="production",BACKEND_API_URL_OVERRIDE="http://127.0.0.1:8000"
 stdout_logfile=/var/log/supervisor/detector.log
 stderr_logfile=/var/log/supervisor/detector.err.log
 

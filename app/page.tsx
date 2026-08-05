@@ -8,6 +8,7 @@ import AdminUsersView from './components/dashboard/AdminUsersView';
 import DevteamView from './components/dashboard/DevteamView';
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { useRuntimeConfig } from './hooks/useRuntimeConfig';
 import { 
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin, 
   ShieldAlert, Maximize2, X, Sun, User,
@@ -38,6 +39,7 @@ type Camera = {
 };
 
 export default function EcoVisionSentinel() {
+  const { apiUrl, aiUrl } = useRuntimeConfig();
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedCam, setSelectedCam] = useState<Camera | null>(null);
@@ -79,7 +81,7 @@ export default function EcoVisionSentinel() {
   useEffect(() => {
     const fetchAvailableCameras = async () => {
       try {
-        const res = await fetch("http://localhost:8001/available_cameras");
+        const res = await fetch(`${aiUrl}/available_cameras`);
         const data = await res.json();
         setAvailableCameras(data.available_cameras);
         setCamIndexInput(data.current_index.toString());
@@ -95,7 +97,7 @@ export default function EcoVisionSentinel() {
     if (Number.isNaN(idx) || idx < 0) return;
     setApplyState('saving');
     try {
-      const res = await fetch("http://localhost:8001/set_camera_index", {
+      const res = await fetch(`${aiUrl}/set_camera_index`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ index: idx })
@@ -113,7 +115,7 @@ const fetchCameras = async (userObj: any) => {
     try {
       const barangay = userObj.barangayId && userObj.barangayId !== 'undefined' ? userObj.barangayId : 'cogon';
       const token = localStorage.getItem('ecoToken');
-      const res = await fetch(`http://localhost:8000/api/cameras?barangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(userObj.role)}`, {
+      const res = await fetch(`${apiUrl}/api/cameras?barangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(userObj.role)}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
@@ -132,7 +134,7 @@ const fetchCameras = async (userObj: any) => {
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
       
-      const res = await fetch(`http://localhost:8000/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
+      const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!res.ok) return;
@@ -152,7 +154,7 @@ const fetchCameras = async (userObj: any) => {
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
       
-      const res = await fetch(`http://localhost:8000/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
+      const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
@@ -197,7 +199,7 @@ const fetchCameras = async (userObj: any) => {
 
     const connectWebSocket = () => {
       if (!currentUser) return;
-      socket = new WebSocket('ws://localhost:8000/ws');
+      socket = new WebSocket(apiUrl.replace(/^http/, "ws") + "/ws");
       
       socket.onmessage = (e) => {
         try {
@@ -248,7 +250,7 @@ const fetchCameras = async (userObj: any) => {
     try {
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const token = localStorage.getItem('ecoToken');
-      const res = await fetch("http://localhost:8000/api/cameras", {
+      const res = await fetch(`${apiUrl}/api/cameras`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name, url, barangay_id: barangay })
@@ -266,7 +268,7 @@ const fetchCameras = async (userObj: any) => {
   const deleteCam = async (id: string) => {
     try {
       const token = localStorage.getItem('ecoToken');
-      const res = await fetch(`http://localhost:8000/api/cameras/${id}`, {
+      const res = await fetch(`${apiUrl}/api/cameras/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -293,8 +295,8 @@ const fetchCameras = async (userObj: any) => {
 
     try {
       const token = localStorage.getItem('ecoToken');
-      fetch("http://localhost:8000/siren/activate", { method: "POST" }).catch(e => console.error(e));
-      await fetch(`http://localhost:8000/api/incidents/${id}/status`, {
+      fetch(`${apiUrl}/siren/activate`, { method: "POST" }).catch(e => console.error(e));
+      await fetch(`${apiUrl}/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status: "Confirmed" })
@@ -308,8 +310,8 @@ const fetchCameras = async (userObj: any) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
     try {
       const token = localStorage.getItem('ecoToken');
-      fetch("http://localhost:8000/siren/deactivate", { method: "POST" }).catch(e => console.error(e));
-      const res = await fetch(`http://localhost:8000/api/incidents/${id}/status`, {
+      fetch(`${apiUrl}/siren/deactivate`, { method: "POST" }).catch(e => console.error(e));
+      const res = await fetch(`${apiUrl}/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status: "Dismissed" })
@@ -443,7 +445,7 @@ const fetchCameras = async (userObj: any) => {
                 <div className="flex-1 w-full h-full bg-[#0D0F14] p-4 pt-20">
                   {selectedCam ? (
                     <div className={`w-full h-full bg-black rounded-xl overflow-hidden border ${isSirenActive ? 'border-rose-500 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.2)]' : 'border-white/[0.04]'}`}>
-                      <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover" alt="Focused Channel Feed" />
+                      <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover" alt="Focused Channel Feed" />
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 gap-4 h-full">
@@ -451,7 +453,7 @@ const fetchCameras = async (userObj: any) => {
                         const hasUnverifiedThreat = alerts.some(a => a.cameraLinkId === cam.id && a.status === 'pending');
                         return (
                           <button key={cam.id} onClick={() => setSelectedCam(cam)} className={`bg-black rounded-xl relative group transition-all overflow-hidden border ${hasUnverifiedThreat ? 'border-rose-500 animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.3)]' : 'border-white/[0.04] hover:border-emerald-500/30'}`}>
-                            <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-500" alt="Camera Node Capture" />
+                            <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-500" alt="Camera Node Capture" />
                             <span className="absolute bottom-3 left-3 text-[9px] font-bold uppercase text-slate-200 tracking-widest bg-[#0E131F]/80 backdrop-blur-md px-2 py-1 rounded border border-white/[0.04] font-mono">{cam.name}</span>
                           </button>
                         );
@@ -577,13 +579,13 @@ const fetchCameras = async (userObj: any) => {
           <div className="flex-1 min-h-0">
             {selectedCam ? (
               <div className="w-full h-full bg-black rounded-2xl border border-emerald-500/20 overflow-hidden relative shadow-2xl">
-                <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover" alt="Maximized Stream" />
+                <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover" alt="Maximized Stream" />
               </div>
             ) : (
               <div className={`grid gap-4 h-full ${cameras.length <= 4 ? 'grid-cols-2' : 'grid-cols-3'}`}>
                 {cameras.map(cam => (
                   <button key={cam.id} onClick={() => setSelectedCam(cam)} className="relative rounded-2xl border border-white/[0.04] overflow-hidden group shadow-2xl bg-black text-left transition-all hover:border-emerald-500/30">
-                    <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover opacity-50 group-hover:opacity-100 transition-all duration-500" alt="Surveillance Array" />
+                    <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover opacity-50 group-hover:opacity-100 transition-all duration-500" alt="Surveillance Array" />
                     <div className="absolute bottom-4 left-4 px-3 py-1.5 bg-[#0E131F]/80 backdrop-blur-md rounded-xl text-[9px] font-bold uppercase border border-white/[0.04] text-white font-mono tracking-wider shadow-md">{cam.name}</div>
                   </button>
                 ))}

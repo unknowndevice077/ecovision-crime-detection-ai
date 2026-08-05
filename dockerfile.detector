@@ -14,11 +14,11 @@ RUN pip install --no-cache-dir -r requirements-detector.txt \
     && pip install --no-cache-dir --force-reinstall opencv-python-headless==4.13.0.92
 
 COPY config.json config.json
+COPY config.production.json config.production.json
 
 COPY maincode/main.py maincode/main.py
 COPY maincode/robbery_vandalism.py maincode/robbery_vandalism.py
 COPY maincode/x3d_violence_detector.py maincode/x3d_violence_detector.py
-COPY maincode/pose_landmarker_heavy.task maincode/pose_landmarker_heavy.task
 
 COPY weights/x3d_xs_violence_best.pt weights/x3d_xs_violence_best.pt
 COPY weights/yolo11s-pose.pt weights/yolo11s-pose.pt

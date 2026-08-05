@@ -24,7 +24,7 @@ import base64
 import secrets
 from dotenv import load_dotenv
 from db import get_conn, IntegrityError, DB_KIND, table_exists
-from port_utils import find_free_port, write_runtime_port
+from port_utils import find_free_port, write_runtime_port, read_runtime_ports
 import uvicorn
 
 load_dotenv()
@@ -151,7 +151,15 @@ SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
-AI_PIPELINE_CAPTURE_URL = "http://localhost:8001/panic_capture"
+def _ai_core_capture_url() -> str:
+    # AI core (maincode/main.py) may have landed on a fallback port if 8001
+    # was taken -- read its actual bound port from runtime_ports.json
+    # (same file Electron polls) instead of assuming 8001. Read lazily, at
+    # call time, not once at import: this route is rarely called and the
+    # AI core's port isn't guaranteed to be written yet when backend.py
+    # itself starts up.
+    port = read_runtime_ports().get("ai_core", 8001)
+    return f"http://127.0.0.1:{port}/panic_capture"
 
 app = FastAPI(
     title=sys_config["system"]["name"],
@@ -166,6 +174,15 @@ if sys_config["security"]["enable_cors"]:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=sys_config["security"]["cors_origins"],
+        # This is a local, single-user desktop app -- the frontend's own
+        # port can fall back (findFreePortForFrontend in electron/main.js)
+        # if 3000 is taken, at which point a fixed single-origin allowlist
+        # (e.g. only "http://127.0.0.1:3000") blocks every request from
+        # whatever port it actually landed on. Accepting any localhost/
+        # 127.0.0.1 port has no real security cost here -- there's no
+        # multi-tenant server exposed to arbitrary origins to protect
+        # against, just this one machine's own Electron renderer.
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -734,7 +751,7 @@ async def panic_trigger(data: PanicSchema):
 
     screenshot_url = ""
     try:
-        cap_res = requests.post(AI_PIPELINE_CAPTURE_URL, json={"incident_id": incident_id}, timeout=2.0)
+        cap_res = requests.post(_ai_core_capture_url(), json={"incident_id": incident_id}, timeout=2.0)
         if cap_res.ok:
             screenshot_url = cap_res.json().get("screenshot_path") or ""
             print(f"🚨 [PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")

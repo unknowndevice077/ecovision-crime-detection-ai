@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { X, Shield, Loader2 } from 'lucide-react';
 import { Camera } from '../../types';
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 interface ModalProps {
   isFullscreenGrid: boolean;
@@ -13,6 +14,7 @@ interface ModalProps {
 }
 
 export default function SharedModals({ isFullscreenGrid, setIsFullscreenGrid, showModal, setShowModal, cameras, handleUpsertNode }: ModalProps) {
+  const { aiUrl } = useRuntimeConfig();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -63,7 +65,7 @@ export default function SharedModals({ isFullscreenGrid, setIsFullscreenGrid, sh
             <div className={`grid gap-4 flex-1 ${cameras.length <= 4 ? 'grid-cols-2' : 'grid-cols-3'}`}>
               {cameras.map(cam => (
                 <div key={cam.id} className="relative rounded-[2rem] border border-white/10 overflow-hidden group shadow-2xl bg-[#0d0f14]">
-                  <img src="http://localhost:8001/video_feed" className="w-full h-full object-cover grayscale-[0.4] group-hover:grayscale-0 transition-all duration-700" alt="Tactical" />
+                  <img src={`${aiUrl}/video_feed`} className="w-full h-full object-cover grayscale-[0.4] group-hover:grayscale-0 transition-all duration-700" alt="Tactical" />
                   <div className="absolute top-6 left-6 px-4 py-2 bg-black/60 backdrop-blur-md rounded-xl text-[9px] font-bold uppercase border border-white/5 shadow-md tabular-nums">{cam.name}</div>
                 </div>
               ))}

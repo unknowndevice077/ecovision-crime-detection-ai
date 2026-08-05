@@ -4,10 +4,10 @@ import React, { useState } from 'react';
 import { Shield, UserPlus, ArrowRight, Building, Lock, User, MapPin } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 export default function SignupPage() {
+  const { apiUrl: API_URL } = useRuntimeConfig();
   const [formData, setFormData] = useState({
     username: '', password: '', role: 'PRECINCT_CAPTAIN', barangayId: '', assignment: ''
   });
