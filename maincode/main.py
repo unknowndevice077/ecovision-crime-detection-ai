@@ -951,7 +951,7 @@ def panic_capture(payload: PanicCaptureRequest):
 # ──────────────────────────────────────────────────────────────────────────────
 # 15. PER-TRACK STORES
 # ──────────────────────────────────────────────────────────────────────────────
-track_states, prev_joints, vel_history, id_last_seen = {}, {}, {}, {}
+track_states, prev_joints, id_last_seen = {}, {}, {}
 robbery_tracker = RobberyTracker()                  
 vandal_states: dict = {}             
 vandal_sweep_history: dict = {}                     
@@ -1021,10 +1021,18 @@ while _running:
             
         stale = [t for t, lf in id_last_seen.items() if frame_count - lf > MAX_UNSEEN_FRAMES]
         for tid in stale:
-            for d in (track_states, prev_joints, vel_history, id_last_seen,
-                      vandal_states, vandal_sweep_history, _vandal_alert_cooldown):                
+            for d in (track_states, prev_joints, id_last_seen,
+                      vandal_states, vandal_sweep_history, _vandal_alert_cooldown):
                 d.pop(tid, None)
-            x3d_detector.cleanup_track(tid)   
+            x3d_detector.cleanup_track(tid)
+        # _robbery_alert_cooldown is keyed by (tid_a, tid_b) pairs, not a single
+        # tid, so it can't be pruned via the .pop(tid, None) loop above -- drop
+        # any pair that references a track that just went stale, otherwise this
+        # dict grows unbounded over a 24/7 run with many transient near-passes.
+        if stale:
+            stale_set = set(stale)
+            for pair_key in [k for k in _robbery_alert_cooldown if stale_set & set(k)]:
+                _robbery_alert_cooldown.pop(pair_key, None)
 
         victims = {}
         for tid, joints, b in zip(ids, kpts, boxes):
@@ -1180,8 +1188,11 @@ while _running:
         _raw_frame_ring.append((time.perf_counter(), annotated_snapshot))
     _feed_pending_clips(annotated_snapshot)
 
+    # Reuse annotated_snapshot for the JPEG-encode submission too -- nothing
+    # mutates `frame` between the copy above and here, so a second full-res
+    # frame.copy() was pure duplicate memcpy work every single loop iteration.
     if _encode_future is None or _encode_future.done():
-        def _encode_and_push(f=frame.copy()):
+        def _encode_and_push(f=annotated_snapshot):
             _, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, STREAM_JPEG_QUALITY])
             _push_frame(buf.tobytes())
         _encode_future = _encode_exec.submit(_encode_and_push)
@@ -1191,6 +1202,7 @@ while _running:
 print("\n🛑 Shutting down Portable Sentinel Matrix pipeline...")
 cap.release()
 cv2.destroyAllWindows()
+x3d_detector.close()   # flushes any diagnostic-log rows still buffered (now batched, not per-row)
 _weapon_exec.shutdown(wait=False, cancel_futures=True)
 _encode_exec.shutdown(wait=False, cancel_futures=True)
 _alert_exec.shutdown(wait=True)

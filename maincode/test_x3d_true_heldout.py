@@ -99,10 +99,16 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
     any_violence_detected = False
     max_confidence_seen = 0.0
 
-    x3d_detector._frame_buffers.clear()
-    x3d_detector._last_check_frame.clear()
-    x3d_detector._cached_result.clear()
-    x3d_detector._real_inference_count.clear()
+    x3d_detector.reset_all_tracks()
+
+    # persist=True keeps the pose tracker's per-track state (Kalman filters,
+    # feature history, ID space) alive across track() calls -- correct WITHIN
+    # a clip, but this function is called once per clip for 700+ clips in the
+    # same process. Without an explicit reset, that state just accumulates
+    # forever and eventually exhausts VRAM (confirmed: OOM after ~336 clips).
+    if getattr(pose_model, "predictor", None) is not None:
+        for tracker in pose_model.predictor.trackers:
+            tracker.reset()
 
     while True:
         ret, frame = cap.read()

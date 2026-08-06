@@ -1,0 +1,3 @@
+timestamp,git_commit,script,split,notes,total_clips,tp,fp,tn,fn,accuracy_pct,recall_pct,precision_pct,fpr_pct,confidence_threshold,consecutive_required,buffer_span,min_buffer_for_inference,check_interval,ema_alpha,release_hysteresis_margin
+2026-08-06 10:27:40,e93e145+dirty,test_x3d_true_heldout,val,uf2_aug1 retrain: augmentation + 2 unfrozen backbone blocks (rerun after full per-track state reset fix),769,244,123,272,130,67.1,65.24,66.49,31.14,0.4,2,45,20,15,0.35,0.07
+2026-08-06 20:57:00,e93e145+dirty,test_x3d_true_heldout,val,uf1_aug1_wo2 retrain: 1 unfrozen block + augmentation + 2x weaponized oversample (targeted fix for 44% weaponized recall),769,231,96,299,143,68.92,61.76,70.64,24.3,0.4,2,45,20,15,0.35,0.07

@@ -81,6 +81,8 @@ RELEASE_HYSTERESIS_MARGIN = _VIOLENCE_CFG["release_hysteresis_margin"]   # confi
 # --- diagnostic logging ---
 ENABLE_DIAGNOSTIC_LOG = True
 DIAGNOSTIC_LOG_PATH = os.path.join(DETECTOR_PROJECT_ROOT, "logs", "x3d_confidence_trace.csv")
+LOG_FLUSH_EVERY = 20            # rows between forced disk flushes (was every row)
+DIAGNOSTIC_LOG_MAX_BYTES = 50 * 1024 * 1024   # rotate past 50MB so a 24/7 run doesn't grow this file forever
 
 
 class X3DViolenceDetector:
@@ -121,8 +123,21 @@ class X3DViolenceDetector:
         # NEW: sticky confirmed state per track (survives release margin)
         self._confirmed_state: dict[int, bool] = {}
 
+        self._log_rows_since_flush = 0
         if ENABLE_DIAGNOSTIC_LOG:
             os.makedirs(os.path.dirname(DIAGNOSTIC_LOG_PATH), exist_ok=True)
+            # Rotate the trace CSV once it gets too big -- unbounded growth
+            # over a 24/7 deployment otherwise. Simple single-backup rotation
+            # (not a full RotatingFileHandler) since this is a plain CSV, not
+            # the logging module.
+            try:
+                if os.path.getsize(DIAGNOSTIC_LOG_PATH) >= DIAGNOSTIC_LOG_MAX_BYTES:
+                    backup_path = DIAGNOSTIC_LOG_PATH + ".1"
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    os.rename(DIAGNOSTIC_LOG_PATH, backup_path)
+            except OSError:
+                pass
             self._log_file = open(DIAGNOSTIC_LOG_PATH, "a", newline="")
             self._log_writer = csv.writer(self._log_file)
             if self._log_file.tell() == 0:
@@ -130,9 +145,27 @@ class X3DViolenceDetector:
                     "timestamp", "track_id", "frame_count", "raw_conf",
                     "ema_conf", "consecutive_hits", "confirmed", "buffer_fill"
                 ])
+                self._log_file.flush()
         else:
             self._log_file = None
             self._log_writer = None
+
+    def reset_all_tracks(self):
+        """Clear every per-track dict. Callers that reuse one detector
+        instance across many independent clips/videos (batch eval scripts)
+        MUST call this between clips -- track IDs from a previous clip can
+        collide with a new clip's IDs, and dicts like _latest_live_crops
+        hold actual image arrays that otherwise just accumulate forever
+        across a long batch run until the process runs out of memory."""
+        self._frame_buffers.clear()
+        self._last_check_frame.clear()
+        self._cached_result.clear()
+        self._real_inference_count.clear()
+        self._latest_live_crops.clear()
+        self._consecutive_hits.clear()
+        self._active_crop_boxes.clear()
+        self._ema_conf.clear()
+        self._confirmed_state.clear()
 
     def _log_row(self, tid, frame_count, raw_conf, ema_conf, hits, confirmed, buf_fill):
         if self._log_writer is None:
@@ -141,7 +174,16 @@ class X3DViolenceDetector:
             round(time.time(), 3), tid, frame_count,
             round(raw_conf, 4), round(ema_conf, 4), hits, confirmed, buf_fill
         ])
-        self._log_file.flush()
+        # Flushing every row forces a blocking OS write inside the per-track
+        # hot path (this runs once per track every X3D_CHECK_INTERVAL frames,
+        # i.e. on the same cadence as a live inference). Batch instead: flush
+        # every LOG_FLUSH_EVERY rows so a crash loses at most a few rows of
+        # diagnostics instead of stalling the frame-processing thread on disk
+        # I/O every time.
+        self._log_rows_since_flush += 1
+        if self._log_rows_since_flush >= LOG_FLUSH_EVERY:
+            self._log_file.flush()
+            self._log_rows_since_flush = 0
 
     def _crop_person(self, frame: np.ndarray, p_box, all_boxes=None, tid: int = None) -> np.ndarray:
         h, w = frame.shape[:2]
@@ -181,6 +223,19 @@ class X3DViolenceDetector:
         crop = frame[cy1:cy2, cx1:cx2]
         return cv2.resize(crop, (FRAME_SIZE, FRAME_SIZE))
 
+    def _crop_from_cached_box(self, frame: np.ndarray, box) -> np.ndarray:
+        """Cheap crop that reuses a previously computed (already-merged) box
+        region on the CURRENT frame -- still fresh pixel content, just skips
+        the O(num_boxes) bystander-merge search that _crop_person does."""
+        h, w = frame.shape[:2]
+        cx1, cy1, cx2, cy2 = box
+        cx1, cy1 = max(0, cx1), max(0, cy1)
+        cx2, cy2 = min(w, cx2), min(h, cy2)
+        if cx2 <= cx1 or cy2 <= cy1:
+            return np.zeros((FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
+        crop = frame[cy1:cy2, cx1:cx2]
+        return cv2.resize(crop, (FRAME_SIZE, FRAME_SIZE))
+
     def update(self, tid: int, frame: np.ndarray, p_box, frame_count: int, all_boxes=None) -> tuple:
         if tid not in self._frame_buffers:
             self._frame_buffers[tid] = deque(maxlen=BUFFER_SPAN)
@@ -189,12 +244,24 @@ class X3DViolenceDetector:
             self._ema_conf[tid] = 0.0
             self._confirmed_state[tid] = False
 
-        cropped = self._crop_person(frame, p_box, all_boxes=all_boxes, tid=tid)
+        due_for_check = (frame_count - self._last_check_frame[tid]) >= X3D_CHECK_INTERVAL
+
+        # The bystander-merge search inside _crop_person is O(num_boxes) and
+        # ran on EVERY frame for every tracked person before this fix, just to
+        # keep the rolling buffer filled -- most of that work is thrown away
+        # since only the frames sampled at inference time matter for the
+        # final decision. Recompute the full (merged) crop region only on the
+        # same cadence inference actually runs at; in between, reuse that
+        # region on the current frame's pixels (position stays fixed for up
+        # to X3D_CHECK_INTERVAL frames, content stays live).
+        if due_for_check or tid not in self._active_crop_boxes:
+            cropped = self._crop_person(frame, p_box, all_boxes=all_boxes, tid=tid)
+        else:
+            cropped = self._crop_from_cached_box(frame, self._active_crop_boxes[tid])
         self._frame_buffers[tid].append(cropped)
         self._latest_live_crops[tid] = cropped
 
         buffer_ready = len(self._frame_buffers[tid]) >= MIN_BUFFER_FOR_INFERENCE
-        due_for_check = (frame_count - self._last_check_frame[tid]) >= X3D_CHECK_INTERVAL
 
         if buffer_ready and due_for_check:
             self._last_check_frame[tid] = frame_count

@@ -40,13 +40,15 @@ def evaluate_clip_raw(video_path, pose_model, x3d_detector, device):
     frame_count = 0
     track_confidences = defaultdict(list)  # tid -> list of raw confs in order
 
-    x3d_detector._frame_buffers.clear()
-    x3d_detector._last_check_frame.clear()
-    x3d_detector._cached_result.clear()
-    x3d_detector._real_inference_count.clear()
-    x3d_detector._consecutive_hits.clear()
-    x3d_detector._ema_conf.clear()
-    x3d_detector._confirmed_state.clear()
+    x3d_detector.reset_all_tracks()
+
+    # persist=True keeps the pose tracker's per-track state alive across
+    # track() calls -- correct within a clip, but this runs once per clip
+    # across many clips in one process. Reset per-clip to avoid the state
+    # accumulating forever and eventually exhausting VRAM.
+    if getattr(pose_model, "predictor", None) is not None:
+        for tracker in pose_model.predictor.trackers:
+            tracker.reset()
 
     while True:
         ret, frame = cap.read()
