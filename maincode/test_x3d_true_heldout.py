@@ -91,7 +91,8 @@ def gather_all_clips_EXACT_TRAINING_LOGIC(roots: list) -> list:
     return clips
 
 
-def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> dict:
+def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str,
+                  allow_flush: bool = True) -> dict:
     cap = cv2.VideoCapture(str(video_path))
     frame_count = 0
     frames_with_pose = 0
@@ -142,16 +143,29 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
     # driven by a counter incremented ONLY inside _run_inference itself, not
     # inferred from dict state changes -- that comparison was the actual bug
     # that made every previous run's force-flush silently never fire).
+    #
+    # IMPORTANT -- this flush makes the eval MORE PERMISSIVE than deployment.
+    # force_inference() only requires len(buf) >= 5, while the live pipeline's
+    # sole path to inference is `buffer_ready = len(buf) >= MIN_BUFFER_FOR_INFERENCE`
+    # (=20) in x3d_violence_detector.update(). main.py never calls
+    # force_inference() at all -- only this script and generate_eval_report.py do.
+    #
+    # On the last run 518 of the 637 scored clips (81%) reached X3D ONLY via
+    # this flush, so the headline number largely measures a 5-frame gate that
+    # is not the one that ships. Pass --no-flush to measure the deployed
+    # configuration instead. Default stays True so numbers remain comparable
+    # with every prior row in eval_history.csv.
     forced_flush = False
     had_any_buffer = len(x3d_detector._frame_buffers) > 0
 
-    for tid in list(x3d_detector._frame_buffers.keys()):
-        if x3d_detector.get_inference_count(tid) == 0:
-            forced_flush = True
-            is_violent, conf = x3d_detector.force_inference(tid)
-            max_confidence_seen = max(max_confidence_seen, conf)
-            if is_violent:
-                any_violence_detected = True
+    if allow_flush:
+        for tid in list(x3d_detector._frame_buffers.keys()):
+            if x3d_detector.get_inference_count(tid) == 0:
+                forced_flush = True
+                is_violent, conf = x3d_detector.force_inference(tid)
+                max_confidence_seen = max(max_confidence_seen, conf)
+                if is_violent:
+                    any_violence_detected = True
 
     # NOTE: this snapshot must be taken AFTER the forced-flush loop above,
     # not before it -- force_inference() calls _run_inference() which DOES
@@ -174,7 +188,7 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str) -> di
     }
 
 
-def run_test(roots: list, device: str, notes: str = ""):
+def run_test(roots: list, device: str, notes: str = "", allow_flush: bool = True):
     print("Recreating EXACT train/val split from train_x3d_full.py (seed=42)...")
     all_clips = gather_all_clips_EXACT_TRAINING_LOGIC(roots)
 
@@ -199,7 +213,8 @@ def run_test(roots: list, device: str, notes: str = ""):
     confusion = defaultdict(int)
 
     for i, (video_path, ground_truth_violent) in enumerate(val_clips):
-        result = evaluate_clip(video_path, pose_model, x3d_detector, device)
+        result = evaluate_clip(video_path, pose_model, x3d_detector, device,
+                               allow_flush=allow_flush)
         predicted_violent = result["detected"]
 
         if ground_truth_violent and predicted_violent:
@@ -265,8 +280,15 @@ if __name__ == "__main__":
     parser.add_argument("--scvd-root", type=str, default=DEFAULT_SCVD_ROOT)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--notes", type=str, default="", help="Free-text note saved into eval_history.csv for this run (e.g. 'after buffer-gating fix')")
+    parser.add_argument("--no-flush", action="store_true",
+                        help="Disable the end-of-clip forced inference, so a clip only "
+                             "scores if a track reaches MIN_BUFFER_FOR_INFERENCE frames -- "
+                             "i.e. measure the pipeline main.py actually runs. Results are "
+                             "NOT comparable with the flush-enabled rows in eval_history.csv.")
     args = parser.parse_args()
     roots = [r for r in [args.rwf_root, args.scvd_root] if r is not None]
     if not roots:
         raise SystemExit("Provide at least one of --rwf-root or --scvd-root")
-    run_test(roots, args.device, notes=args.notes)
+    if args.no_flush:
+        print("--no-flush: end-of-clip forced inference DISABLED (deployed-gate mode)")
+    run_test(roots, args.device, notes=args.notes, allow_flush=not args.no_flush)

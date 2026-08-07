@@ -1,29 +1,75 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
+type Station = { id: string; name: string };
+
 export default function SignupPage() {
-  const { apiUrl: API_URL } = useRuntimeConfig();
+  const { apiUrl: API_URL, loaded: configLoaded } = useRuntimeConfig();
   const [formData, setFormData] = useState({
-    username: '', password: '', role: 'PRECINCT_CAPTAIN', barangayId: '', assignment: ''
+    username: '', password: '', role: 'BARANGAY_ADMIN',
+    barangay_id: '', station_id: '', assignment: '',
   });
+  const [stations, setStations] = useState<Station[]>([]);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
 
+  const isPnp = formData.role === 'PNP_ADMIN';
+
+  // A PNP admin joins a station DevTeam already created -- a station's whole
+  // purpose is the jurisdiction DevTeam assigns it, so a self-created one
+  // would see nothing. Barangays, by contrast, are created here as 'pending'
+  // and approved afterwards.
+  useEffect(() => {
+    if (!configLoaded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/stations`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setStations(data);
+      } catch {
+        /* station list is only needed for the PNP branch; ignore */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [API_URL, configLoaded]);
+
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (isPnp && !formData.station_id) {
+      setError('Select the police station you belong to');
+      return;
+    }
+    if (!isPnp && !formData.barangay_id.trim()) {
+      setError('Enter your barangay');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
+      // snake_case: backend.py's UserSignup has no alias generator, so a
+      // camelCase body (this form used to send barangayId) fails validation
+      // outright rather than being coerced.
       const res = await fetch(`${API_URL}/api/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          username: formData.username,
+          password: formData.password,
+          role: formData.role,
+          assignment: formData.assignment,
+          barangay_id: isPnp ? null : formData.barangay_id.trim(),
+          station_id: isPnp ? formData.station_id : null,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) router.push('/loginpage/login');
@@ -106,27 +152,59 @@ export default function SignupPage() {
                 className={`${fieldClass} cursor-pointer`}
                 style={fieldStyle}
               >
-                <option value="PRECINCT_CAPTAIN">Precinct Captain (police admin)</option>
-                <option value="BARANGAY_CAPTAIN">Barangay Captain (barangay admin)</option>
+                <option value="BARANGAY_ADMIN">Barangay Admin (Punong Barangay)</option>
+                <option value="PNP_ADMIN">PNP Admin (station commander)</option>
               </select>
             </div>
 
-            <div>
-              <label htmlFor="su-loc" className="label flex items-center gap-1.5 mb-1.5">
-                <MapPin size={11} /> Location
-              </label>
-              <input
-                id="su-loc"
-                title="Location"
-                placeholder="e.g. Cogon"
-                value={formData.barangayId}
-                onChange={e => setFormData({ ...formData, barangayId: e.target.value })}
-                disabled={isSubmitting}
-                className={fieldClass}
-                style={fieldStyle}
-                required
-              />
-            </div>
+            {/* Barangay roles are scoped to one barangay; PNP roles are scoped
+                to a station's jurisdiction. Which field you fill in follows
+                from the role -- the database enforces the same rule. */}
+            {isPnp ? (
+              <div>
+                <label htmlFor="su-station-id" className="label flex items-center gap-1.5 mb-1.5">
+                  <Building size={11} /> Police station
+                </label>
+                <select
+                  id="su-station-id"
+                  title="Police station"
+                  value={formData.station_id}
+                  onChange={e => setFormData({ ...formData, station_id: e.target.value })}
+                  disabled={isSubmitting || stations.length === 0}
+                  className={`${fieldClass} cursor-pointer`}
+                  style={fieldStyle}
+                >
+                  <option value="">
+                    {stations.length ? 'Select your station…' : 'No stations registered yet'}
+                  </option>
+                  {stations.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                {stations.length === 0 && (
+                  <p className="text-[10px] leading-relaxed mt-1.5" style={{ color: 'var(--text-3)' }}>
+                    A DevTeam administrator must register your station and set its
+                    jurisdiction before you can sign up.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div>
+                <label htmlFor="su-loc" className="label flex items-center gap-1.5 mb-1.5">
+                  <MapPin size={11} /> Barangay
+                </label>
+                <input
+                  id="su-loc"
+                  title="Barangay"
+                  placeholder="e.g. Cogon"
+                  value={formData.barangay_id}
+                  onChange={e => setFormData({ ...formData, barangay_id: e.target.value })}
+                  disabled={isSubmitting}
+                  className={fieldClass}
+                  style={fieldStyle}
+                />
+              </div>
+            )}
 
             <div>
               <label htmlFor="su-station" className="label flex items-center gap-1.5 mb-1.5">

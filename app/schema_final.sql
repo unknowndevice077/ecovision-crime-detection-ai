@@ -14,32 +14,84 @@ CREATE TABLE IF NOT EXISTS barangays (
     approved_at  TIMESTAMPTZ
 );
 
+-- ── ORGANIZATIONS ────────────────────────────────────────────────────────
+-- Two bodies operate over the same territory, and they are shaped
+-- differently: a barangay IS one place, while a police station COVERS many.
+-- That asymmetry is the whole reason the old 'PRECINCT_CAPTAIN' role was
+-- broken -- it was keyed one-per-barangay, which is a barangay, not a
+-- precinct.
+--
+-- NOTE ON OWNERSHIP: every physical/geographic row (cameras, incidents,
+-- video_records, telemetry_readings) hangs off barangays and ONLY barangays.
+-- A station owns no assets; station_barangays is a LENS that says which
+-- barangays a station may see. Putting station_id on cameras or incidents
+-- would create a second source of truth for "where is this" that drifts the
+-- first time a jurisdiction is edited.
+CREATE TABLE IF NOT EXISTS police_stations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The jurisdiction. Many-to-many on purpose: one station covers several
+-- barangays, and a barangay could fall under more than one station
+-- (co-located city/municipal units) without duplicating any asset rows.
+CREATE TABLE IF NOT EXISTS station_barangays (
+    station_id  TEXT NOT NULL REFERENCES police_stations(id) ON DELETE CASCADE,
+    barangay_id TEXT NOT NULL REFERENCES barangays(id)       ON DELETE CASCADE,
+    PRIMARY KEY (station_id, barangay_id)
+);
+-- Reverse lookup ("which stations cover this barangay") for scope checks.
+CREATE INDEX IF NOT EXISTS idx_station_barangays_barangay
+    ON station_barangays(barangay_id);
+
 CREATE TABLE IF NOT EXISTS users (
     id              SERIAL PRIMARY KEY,
     username        TEXT UNIQUE NOT NULL,
     password        TEXT NOT NULL,
+    -- role = organization x tier. Keeping it a flat enum (rather than two
+    -- columns) preserves every existing `role IN (...)` query, while the
+    -- naming now matches the actual org chart.
     role            TEXT NOT NULL CHECK (role IN
-                        ('DEVTEAM','PRECINCT_CAPTAIN','BARANGAY_CAPTAIN','POLICE','BARANGAY')),
+                        ('DEVTEAM','PNP_ADMIN','PNP_OFFICER','BARANGAY_ADMIN','BARANGAY_STAFF')),
     barangay_id     TEXT REFERENCES barangays(id) ON DELETE RESTRICT,
+    station_id      TEXT REFERENCES police_stations(id) ON DELETE RESTRICT,
     assignment      TEXT NOT NULL DEFAULT '',
     parent_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     is_active       INTEGER NOT NULL DEFAULT 1,
     display_title   TEXT,
-    is_sub_admin    INTEGER NOT NULL DEFAULT 0
+    is_sub_admin    INTEGER NOT NULL DEFAULT 0,
+
+    -- Scope is now a DATABASE invariant, not a convention the application
+    -- layer is trusted to remember. Previously a PNP user needed a
+    -- barangay_id to get any scope at all, so city-level officers were filed
+    -- under an arbitrary barangay. This makes that state unrepresentable.
+    CONSTRAINT chk_user_scope CHECK (
+         (role IN ('BARANGAY_ADMIN','BARANGAY_STAFF')
+            AND barangay_id IS NOT NULL AND station_id IS NULL)
+      OR (role IN ('PNP_ADMIN','PNP_OFFICER')
+            AND station_id  IS NOT NULL AND barangay_id IS NULL)
+      OR (role = 'DEVTEAM'
+            AND barangay_id IS NULL AND station_id IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_users_parent ON users(parent_admin_id);
 CREATE INDEX IF NOT EXISTS idx_users_barangay ON users(barangay_id);
+CREATE INDEX IF NOT EXISTS idx_users_station ON users(station_id);
 
 ALTER TABLE barangays ADD CONSTRAINT fk_barangays_requested_by
     FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE barangays ADD CONSTRAINT fk_barangays_approved_by
     FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_one_precinct_captain_per_barangay
-    ON users(barangay_id) WHERE role = 'PRECINCT_CAPTAIN';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_one_barangay_captain_per_barangay
-    ON users(barangay_id) WHERE role = 'BARANGAY_CAPTAIN';
+-- One admin per org unit. The PNP one is keyed on station_id, not
+-- barangay_id -- that single change is what makes a precinct an actual
+-- precinct instead of a second name for a barangay.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_barangay_admin_per_barangay
+    ON users(barangay_id) WHERE role = 'BARANGAY_ADMIN';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pnp_admin_per_station
+    ON users(station_id) WHERE role = 'PNP_ADMIN';
 
 CREATE TABLE IF NOT EXISTS permission_keys (
     key     TEXT PRIMARY KEY,

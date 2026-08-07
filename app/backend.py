@@ -103,6 +103,10 @@ def issue_token(user_row: dict) -> str:
         "username": user_row["username"],
         "role": user_row["role"],
         "barangay_id": user_row["barangay_id"],
+        # PNP users carry station_id instead of barangay_id -- scope_clause()
+        # reads this to resolve their jurisdiction, so it must be in the token
+        # or every scoped query would need an extra users lookup per request.
+        "station_id": user_row.get("station_id"),
         "exp": int(time.time()) + TOKEN_TTL_SECONDS,
     }
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
@@ -380,19 +384,95 @@ recorder_engine.start_workers()
 # doesn't have to remember two different cases depending on whether it's
 # reading or writing. If page.tsx / CrimeReportsView.tsx still POST
 # camelCase bodies, they need to be updated to match these field names.
-ADMIN_ROLES = {"PRECINCT_CAPTAIN", "BARANGAY_CAPTAIN"}
-STANDARD_ROLES = {"POLICE", "BARANGAY"}
-ADMIN_CREATES_ROLE = {"PRECINCT_CAPTAIN": "POLICE", "BARANGAY_CAPTAIN": "BARANGAY"}
+# Roles are organization x tier. See docs/USER_HIERARCHY_PLAN.md.
+#
+#              ADMIN            OPERATOR
+#   Barangay   BARANGAY_ADMIN   BARANGAY_STAFF
+#   PNP        PNP_ADMIN        PNP_OFFICER
+#   plus DEVTEAM (unscoped)
+ADMIN_ROLES = {"PNP_ADMIN", "BARANGAY_ADMIN"}
+STANDARD_ROLES = {"PNP_OFFICER", "BARANGAY_STAFF"}
+ADMIN_CREATES_ROLE = {"PNP_ADMIN": "PNP_OFFICER", "BARANGAY_ADMIN": "BARANGAY_STAFF"}
 ALL_ROLES = ADMIN_ROLES | STANDARD_ROLES | {"DEVTEAM"}
 ADMIN_OR_DEVTEAM = ADMIN_ROLES | {"DEVTEAM"}
-POLICE_SIDE_ROLES = {"POLICE", "PRECINCT_CAPTAIN", "DEVTEAM"}
+POLICE_SIDE_ROLES = {"PNP_OFFICER", "PNP_ADMIN", "DEVTEAM"}
+BARANGAY_SIDE_ROLES = {"BARANGAY_ADMIN", "BARANGAY_STAFF"}
+PNP_SIDE_ROLES = {"PNP_ADMIN", "PNP_OFFICER"}
 VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cameras", "confirm_dismiss_alerts"}
+
+# Cameras are barangay property -- the barangay funded and installed the
+# smartpoles; PNP consumes the feed. Previously require_permission() waved
+# through every admin role, so a precinct captain could delete a barangay's
+# cameras. Keys listed here are NOT covered by that admin bypass.
+BARANGAY_ONLY_PERMISSIONS = {"manage_cameras"}
+
+
+def scope_clause(payload: dict, column: str = "barangay_id"):
+    """Returns (sql_fragment, params) restricting a query to what this user
+    may see. Empty fragment means unrestricted.
+
+    ONE implementation, called by every scoped endpoint. Previously each
+    endpoint re-derived its own scoping, which is exactly how a POLICE user
+    ended up seeing incidents from every barangay but cameras from only one.
+
+        barangay role -> their own barangay
+        PNP role      -> every barangay in their station's jurisdiction
+        DEVTEAM       -> everything
+
+    The PNP branch is a subquery rather than a JOIN so callers can drop the
+    fragment into an existing WHERE without restructuring their statement.
+    """
+    role = payload.get("role")
+
+    if role == "DEVTEAM":
+        return "", []
+
+    if role in BARANGAY_SIDE_ROLES:
+        brgy = payload.get("barangay_id")
+        if not brgy:
+            # chk_user_scope makes this unreachable via the DB, but a token
+            # issued before the migration could still carry it. Deny rather
+            # than silently widening to everything.
+            return "1 = 0", []
+        return f"LOWER({column}) = ?", [brgy.lower()]
+
+    if role in PNP_SIDE_ROLES:
+        station = payload.get("station_id")
+        if not station:
+            return "1 = 0", []
+        return (
+            f"{column} IN (SELECT barangay_id FROM station_barangays WHERE station_id = ?)",
+            [station],
+        )
+
+    return "1 = 0", []
+
+
+def apply_scope(payload: dict, base_sql: str, params: list, column: str = "barangay_id",
+                extra_where: str = "", extra_params: Optional[list] = None):
+    """Composes base_sql + scope + an optional extra predicate into a single
+    WHERE. base_sql must NOT already contain a WHERE clause."""
+    clauses, all_params = [], list(params)
+    frag, sp = scope_clause(payload, column)
+    if frag:
+        clauses.append(frag)
+        all_params.extend(sp)
+    if extra_where:
+        clauses.append(extra_where)
+        all_params.extend(extra_params or [])
+    if clauses:
+        base_sql += " WHERE " + " AND ".join(clauses)
+    return base_sql, all_params
 
 class UserSignup(BaseModel):
     username: str
     password: str
     role: str
-    barangay_id: str
+    # BARANGAY_ADMIN supplies barangay_id (created pending, DevTeam approves).
+    # PNP_ADMIN supplies station_id and must pick a station that already
+    # exists -- see the note in signup() for why.
+    barangay_id: Optional[str] = None
+    station_id: Optional[str] = None
     assignment: str
 
 class UserLogin(BaseModel):
@@ -486,7 +566,10 @@ class DevteamCreateUser(BaseModel):
     username: str
     password: str
     role: str
+    # Exactly one of these is required, decided by the role's organization:
+    # barangay roles need barangay_id, PNP roles need station_id.
     barangay_id: Optional[str] = None
+    station_id: Optional[str] = None
     assignment: str
     display_title: Optional[str] = None
     parent_admin_id: Optional[int] = None
@@ -549,7 +632,8 @@ def _row_to_user_dict_base(row) -> dict:
     d = dict(row)
     return {
         "id": d["id"], "username": d["username"], "role": d["role"],
-        "barangay_id": d.get("barangay_id"), "assignment": d.get("assignment"),
+        "barangay_id": d.get("barangay_id"), "station_id": d.get("station_id"),
+        "assignment": d.get("assignment"),
         "parent_admin_id": d.get("parent_admin_id"), "display_title": d.get("display_title"),
         "is_sub_admin": bool(d.get("is_sub_admin")),
     }
@@ -576,35 +660,44 @@ async def get_cameras(authorization: Optional[str] = Header(None)):
     conn = get_conn()
     cursor = conn.cursor()
 
-    # DEVTEAM sees everything system-wide. Every other role (BARANGAY,
-    # BARANGAY_CAPTAIN, POLICE, PRECINCT_CAPTAIN) is scoped to cameras at
-    # their own barangay_id -- a Precinct Captain and their paired Barangay
-    # Captain share the same barangay_id (enforced by the one-per-barangay
-    # unique indexes in schema_final.sql/schema_sqlite.sql), so this is
-    # what actually gives police visibility into "cameras under their
-    # precinct."
-    if payload["role"] != "DEVTEAM" and payload.get("barangay_id"):
-        cursor.execute("SELECT * FROM cameras WHERE LOWER(barangay_id) = ?", (payload["barangay_id"].lower(),))
-    else:
-        cursor.execute("SELECT * FROM cameras")
+    # Barangay roles see their own barangay; PNP roles see every barangay in
+    # their station's jurisdiction; DEVTEAM sees all. Same helper as
+    # get_incidents -- these two used to disagree, so a police user saw
+    # incidents from everywhere but cameras from a single barangay.
+    sql, params = apply_scope(payload, "SELECT * FROM cameras", [])
+    cursor.execute(sql, tuple(params))
     rows = cursor.fetchall()
     conn.close()
     return [_row_to_camera_dict(r) for r in rows]
 
 def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
-    if role in ADMIN_ROLES:
+    if role in ADMIN_ROLES and key not in BARANGAY_ONLY_PERMISSIONS:
         return True
     cursor.execute("SELECT 1 FROM user_permissions WHERE user_id = ? AND permission_key = ?", (user_id, key))
     return cursor.fetchone() is not None
 
 def require_permission(cursor, payload: dict, key: str):
     """Server-side gate matching the permission checkboxes in
-    AdminUsersView.tsx / DevteamView.tsx. DEVTEAM and admin tiers always
-    pass. Standard POLICE/BARANGAY accounts must have the key granted in
-    user_permissions."""
-    if payload["role"] == "DEVTEAM" or payload["role"] in ADMIN_ROLES:
+    AdminUsersView.tsx / DevteamView.tsx. DEVTEAM always passes; admin tiers
+    pass except on barangay-only keys. Standard operator accounts must have
+    the key granted in user_permissions."""
+    role = payload["role"]
+    if role == "DEVTEAM":
         return
-    if not _has_permission(cursor, payload["id"], key, payload["role"]):
+
+    # Cameras belong to the barangay that installed them. PNP gets the feed,
+    # not administrative control -- so no PNP role passes manage_cameras,
+    # regardless of tier. This is the one place the admin bypass does not
+    # apply; previously a precinct captain could delete a barangay's cameras.
+    if key in BARANGAY_ONLY_PERMISSIONS and role in PNP_SIDE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cameras are managed by the barangay that owns them; "
+                   f"'{role}' accounts have view access only.")
+
+    if role in ADMIN_ROLES and key not in BARANGAY_ONLY_PERMISSIONS:
+        return
+    if not _has_permission(cursor, payload["id"], key, role):
         raise HTTPException(status_code=403, detail=f"Missing permission: {key}")
 
 @app.post("/api/cameras")
@@ -655,26 +748,26 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
             conn.close()
             raise HTTPException(status_code=403, detail="Missing permission: view_map or view_history")
 
-    user_barangay = payload.get("barangay_id")
+    # Visibility and redaction are two SEPARATE decisions and were previously
+    # tangled into one if/else:
+    #   visibility -- which barangays' incidents you may see (scope_clause)
+    #   redaction  -- whether investigative PII is masked (barangay side yes,
+    #                 PNP side no; police need names/narrative to investigate)
+    redact = role in BARANGAY_SIDE_ROLES
 
-    if role in ("BARANGAY", "BARANGAY_CAPTAIN") and user_barangay:
-        cursor.execute(
-            "SELECT * FROM incidents WHERE LOWER(barangay_id) = ? ORDER BY occurred_date DESC, occurred_time DESC",
-            (user_barangay.lower(),),
-        )
-        redact = True
-    else:
-        # POLICE / PRECINCT_CAPTAIN / DEVTEAM see full detail. filter_barangay_id
-        # only ever narrows the result set further for these already-
-        # privileged roles -- it cannot be used to escalate.
-        if filter_barangay_id and filter_barangay_id.lower() != "all":
-            cursor.execute(
-                "SELECT * FROM incidents WHERE LOWER(barangay_id) = ? ORDER BY occurred_date DESC, occurred_time DESC",
-                (filter_barangay_id.lower(),),
-            )
-        else:
-            cursor.execute("SELECT * FROM incidents ORDER BY occurred_date DESC, occurred_time DESC")
-        redact = False
+    # filter_barangay_id only ever NARROWS within the caller's scope. It is
+    # appended alongside the scope clause, never instead of it, so it cannot
+    # be used to reach outside your own jurisdiction.
+    extra_where, extra_params = "", []
+    if filter_barangay_id and filter_barangay_id.lower() != "all":
+        extra_where, extra_params = "LOWER(barangay_id) = ?", [filter_barangay_id.lower()]
+
+    sql, params = apply_scope(
+        payload, "SELECT * FROM incidents", [],
+        extra_where=extra_where, extra_params=extra_params,
+    )
+    sql += " ORDER BY occurred_date DESC, occurred_time DESC"
+    cursor.execute(sql, tuple(params))
 
     inc_rows = cursor.fetchall()
 
@@ -985,7 +1078,13 @@ async def get_video_records(authorization: Optional[str] = Header(None)):
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "view_records")
-    cursor.execute("SELECT * FROM video_records ORDER BY recorded_at DESC")
+    # Was completely unscoped -- any authenticated user, from any barangay,
+    # got every recording in the system including other barangays' footage.
+    # video_records.barangay_id can be NULL for older/manual rows, so those
+    # stay visible only to DEVTEAM (whose scope clause is empty).
+    sql, params = apply_scope(payload, "SELECT * FROM video_records", [])
+    sql += " ORDER BY recorded_at DESC"
+    cursor.execute(sql, tuple(params))
     rows = cursor.fetchall()
     conn.close()
     return [_row_to_record_dict(r) for r in rows]
@@ -1013,6 +1112,48 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
     finally:
         conn.close()
 
+@app.post("/api/ai_register_clip")
+async def ai_register_clip(data: ManualClipSchema):
+    """Auto-captured event clips from the AI pipeline (main.py on 8001).
+
+    Deliberately NOT behind require_auth, for the same reason /api/ai_trigger
+    isn't: the caller is a local service process with no user session, not a
+    browser. This is the second half of the ai_trigger flow -- ai_trigger
+    creates the incident, this attaches the MP4 once encoding finishes.
+
+    Kept separate from /api/records/register_clip (which stays authenticated)
+    so the operator-facing manual "Extract Segment" path doesn't lose its
+    session check just to accommodate a machine caller. Same caveat as
+    ai_trigger: give it a service credential if this backend is ever exposed
+    beyond localhost.
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+    rid = str(uuid.uuid4())
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fpath = os.path.join(RECORDINGS_DIR, data.filename)
+    try:
+        cursor.execute(
+            """INSERT INTO video_records
+               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (rid, data.filename, fpath, now_str, data.duration, data.type,
+             data.associated_incident_id or None, data.crime_time_marker, data.notes),
+        )
+        conn.commit()
+        # RecordsView subscribes via useLiveChannel("*"), so pushing this
+        # means an auto-captured clip appears in the archive immediately
+        # instead of on the next 60s fallback poll.
+        await manager.broadcast({
+            "channel": "records", "event": "clip_registered",
+            "id": rid, "incident_id": data.associated_incident_id,
+        })
+        return {"status": "registered", "id": rid}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Metadata write collision: {e}")
+    finally:
+        conn.close()
+
 @app.patch("/api/records/{record_id}/notes")
 async def update_record_notes(record_id: str, data: RecordNotesSchema, authorization: Optional[str] = Header(None)):
     require_auth(authorization)
@@ -1027,6 +1168,23 @@ async def update_record_notes(record_id: str, data: RecordNotesSchema, authoriza
     return {"status": "updated", "id": record_id}
 
 # --- AUTH SECTOR CORES ---
+@app.get("/api/stations")
+async def list_stations_public():
+    """id + name only, for the signup form's station picker.
+
+    Unauthenticated because signup is. Deliberately narrower than
+    /api/devteam/stations: no jurisdiction and no staff counts, so this
+    leaks nothing beyond the names of police stations, which are public
+    knowledge anyway.
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM police_stations ORDER BY name")
+    rows = [{"id": r["id"], "name": r["name"]} for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
 @app.post("/api/signup")
 @limiter.limit("10/minute")
 async def signup(request: Request, user: UserSignup):
@@ -1034,38 +1192,70 @@ async def signup(request: Request, user: UserSignup):
     if role not in ADMIN_ROLES:
         raise HTTPException(
             status_code=403,
-            detail="Only Precinct Captain / Barangay Captain accounts can self-register. "
-                   "Standard user accounts must be created by your admin.",
+            detail="Only Barangay Admin / PNP Admin accounts can self-register. "
+                   "Operator accounts must be created by your admin.",
         )
-    barangay_id = user.barangay_id.strip().lower()
-    if not barangay_id:
+
+    is_pnp = role in PNP_SIDE_ROLES
+    barangay_id = (user.barangay_id or "").strip().lower()
+    station_id = (user.station_id or "").strip().lower()
+
+    if is_pnp and not station_id:
+        raise HTTPException(status_code=400, detail="A police station is required")
+    if not is_pnp and not barangay_id:
         raise HTTPException(status_code=400, detail="Location is required")
 
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
-        existing = cursor.fetchone()
-        if not existing:
-            cursor.execute(
-                "INSERT INTO barangays (id, name, status) VALUES (?, ?, 'pending')",
-                (barangay_id, user.barangay_id.strip().title()),
-            )
+        if is_pnp:
+            # A barangay can be created on the fly as 'pending' because
+            # DevTeam approval is the gate. A STATION cannot: its whole
+            # purpose is the jurisdiction DevTeam assigns it, so a
+            # self-created one would be an empty shell that sees nothing.
+            # PNP admins therefore join a station DevTeam already made.
+            cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (station_id,))
+            if not cursor.fetchone():
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail="That police station does not exist yet. Ask DevTeam to "
+                           "register the station and set its jurisdiction first.")
+            barangay_id = ""
+        else:
+            station_id = ""
+            cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO barangays (id, name, status) VALUES (?, ?, 'pending')",
+                    (barangay_id, user.barangay_id.strip().title()),
+                )
 
-        cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = ?", (barangay_id, role))
+        # One admin per org unit, matching the unique indexes.
+        if is_pnp:
+            cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = ?", (station_id, role))
+            dup_msg = "This station already has a PNP Admin account."
+        else:
+            cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = ?", (barangay_id, role))
+            dup_msg = "This location already has a Barangay Admin account."
         if cursor.fetchone():
             conn.close()
-            raise HTTPException(
-                status_code=400,
-                detail=f"This location already has a {role.replace('_', ' ').title()} account.",
-            )
+            raise HTTPException(status_code=400, detail=dup_msg)
 
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id) "
-            "VALUES (?, ?, ?, ?, ?, NULL)",
-            (user.username, hash_password(user.password), role, barangay_id, user.assignment),
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            (user.username, hash_password(user.password), role,
+             barangay_id or None, station_id or None, user.assignment),
         )
         new_user_id = cursor.lastrowid
+
+        if is_pnp:
+            # No location-approval gate for PNP: the station already exists,
+            # which means DevTeam already vetted it.
+            conn.commit()
+            return {"status": "success"}
+
         cursor.execute("UPDATE barangays SET requested_by = ? WHERE id = ? AND requested_by IS NULL",
                        (new_user_id, barangay_id))
         conn.commit()
@@ -1117,6 +1307,132 @@ async def logout():
 async def get_me(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     return {"user": payload}
+
+# --- DEVTEAM: POLICE STATIONS & JURISDICTIONS ---
+# A station is an organizational unit that COVERS barangays. It owns no
+# cameras, incidents or recordings -- station_barangays is purely a
+# visibility lens (see docs/USER_HIERARCHY_PLAN.md). Editing a jurisdiction
+# therefore changes only who can see what; it never moves an asset.
+
+class StationSchema(BaseModel):
+    id: Optional[str] = None
+    name: str
+
+class StationJurisdictionSchema(BaseModel):
+    barangay_ids: List[str]
+
+
+@app.get("/api/devteam/stations")
+async def list_stations(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM police_stations ORDER BY name")
+    stations = [{"id": r["id"], "name": r["name"]} for r in cursor.fetchall()]
+
+    # Batched, not one query per station.
+    cursor.execute("SELECT station_id, barangay_id FROM station_barangays")
+    juris: dict = {}
+    for r in cursor.fetchall():
+        juris.setdefault(r["station_id"], []).append(r["barangay_id"])
+
+    cursor.execute(
+        "SELECT station_id, COUNT(*) AS n FROM users WHERE station_id IS NOT NULL GROUP BY station_id")
+    staff = {r["station_id"]: r["n"] for r in cursor.fetchall()}
+
+    conn.close()
+    for s in stations:
+        s["barangay_ids"] = sorted(juris.get(s["id"], []))
+        s["staff_count"] = staff.get(s["id"], 0)
+    return stations
+
+
+@app.post("/api/devteam/stations")
+async def create_station(data: StationSchema, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Station name is required")
+    sid = (data.id or f"station-{uuid.uuid4().hex[:8]}").strip().lower()
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO police_stations (id, name) VALUES (?, ?)", (sid, name))
+        conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not create station: {e}")
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "stations", "event": "station_created", "id": sid})
+    return {"status": "created", "id": sid, "name": name}
+
+
+@app.put("/api/devteam/stations/{station_id}/jurisdiction")
+async def set_station_jurisdiction(station_id: str, data: StationJurisdictionSchema,
+                                   authorization: Optional[str] = Header(None)):
+    """Replaces a station's jurisdiction wholesale. Idempotent, and safe to
+    shrink: removing a barangay only removes visibility, it never deletes
+    that barangay's cameras/incidents, because nothing hangs off the
+    station."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (station_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Station not found")
+
+    wanted = [b.strip().lower() for b in data.barangay_ids if b and b.strip()]
+    if wanted:
+        placeholders = ",".join("?" for _ in wanted)
+        cursor.execute(f"SELECT id FROM barangays WHERE LOWER(id) IN ({placeholders})", tuple(wanted))
+        known = {r["id"].lower() for r in cursor.fetchall()}
+        unknown = [b for b in wanted if b not in known]
+        if unknown:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Unknown barangay ids: {', '.join(unknown)}")
+
+    try:
+        cursor.execute("DELETE FROM station_barangays WHERE station_id = ?", (station_id,))
+        for b in wanted:
+            cursor.execute(
+                "INSERT INTO station_barangays (station_id, barangay_id) VALUES (?, ?)", (station_id, b))
+        conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not update jurisdiction: {e}")
+    finally:
+        conn.close()
+
+    await manager.broadcast({"channel": "stations", "event": "jurisdiction_updated", "id": station_id})
+    return {"status": "updated", "id": station_id, "barangay_ids": wanted}
+
+
+@app.delete("/api/devteam/stations/{station_id}")
+async def delete_station(station_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    # users.station_id is ON DELETE RESTRICT, and chk_user_scope means a PNP
+    # user cannot exist without a station -- so refuse with a clear message
+    # rather than letting the FK raise something opaque.
+    cursor.execute("SELECT COUNT(*) AS n FROM users WHERE station_id = ?", (station_id,))
+    n = cursor.fetchone()["n"]
+    if n:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"{n} user(s) are still assigned to this station. Reassign them first.")
+    cursor.execute("DELETE FROM police_stations WHERE id = ?", (station_id,))
+    conn.commit()
+    conn.close()
+    await manager.broadcast({"channel": "stations", "event": "station_deleted", "id": station_id})
+    return {"status": "deleted", "id": station_id}
+
 
 # --- DEVTEAM: LOCATION APPROVAL ---
 @app.get("/api/devteam/locations")
@@ -1199,16 +1515,41 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
     payload = require_auth(authorization)
     require_role(payload, ADMIN_OR_DEVTEAM)
 
-    target_role = ADMIN_CREATES_ROLE.get(payload["role"], "POLICE") if payload["role"] != "DEVTEAM" else "POLICE"
+    if payload["role"] == "DEVTEAM":
+        # DEVTEAM has no org of its own to inherit, so it cannot create an
+        # operator here -- there would be nothing to scope them to, and
+        # chk_user_scope would reject the row. Use /api/devteam/create_user,
+        # which takes an explicit barangay or station.
+        raise HTTPException(
+            status_code=400,
+            detail="DEVTEAM accounts have no barangay or station to inherit. "
+                   "Use the DevTeam console to create a user with an explicit assignment.")
+
+    target_role = ADMIN_CREATES_ROLE[payload["role"]]
+
+    # An operator inherits their creator's scope, and WHICH field that is
+    # depends on the organization: barangay staff get barangay_id, PNP
+    # officers get station_id. Copying barangay_id unconditionally (as
+    # before) would now violate chk_user_scope for the PNP side.
+    if target_role in PNP_SIDE_ROLES:
+        new_barangay, new_station = None, payload.get("station_id")
+        if not new_station:
+            raise HTTPException(status_code=400,
+                                detail="Your account has no station assigned; contact DevTeam.")
+    else:
+        new_barangay, new_station = payload.get("barangay_id"), None
+        if not new_barangay:
+            raise HTTPException(status_code=400,
+                                detail="Your account has no barangay assigned; contact DevTeam.")
 
     conn = get_conn()
     cursor = conn.cursor()
     try:
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (new_user.username, hash_password(new_user.password), target_role,
-             payload["barangay_id"], new_user.assignment, payload["id"],
+             new_barangay, new_station, new_user.assignment, payload["id"],
              new_user.display_title if new_user.is_sub_admin else None,
              1 if new_user.is_sub_admin else 0),
         )
@@ -1232,13 +1573,17 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
 @app.post("/api/devteam/users")
 async def devteam_create_user(new_user: DevteamCreateUser, authorization: Optional[str] = Header(None)):
     """Full-power account creation -- DevTeam can create ANY role
-    (PRECINCT_CAPTAIN, BARANGAY_CAPTAIN, POLICE, BARANGAY) directly,
+    (PNP_ADMIN, PNP_OFFICER, BARANGAY_ADMIN, BARANGAY_STAFF) directly,
     bypassing the self-signup approval flow, and grant it a permission
     set from the same permission tree admins use for their sub-accounts.
-    A captain role still enforces the one-per-location unique index at
-    the DB level. Standard roles (POLICE/BARANGAY) can optionally be
-    slotted under an existing admin via parent_admin_id so they show up
-    under that admin's directory entry."""
+
+    Which scope field is required depends on the role's organization:
+    barangay roles take barangay_id, PNP roles take station_id. The DB's
+    chk_user_scope enforces this too, so a mismatch is caught either way --
+    this just produces a readable error instead of a constraint violation.
+
+    The one-admin-per-unit unique indexes still apply (one BARANGAY_ADMIN per
+    barangay, one PNP_ADMIN per station)."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
@@ -1246,14 +1591,28 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
     if role not in ALL_ROLES or role == "DEVTEAM":
         raise HTTPException(status_code=400, detail=f"Invalid role '{new_user.role}'")
 
+    is_pnp = role in PNP_SIDE_ROLES
     barangay_id = (new_user.barangay_id or "").strip().lower()
-    if role in ADMIN_ROLES | STANDARD_ROLES and not barangay_id:
-        raise HTTPException(status_code=400, detail="Location is required for this role")
+    station_id = (new_user.station_id or "").strip().lower()
+
+    if is_pnp and not station_id:
+        raise HTTPException(status_code=400, detail="A police station is required for PNP roles")
+    if not is_pnp and not barangay_id:
+        raise HTTPException(status_code=400, detail="A barangay is required for barangay roles")
 
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        if barangay_id:
+        if is_pnp:
+            # Stations are created deliberately in the station manager, never
+            # auto-vivified from a typo in a username form.
+            cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (station_id,))
+            if not cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"Unknown station '{station_id}'")
+            barangay_id = ""
+        else:
+            station_id = ""
             cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
             if not cursor.fetchone():
                 cursor.execute(
@@ -1264,21 +1623,22 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
 
         parent_id = new_user.parent_admin_id
         if role in STANDARD_ROLES and parent_id is None:
-            # auto-attach to whichever captain already runs this location,
-            # so the account shows up nested under someone in the directory
-            captain_role = "PRECINCT_CAPTAIN" if role == "POLICE" else "BARANGAY_CAPTAIN"
-            cursor.execute(
-                "SELECT id FROM users WHERE barangay_id = ? AND role = ?",
-                (barangay_id, captain_role),
-            )
-            existing_captain = cursor.fetchone()
-            parent_id = existing_captain["id"] if existing_captain else None
+            # Auto-attach to whichever admin already runs this org unit, so
+            # the account shows up nested under someone in the directory.
+            if is_pnp:
+                cursor.execute(
+                    "SELECT id FROM users WHERE station_id = ? AND role = 'PNP_ADMIN'", (station_id,))
+            else:
+                cursor.execute(
+                    "SELECT id FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN'", (barangay_id,))
+            existing_admin = cursor.fetchone()
+            parent_id = existing_admin["id"] if existing_admin else None
 
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (new_user.username, hash_password(new_user.password), role,
-             barangay_id or None, new_user.assignment, parent_id,
+             barangay_id or None, station_id or None, new_user.assignment, parent_id,
              new_user.display_title, 1 if new_user.display_title else 0),
         )
         new_id = cursor.lastrowid

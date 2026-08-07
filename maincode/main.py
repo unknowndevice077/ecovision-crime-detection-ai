@@ -20,6 +20,16 @@ logging.getLogger("ultralytics").addFilter(UltralyticsNoiseFilter())
 # imported -- the videoio backend registry is built at import time.
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_OBSENSOR", "0")
 
+# Probing an index with no camera on it makes DSHOW log
+#   "backend is generally available but can't be used to capture by index"
+# at WARN. That's the normal, expected result of scanning for cameras, so a
+# scan of 0-9 emitted ~9 warnings per call and buried real errors. ERROR level
+# keeps genuine failures visible while dropping the expected-miss noise.
+# Env var rather than cv2.setLogLevel(): that function is not exposed in every
+# opencv-python build (it is absent in this one) and importing cv2 just to
+# call it would be too late anyway -- the level must be set before init.
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+
 import cv2
 import time
 import signal
@@ -51,6 +61,7 @@ except ModuleNotFoundError:
 try:
     from fastapi import FastAPI
     from fastapi.responses import StreamingResponse
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
     from typing import Optional
     import uvicorn
@@ -132,8 +143,23 @@ else:
 POSE_IMGSZ          = 416
 WEAPON_IMGSZ        = 416
 WEAPON_CONF         = sys_config["detection"].get("confidence_threshold", 0.38)
-POSE_CONF           = 0.30
 DETECTION_INTERVAL  = sys_config["detection"].get("detection_interval", 5)
+
+# There is deliberately no POSE_CONF here. A `POSE_CONF = 0.30` constant used
+# to sit at this spot, never passed to anything -- and wiring it into the
+# pose_model.track() call below would actively hurt.
+#
+# ultralytics forces conf=0.1 in track mode on purpose
+# (engine/model.py: `kwargs["conf"] = kwargs.get("conf") or 0.1`, commented
+# "ByteTrack-based method needs low confidence predictions as input").
+# BoT-SORT's second association stage re-matches lost tracks against exactly
+# those sub-threshold detections; that is what carries a track ID through a
+# brief occlusion instead of retiring it and issuing a new one on the far
+# side. Passing conf=0.30 would discard that entire band and fragment tracks
+# harder -- the precise failure behind the clips that never reach X3D.
+#
+# If pose detection needs tuning, tune the tracker (track_buffer,
+# new_track_thresh in the botsort.yaml passed via tracker=), not conf.
 
 # NOTE: "phone" removed from WEAPON_CLASSES / CONF_BY_CLASS below.
 # The deployed weapon_signs model only outputs Gun/Knife/Sign right now.
@@ -250,6 +276,26 @@ def _read_frame() -> bytes:
         return _frame_buf[_buf_write]
 
 stream_app = FastAPI()
+
+# The dashboard runs on :3000 and this server on :8001, so every fetch() to
+# it is cross-origin. app/backend.py (:8000) has had CORS since the start, but
+# this app never did -- and the omission was invisible because the one thing
+# most people check, <img src=".../video_feed">, is NOT subject to CORS. Only
+# the fetch()-based endpoints (/available_cameras, /set_camera_index) were
+# being blocked, which surfaced as a bare "Failed to fetch" in the browser
+# while curl against the same URL returned 200.
+#
+# Same reasoning as backend.py's allow_origin_regex: the frontend's port can
+# fall back if 3000 is taken (findFreePortForFrontend in electron/main.js), so
+# a fixed allowlist would break on whatever port it actually landed on. This
+# is a local single-user desktop app; accepting any localhost origin costs
+# nothing here.
+stream_app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def _frame_generator():
     while True:
@@ -837,10 +883,17 @@ class CameraIndexRequest(BaseModel):
     index: int
 
 
-@stream_app.get("/available_cameras")
-def get_available_cameras():
-    """Detects available camera indices by attempting to open each one.
-    Returns a list of working camera indices (0-9 checked by default)."""
+# Scanning 0-9 opens and releases real capture devices, which takes ~2s and
+# briefly contends for hardware. The dashboard polls this endpoint (and retries
+# on failure), so an uncached scan meant hammering the camera subsystem every
+# few seconds forever. Cameras don't come and go often, so serve a short-lived
+# cached result and let /set_camera_index invalidate it on an actual change.
+_camera_scan_cache = {"result": None, "at": 0.0}
+_CAMERA_SCAN_TTL = 60.0
+_camera_scan_lock = threading.Lock()
+
+
+def _scan_cameras():
     available = []
     for idx in range(10):  # Check indices 0-9
         # Probing the CURRENTLY OPEN index would fight the main loop for the
@@ -860,6 +913,24 @@ def get_available_cameras():
             pass
         finally:
             test_cap.release()
+    return available
+
+
+@stream_app.get("/available_cameras")
+def get_available_cameras(refresh: bool = False):
+    """Detects available camera indices by attempting to open each one.
+    Returns a list of working camera indices (0-9 checked by default).
+    Pass ?refresh=1 to force a rescan (e.g. after plugging a camera in)."""
+    with _camera_scan_lock:
+        now = time.time()
+        stale = (
+            _camera_scan_cache["result"] is None
+            or now - _camera_scan_cache["at"] > _CAMERA_SCAN_TTL
+        )
+        if refresh or stale:
+            _camera_scan_cache["result"] = _scan_cameras()
+            _camera_scan_cache["at"] = now
+        available = _camera_scan_cache["result"]
     return {"available_cameras": available, "current_index": camera_idx}
 
 
@@ -873,6 +944,12 @@ def set_camera_index(payload: CameraIndexRequest):
     global camera_idx
     camera_idx = payload.index
     ok = _reopen_camera()
+
+    # Which index is "currently open" is part of the scan result, so a swap
+    # invalidates it -- otherwise the picker would show stale availability
+    # for up to _CAMERA_SCAN_TTL after the operator changed cameras.
+    with _camera_scan_lock:
+        _camera_scan_cache["result"] = None
 
     try:
         sys_config["camera"]["index"] = camera_idx
@@ -981,15 +1058,29 @@ def _finalize_and_register_clip(clip: dict):
     print(f"🎬 [CLIP] Saved {filename} ({total_seconds:.1f}s, marker@{marker}) for case {incident_id}")
 
     try:
-        r = requests.post(f"{sys_config['networking']['api_url'].rstrip('/')}/api/records/register_clip", json={
-            "filename":          filename,
-            "duration":          f"{total_seconds:.1f}s",
-            "type":              "CLIP",
-            "associatedCrimeId": incident_id,
-            "crimeTimeMarker":   marker,
-            "notes":             f"Auto-captured by AI Sentinel on {clip['event']} detection (conf={clip['conf']:.2f}).",
+        # Field names must be snake_case to match backend.py's ManualClipSchema.
+        # These were camelCase (associatedCrimeId / crimeTimeMarker), so
+        # crime_time_marker -- which is REQUIRED -- was always absent and every
+        # single auto-clip registration failed with 422 Unprocessable Entity.
+        # The incident itself still landed via /api/ai_trigger, so alerts looked
+        # fine while their video evidence was silently never attached.
+        #
+        # Endpoint is /api/ai_register_clip, not /api/records/register_clip:
+        # the latter is behind require_auth and this process has no user
+        # session, so fixing only the field names would have turned the 422
+        # into a 401.
+        r = requests.post(f"{sys_config['networking']['api_url'].rstrip('/')}/api/ai_register_clip", json={
+            "filename":               filename,
+            "duration":               f"{total_seconds:.1f}s",
+            "type":                   "CLIP",
+            "associated_incident_id": incident_id,
+            "crime_time_marker":      marker,
+            "notes":                  f"Auto-captured by AI Sentinel on {clip['event']} detection (conf={clip['conf']:.2f}).",
         }, timeout=3.0)
-        print(f"   ✅ Records backend {r.status_code}: {r.text[:120]}")
+        if r.status_code >= 400:
+            print(f"   ❌ Records backend rejected clip ({r.status_code}): {r.text[:200]}")
+        else:
+            print(f"   ✅ Records backend {r.status_code}: {r.text[:120]}")
     except Exception as e:
         print(f"   ❌ Records backend unreachable: {e}")
 

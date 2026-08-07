@@ -41,15 +41,42 @@ export function usePermissions() {
 
   const permissions = useMemo<Record<string, boolean>>(() => {
     if (!user) return {};
-    // DEVTEAM / admin tiers (CAPTAIN roles) implicitly have full access --
-    // the permissions blob only applies to standard POLICE/BARANGAY accounts
-    // an admin created and scoped down.
-    if (user.role === 'DEVTEAM' || user.role === 'PRECINCT_CAPTAIN' || user.role === 'BARANGAY_CAPTAIN') {
+
+    // DEVTEAM is unscoped and can do everything.
+    if (user.role === 'DEVTEAM') {
       return {
         view_map: true, view_records: true, view_history: true,
         manage_cameras: true, confirm_dismiss_alerts: true,
       };
     }
+
+    // Admin tiers implicitly have everything EXCEPT manage_cameras, which is
+    // barangay-only: the barangay funded and installed the smartpoles, PNP
+    // consumes the feed. Mirrors BARANGAY_ONLY_PERMISSIONS in backend.py --
+    // the server enforces this regardless; this just stops rendering a
+    // Delete button a PNP admin would only get a 403 from.
+    if (user.role === 'PNP_ADMIN') {
+      return {
+        view_map: true, view_records: true, view_history: true,
+        manage_cameras: false, confirm_dismiss_alerts: true,
+      };
+    }
+    if (user.role === 'BARANGAY_ADMIN') {
+      return {
+        view_map: true, view_records: true, view_history: true,
+        manage_cameras: true, confirm_dismiss_alerts: true,
+      };
+    }
+
+    // PNP_OFFICER can never manage cameras either, whatever the stored blob
+    // says -- a stale grant from before this rule must not resurrect it.
+    if (user.role === 'PNP_OFFICER') {
+      const raw = typeof user.permissions === 'string'
+        ? (() => { try { return JSON.parse(user.permissions as string); } catch { return {}; } })()
+        : (user.permissions ?? {});
+      return { ...raw, manage_cameras: false };
+    }
+
     if (!user.permissions) return {};
     if (typeof user.permissions === 'string') {
       try { return JSON.parse(user.permissions); } catch { return {}; }

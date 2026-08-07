@@ -1,57 +1,122 @@
-annotated-types==0.7.0
-anyio==4.13.0
-certifi==2026.4.22
-charset-normalizer==3.4.7
-click==8.3.3
-colorama==0.4.6
-contourpy==1.3.3
-cycler==0.12.1
+# EcoVision Sentinel -- full pinned environment
+#
+# This file is installed into BOTH environments by setup.bat:
+#   .venv/      -> hot-reload development (run_dev_system.bat)
+#   python-env/ -> the runtime bundled into the portable build (build_release.bat)
+#
+# It is a full lock (transitive deps included), not a top-level wishlist,
+# because python-env/ ships to end users and has to be reproducible.
+#
+# The extra index below is REQUIRED: plain `torch==2.5.1` from PyPI is the
+# CPU build. Only the PyTorch cu121 index serves the +cu121 wheels this
+# project actually runs on. setup.bat passes the same flag on the command
+# line; keeping it here means a bare `pip install -r requirements.txt` also
+# gets the right build instead of silently installing CPU torch.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# ── Backend API (FastAPI) ────────────────────────────────────────────────
 fastapi==0.136.1
-filelock==3.29.0
-fonttools==4.62.1
-fsspec==2026.3.0
-h11==0.16.0
-httptools==0.7.1
-idna==3.7
-itsdangerous==2.2.0
-Jinja2==3.1.6
-kiwisolver==1.5.0
-lap==0.5.13
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.6.1
-numpy==2.4.4
-opencv-python==4.13.0.92
-packaging==26.2
-pandas==3.0.3
-pillow==12.2.0
-psutil==7.2.2
+starlette==1.0.0
+uvicorn==0.46.0
 pydantic==2.13.3
 pydantic_core==2.46.3
-pyparsing==3.3.2
-python-dateutil==2.9.0.post0
-python-dotenv==1.2.2
-alembic==1.16.3
-psycopg2-binary==2.9.9
-python-multipart==0.0.27
-PyYAML==6.0.3
-requests==2.33.1
-scipy==1.17.1
-setuptools==81.0.0
-six==1.17.0
-starlette==1.0.0
-sympy==1.13.1
-torch==2.5.1
-torchvision==0.20.1
-tqdm==4.67.3
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-tzdata==2026.2
-ultralytics==8.4.42
-ultralytics-thop==2.0.19
-urllib3==2.6.3
-uvicorn==0.46.0
+annotated-types==0.7.0
+annotated-doc==0.0.4
+anyio==4.13.0
+h11==0.16.0
+httptools==0.7.1
 watchfiles==1.1.1
 websockets==16.0
-pytorchvideo==0.1.5
+python-multipart==0.0.27
+python-dotenv==1.2.2
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+click==8.3.3
+colorama==0.4.6
+
+# Rate limiting (backend.py: slowapi Limiter) + its deps
 slowapi==0.1.9
+limits==5.8.0
+Deprecated==1.3.1
+wrapt==2.2.2
+
+# ── Database ─────────────────────────────────────────────────────────────
+# SQLite is stdlib; psycopg2 is only exercised when DATABASE_URL is set
+# (docker-compose). alembic/SQLAlchemy back the alembic/ migrations.
+psycopg2-binary==2.9.9
+alembic==1.16.3
+SQLAlchemy==2.0.51
+Mako==1.3.12
+greenlet==3.5.4
+
+# ── HTTP client (alert posting, clip registration) ───────────────────────
+requests==2.33.1
+urllib3==2.6.3
+certifi==2026.4.22
+charset-normalizer==3.4.7
+idna==3.7
+
+# ── AI / vision core ─────────────────────────────────────────────────────
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+ultralytics==8.4.42
+ultralytics-thop==2.0.19
+pytorchvideo==0.1.5
+opencv-python==4.13.0.92
+numpy==2.4.4
+pillow==12.2.0
+scipy==1.17.1
+lap==0.5.13
+PyYAML==6.0.3
+tqdm==4.67.3
+psutil==7.2.2
+filelock==3.29.0
+fsspec==2026.3.0
+networkx==3.6.1
+sympy==1.13.1
+mpmath==1.3.0
+typing_extensions==4.15.0
+typing-inspection==0.4.2
+packaging==26.2
+
+# pytorchvideo's own dependency chain -- it imports these at module load,
+# so they are not optional even though nothing in this repo imports them.
+av==18.0.0
+fvcore==0.1.5.post20221221
+iopath==0.1.10
+portalocker==3.2.0
+pywin32==312; sys_platform == "win32"
+yacs==0.1.8
+termcolor==3.3.0
+tabulate==0.10.0
+parameterized==0.9.0
+
+# ultralytics pulls these in for dataset handling and plotting
+pandas==3.0.3
+polars==1.43.0
+polars-runtime-32==1.43.0
+python-dateutil==2.9.0.post0
+tzdata==2026.2
+six==1.17.0
+
+# ── TensorRT / ONNX export (optimize_weights.py -> weights/*.engine) ─────
+# main.py prefers weights/*.engine over *.pt when present. These are what
+# produce the .engine files; the runtime only needs tensorrt to load them.
+tensorrt_cu12==11.1.0.106
+tensorrt_cu12_bindings==11.1.0.106
+tensorrt_cu12_libs==11.1.0.106
+onnx==1.22.0
+onnxruntime-gpu==1.27.0
+onnxslim==0.1.94
+protobuf==7.35.1
+flatbuffers==25.12.19
+ml_dtypes==0.5.4
+
+# ── Plotting (confidence_trace_plotter.py, ultralytics results plots) ────
+matplotlib==3.11.1
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.62.1
+kiwisolver==1.5.0
+pyparsing==3.3.2

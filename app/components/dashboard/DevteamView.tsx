@@ -18,19 +18,21 @@ const PERMISSION_KEYS = [
 ];
 
 const CREATABLE_ROLES = [
-  { role: 'PRECINCT_CAPTAIN', code: 'PD', label: 'Precinct Captain', needsLocation: true },
-  { role: 'BARANGAY_CAPTAIN', code: 'BG', label: 'Barangay Captain', needsLocation: true },
-  { role: 'POLICE', code: 'PD', label: 'Police', needsLocation: true },
-  { role: 'BARANGAY', code: 'BG', label: 'Barangay', needsLocation: true },
+  { role: 'PNP_ADMIN', code: 'PD', label: 'PNP Admin', scope: 'station' },
+  { role: 'PNP_OFFICER', code: 'PD', label: 'PNP Officer', scope: 'station' },
+  { role: 'BARANGAY_ADMIN', code: 'BG', label: 'Barangay Admin', scope: 'barangay' },
+  { role: 'BARANGAY_STAFF', code: 'BG', label: 'Barangay Staff', scope: 'barangay' },
 ];
+
+const PNP_ROLES = ['PNP_ADMIN', 'PNP_OFFICER'];
 
 // Two operating branches, distinguished the way a dispatch board would:
 // a callsign-style two-letter code and a single accent, nothing more.
 const ROLE_STYLES: Record<string, { code: string; text: string; border: string; bg: string; barText: string }> = {
-  PRECINCT_CAPTAIN: { code: 'PD', text: 'text-[var(--accent)]', border: 'border-[var(--accent)]/25', bg: 'bg-[var(--accent)]/[0.07]', barText: 'text-[var(--accent)]' },
-  BARANGAY_CAPTAIN: { code: 'BG', text: 'text-[var(--ok)]', border: 'border-[var(--ok)]/25', bg: 'bg-[var(--ok)]/[0.07]', barText: 'text-[var(--ok)]' },
-  POLICE: { code: 'PD', text: 'text-[var(--accent)]/70', border: 'border-[var(--accent)]/15', bg: 'bg-[var(--accent)]/[0.04]', barText: 'text-[var(--accent)]/70' },
-  BARANGAY: { code: 'BG', text: 'text-[var(--ok)]/70', border: 'border-[var(--ok)]/15', bg: 'bg-[var(--ok)]/[0.04]', barText: 'text-[var(--ok)]/70' },
+  PNP_ADMIN: { code: 'PD', text: 'text-[var(--accent)]', border: 'border-[var(--accent)]/25', bg: 'bg-[var(--accent)]/[0.07]', barText: 'text-[var(--accent)]' },
+  BARANGAY_ADMIN: { code: 'BG', text: 'text-[var(--ok)]', border: 'border-[var(--ok)]/25', bg: 'bg-[var(--ok)]/[0.07]', barText: 'text-[var(--ok)]' },
+  PNP_OFFICER: { code: 'PD', text: 'text-[var(--accent)]/70', border: 'border-[var(--accent)]/15', bg: 'bg-[var(--accent)]/[0.04]', barText: 'text-[var(--accent)]/70' },
+  BARANGAY_STAFF: { code: 'BG', text: 'text-[var(--ok)]/70', border: 'border-[var(--ok)]/15', bg: 'bg-[var(--ok)]/[0.04]', barText: 'text-[var(--ok)]/70' },
 };
 
 function authHeaders() {
@@ -62,7 +64,9 @@ type PendingLocation = {
   created_at: string;
 };
 
-type Tab = 'directory' | 'approvals' | 'create' | 'cameras';
+type Tab = 'directory' | 'approvals' | 'create' | 'cameras' | 'stations';
+
+type Station = { id: string; name: string; barangay_ids: string[]; staff_count: number };
 
 type CameraRow = { id: string; name: string; url: string; status: string; barangay_id: string };
 
@@ -70,6 +74,7 @@ export default function DevteamView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [data, setData] = useState<any>(null);
   const [cameras, setCameras] = useState<CameraRow[]>([]);
+  const [stations, setStations] = useState<Station[]>([]);
   const [pendingLocations, setPendingLocations] = useState<PendingLocation[]>([]);
   const [allLocations, setAllLocations] = useState<PendingLocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -84,25 +89,100 @@ export default function DevteamView() {
   const [toast, setToast] = useState('');
   const { connected } = useWebSocketContext();
 
-  // CREATE USER TAB — DevTeam can mint any role directly (PRECINCT_CAPTAIN,
-  // BARANGAY_CAPTAIN, POLICE, BARANGAY), skip the pending-approval signup
+  // CREATE USER TAB — DevTeam can mint any role directly (PNP_ADMIN,
+  // BARANGAY_ADMIN, POLICE, BARANGAY), skip the pending-approval signup
   // flow entirely, and grant permissions from the same tree admins use for
   // their own sub-accounts.
   const [createForm, setCreateForm] = useState({
     username: '', password: '', assignment: '', display_title: '',
-    role: 'PRECINCT_CAPTAIN', barangay_id: '', parent_admin_id: '' as string,
+    role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '' as string,
   });
   const [createPerms, setCreatePerms] = useState<Record<string, boolean>>({});
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
   const [locPickerOpen, setLocPickerOpen] = useState(false);
 
+  // STATIONS TAB. jurisDraft holds pending edits keyed by station id, so the
+  // checkboxes stay responsive and the PUT only fires on Save -- toggling a
+  // jurisdiction changes who can see a whole barangay's footage, which is
+  // not something to commit on every stray click.
+  const [newStationName, setNewStationName] = useState('');
+  const [stationBusy, setStationBusy] = useState(false);
+  const [jurisDraft, setJurisDraft] = useState<Record<string, string[]>>({});
+
+  const handleCreateStation = async () => {
+    const name = newStationName.trim();
+    if (!name) return;
+    setStationBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/stations`, {
+        method: "POST", headers: authHeaders(), body: JSON.stringify({ name }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { setNewStationName(''); fetchOverview(); flash(`Station "${name}" created.`); }
+      else flash(d.detail || 'Could not create station.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setStationBusy(false);
+    }
+  };
+
+  const toggleJurisdiction = (st: Station, barangayId: string) => {
+    setJurisDraft(prev => {
+      const current = prev[st.id] ?? st.barangay_ids;
+      const next = current.includes(barangayId)
+        ? current.filter(b => b !== barangayId)
+        : [...current, barangayId];
+      return { ...prev, [st.id]: next };
+    });
+  };
+
+  const saveJurisdiction = async (st: Station) => {
+    const draft = jurisDraft[st.id];
+    if (!draft) return;
+    setStationBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/stations/${st.id}/jurisdiction`, {
+        method: "PUT", headers: authHeaders(), body: JSON.stringify({ barangay_ids: draft }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setJurisDraft(prev => { const n = { ...prev }; delete n[st.id]; return n; });
+        fetchOverview();
+        flash(`${st.name} now covers ${draft.length} barangay${draft.length === 1 ? '' : 's'}.`);
+      } else flash(d.detail || 'Could not update jurisdiction.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setStationBusy(false);
+    }
+  };
+
+  const handleDeleteStation = async (st: Station) => {
+    if (st.staff_count > 0) return; // button is disabled too; belt and braces
+    setStationBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/stations/${st.id}`, {
+        method: "DELETE", headers: authHeaders(),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { fetchOverview(); flash(`${st.name} deleted.`); }
+      else flash(d.detail || 'Could not delete station.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setStationBusy(false);
+    }
+  };
+
   const fetchOverview = async () => {
     try {
-      const [overviewRes, locationsRes, allLocationsRes] = await Promise.all([
+      const [overviewRes, locationsRes, allLocationsRes, stationsRes] = await Promise.all([
         fetch(`${API_URL}/api/devteam/overview`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/locations?status=pending`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/locations`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/devteam/stations`, { headers: authHeaders() }),
       ]);
       if (overviewRes.ok && locationsRes.ok) {
         const overview = await overviewRes.json();
@@ -110,6 +190,7 @@ export default function DevteamView() {
         setCameras(overview.cameras || []);
         setPendingLocations(await locationsRes.json());
         if (allLocationsRes.ok) setAllLocations(await allLocationsRes.json());
+        if (stationsRes.ok) setStations(await stationsRes.json());
         setLoadFailed(false);
       } else {
         setLoadFailed(true);
@@ -191,7 +272,7 @@ export default function DevteamView() {
   };
 
   const resetCreateForm = () => {
-    setCreateForm({ username: '', password: '', assignment: '', display_title: '', role: 'PRECINCT_CAPTAIN', barangay_id: '', parent_admin_id: '' });
+    setCreateForm({ username: '', password: '', assignment: '', display_title: '', role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '' });
     setCreatePerms({});
     setCreateError('');
   };
@@ -202,9 +283,13 @@ export default function DevteamView() {
       setCreateError('Username, password, and assignment are required.');
       return;
     }
-    const roleMeta = CREATABLE_ROLES.find(r => r.role === createForm.role);
-    if (roleMeta?.needsLocation && !createForm.barangay_id.trim()) {
-      setCreateError('A location is required for this role.');
+    const isPnp = PNP_ROLES.includes(createForm.role);
+    if (isPnp && !createForm.station_id) {
+      setCreateError('A police station is required for PNP roles.');
+      return;
+    }
+    if (!isPnp && !createForm.barangay_id.trim()) {
+      setCreateError('A barangay is required for barangay roles.');
       return;
     }
     setCreateBusy(true);
@@ -216,7 +301,8 @@ export default function DevteamView() {
           username: createForm.username.trim(),
           password: createForm.password,
           role: createForm.role,
-          barangay_id: createForm.barangay_id.trim().toLowerCase() || null,
+          barangay_id: isPnp ? null : (createForm.barangay_id.trim().toLowerCase() || null),
+          station_id: isPnp ? createForm.station_id : null,
           assignment: createForm.assignment.trim(),
           display_title: createForm.display_title.trim() || null,
           parent_admin_id: createForm.parent_admin_id ? Number(createForm.parent_admin_id) : null,
@@ -225,7 +311,7 @@ export default function DevteamView() {
       });
       const d = await res.json().catch(() => ({}));
       if (res.ok) {
-        flash(`${createForm.username} created and connected to ${createForm.barangay_id || 'no location'}.`);
+        flash(`${createForm.username} created (${isPnp ? stations.find(st => st.id === createForm.station_id)?.name ?? createForm.station_id : createForm.barangay_id}).`);
         resetCreateForm();
         fetchOverview();
         setTab('directory');
@@ -242,13 +328,13 @@ export default function DevteamView() {
   const { admins, childrenByAdmin, selectedAdmin, selectedChildren } = useMemo(() => {
     if (!data) return { admins: [], childrenByAdmin: new Map(), selectedAdmin: null, selectedChildren: [] };
     const users: ManagedUser[] = data.users;
-    let adminList = users.filter(u => u.role === 'PRECINCT_CAPTAIN' || u.role === 'BARANGAY_CAPTAIN');
+    let adminList = users.filter(u => u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN');
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       adminList = adminList.filter(a => a.username.toLowerCase().includes(q) || a.barangay_id?.toLowerCase().includes(q));
     }
     const map = new Map<number, ManagedUser[]>();
-    users.filter(u => u.role === 'PRECINCT_CAPTAIN' || u.role === 'BARANGAY_CAPTAIN')
+    users.filter(u => u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN')
       .forEach(a => map.set(a.id, users.filter(u => u.parent_admin_id === a.id)));
     const sel = adminList.find(a => a.id === selectedAdminId) || adminList[0] || null;
     return { admins: adminList, childrenByAdmin: map, selectedAdmin: sel, selectedChildren: sel ? (map.get(sel.id) || []) : [] };
@@ -262,10 +348,10 @@ export default function DevteamView() {
     const users: ManagedUser[] = data.users;
     const byLoc = new Map<string, { precinct?: ManagedUser; barangay?: ManagedUser }>();
     users.forEach(u => {
-      if (u.role !== 'PRECINCT_CAPTAIN' && u.role !== 'BARANGAY_CAPTAIN') return;
+      if (u.role !== 'PNP_ADMIN' && u.role !== 'BARANGAY_ADMIN') return;
       const key = u.barangay_id || '—';
       const entry = byLoc.get(key) || {};
-      if (u.role === 'PRECINCT_CAPTAIN') entry.precinct = u; else entry.barangay = u;
+      if (u.role === 'PNP_ADMIN') entry.precinct = u; else entry.barangay = u;
       byLoc.set(key, entry);
     });
     return Array.from(byLoc.entries()).map(([loc, pair]) => ({ loc, ...pair }));
@@ -301,8 +387,8 @@ export default function DevteamView() {
   const eligibleParents = useMemo(() => {
     if (!data) return [];
     const roleMeta = CREATABLE_ROLES.find(r => r.role === createForm.role);
-    if (!roleMeta || roleMeta.role === 'PRECINCT_CAPTAIN' || roleMeta.role === 'BARANGAY_CAPTAIN') return [];
-    const wantCaptainRole = roleMeta.role === 'POLICE' ? 'PRECINCT_CAPTAIN' : 'BARANGAY_CAPTAIN';
+    if (!roleMeta || roleMeta.role === 'PNP_ADMIN' || roleMeta.role === 'BARANGAY_ADMIN') return [];
+    const wantCaptainRole = roleMeta.role === 'PNP_OFFICER' ? 'PNP_ADMIN' : 'BARANGAY_ADMIN';
     return (data.users as ManagedUser[]).filter(u => u.role === wantCaptainRole && (!createForm.barangay_id || u.barangay_id === createForm.barangay_id.trim().toLowerCase()));
   }, [data, createForm.role, createForm.barangay_id]);
 
@@ -379,6 +465,7 @@ export default function DevteamView() {
         />
         <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
         <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
+        <TabButton icon={<Radio size={12} />} label="Stations" active={tab === 'stations'} onClick={() => setTab('stations')} badge={stations.length} />
       </div>
 
       {/* ================= DIRECTORY TAB ================= */}
@@ -452,7 +539,7 @@ export default function DevteamView() {
                     location, surfaced explicitly instead of left implicit. */}
                 {(() => {
                   const pair = locationPairs.find(p => p.loc === selectedAdmin.barangay_id);
-                  const counterpart = selectedAdmin.role === 'PRECINCT_CAPTAIN' ? pair?.barangay : pair?.precinct;
+                  const counterpart = selectedAdmin.role === 'PNP_ADMIN' ? pair?.barangay : pair?.precinct;
                   return (
                     <div className="mb-6 flex items-center gap-3 px-3 py-2.5 border border-dashed border-[var(--line)]">
                       <span className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] shrink-0">Connected at {selectedAdmin.barangay_id}</span>
@@ -602,38 +689,65 @@ export default function DevteamView() {
               <FieldInput label="Display title (optional)" value={createForm.display_title} onChange={(v: string) => setCreateForm({ ...createForm, display_title: v })} placeholder="e.g. Assistant Captain" />
             </div>
 
-            <div className="mb-3 relative">
-              <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Location — connects this account to one barangay/precinct</label>
-              <button
-                type="button"
-                onClick={() => setLocPickerOpen(o => !o)}
-                className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none flex items-center justify-between transition-colors"
-              >
-                <span className={createForm.barangay_id ? '' : 'text-[var(--text-3)]'}>{createForm.barangay_id || 'select or type a location id'}</span>
-                <ChevronDown size={12} className="text-[var(--text-2)]" />
-              </button>
-              <input
-                value={createForm.barangay_id}
-                onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
-                placeholder="type to create a new location id, e.g. 'cogon'"
-                className="w-full mt-2 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
-              />
-              {locPickerOpen && knownLocationIds.length > 0 && (
-                <div className="mt-1 border border-[var(--line)] bg-[var(--panel)] max-h-32 overflow-y-auto custom-scrollbar">
-                  {knownLocationIds.map(loc => (
-                    <button
-                      key={loc}
-                      onClick={() => { setCreateForm({ ...createForm, barangay_id: loc }); setLocPickerOpen(false); }}
-                      className="w-full text-left px-3 py-1.5 text-[10px] text-[var(--text)] hover:bg-[var(--panel-2)] hover:text-[#fff] transition-colors"
-                    >
-                      {loc}
-                    </button>
+            {/* Scope field follows the role's organization. PNP accounts are
+                scoped to a station's jurisdiction, barangay accounts to a
+                single barangay -- the DB's chk_user_scope rejects the wrong
+                combination, so offering both at once would just produce a
+                confusing 400. */}
+            {PNP_ROLES.includes(createForm.role) ? (
+              <div className="mb-3">
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                  Police station — this account sees every barangay in its jurisdiction
+                </label>
+                <select
+                  value={createForm.station_id}
+                  onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                >
+                  <option value="">
+                    {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
+                  </option>
+                  {stations.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.barangay_ids.length} barangay{s.barangay_ids.length === 1 ? '' : 's'})
+                    </option>
                   ))}
-                </div>
-              )}
-            </div>
+                </select>
+              </div>
+            ) : (
+              <div className="mb-3 relative">
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Barangay — this account is scoped to exactly this one</label>
+                <button
+                  type="button"
+                  onClick={() => setLocPickerOpen(o => !o)}
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none flex items-center justify-between transition-colors"
+                >
+                  <span className={createForm.barangay_id ? '' : 'text-[var(--text-3)]'}>{createForm.barangay_id || 'select or type a barangay id'}</span>
+                  <ChevronDown size={12} className="text-[var(--text-2)]" />
+                </button>
+                <input
+                  value={createForm.barangay_id}
+                  onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
+                  placeholder="type to create a new barangay id, e.g. 'cogon'"
+                  className="w-full mt-2 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                />
+                {locPickerOpen && knownLocationIds.length > 0 && (
+                  <div className="mt-1 border border-[var(--line)] bg-[var(--panel)] max-h-32 overflow-y-auto custom-scrollbar">
+                    {knownLocationIds.map(loc => (
+                      <button
+                        key={loc}
+                        onClick={() => { setCreateForm({ ...createForm, barangay_id: loc }); setLocPickerOpen(false); }}
+                        className="w-full text-left px-3 py-1.5 text-[10px] text-[var(--text)] hover:bg-[var(--panel-2)] hover:text-[#fff] transition-colors"
+                      >
+                        {loc}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-            {(createForm.role === 'POLICE' || createForm.role === 'BARANGAY') && (
+            {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
               <div className="mb-4">
                 <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Reports to (optional — auto-attaches to the location's captain if left blank)</label>
                 <select
@@ -680,6 +794,125 @@ export default function DevteamView() {
               <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ================= STATIONS TAB ================= */}
+      {/* A station COVERS barangays; it owns nothing. Editing a jurisdiction
+          only changes who can see what -- no camera, incident or recording
+          ever moves, because none of them hang off a station. That's why
+          shrinking a jurisdiction here is safe. */}
+      {tab === 'stations' && (
+        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-4">
+
+          <div className="border border-[var(--line)] p-4">
+            <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
+              Register a police station
+            </div>
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <input
+                  value={newStationName}
+                  onChange={e => setNewStationName(e.target.value)}
+                  placeholder="e.g. Ormoc City Police Station"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                />
+              </div>
+              <button
+                onClick={handleCreateStation}
+                disabled={!newStationName.trim() || stationBusy}
+                className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90"
+              >
+                Create
+              </button>
+            </div>
+            <p className="text-[9px] leading-relaxed mt-2 text-[var(--text-3)]">
+              PNP accounts are scoped to a station's jurisdiction, so a station must
+              exist before its commander or officers can be created.
+            </p>
+          </div>
+
+          {stations.length === 0 ? (
+            <div className="border border-[var(--line)] py-14 text-center">
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No police stations registered</p>
+            </div>
+          ) : stations.map(st => {
+            const draft = jurisDraft[st.id] ?? st.barangay_ids;
+            const dirty = draft.slice().sort().join(',') !== st.barangay_ids.slice().sort().join(',');
+            return (
+              <div key={st.id} className="border border-[var(--line)]">
+                <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+                  <div className="min-w-0">
+                    <div className="text-[11px] text-[#fff] tracking-wide truncate">{st.name}</div>
+                    <div className="text-[9px] text-[var(--text-3)] mt-0.5">
+                      {st.id} · {st.staff_count} staff · {st.barangay_ids.length} barangay{st.barangay_ids.length === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleDeleteStation(st)}
+                    title={st.staff_count ? 'Reassign its staff first' : 'Delete station'}
+                    disabled={st.staff_count > 0}
+                    className="p-2 border border-[var(--critical)]/30 text-[var(--critical)] disabled:opacity-25 hover:bg-[var(--critical)]/10 transition-colors shrink-0"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+
+                <div className="p-4">
+                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
+                    Jurisdiction — barangays this station can see
+                  </div>
+                  {allLocations.length === 0 ? (
+                    <p className="text-[10px] text-[var(--text-3)]">No barangays registered yet.</p>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-px border border-[var(--panel-2)]">
+                      {allLocations.map(loc => {
+                        const on = draft.includes(loc.id);
+                        return (
+                          <label
+                            key={loc.id}
+                            className="flex items-center justify-between px-3 py-2 cursor-pointer bg-[var(--panel)] hover:bg-[var(--panel-2)] transition-colors"
+                          >
+                            <span className="text-[10px] text-[var(--text)] truncate">
+                              {loc.id}
+                              {loc.status !== 'approved' && (
+                                <span className="text-[var(--warn)] ml-1.5">({loc.status})</span>
+                              )}
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              onChange={() => toggleJurisdiction(st, loc.id)}
+                              className="w-3.5 h-3.5"
+                              style={{ accentColor: 'var(--accent)' }}
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {dirty && (
+                    <div className="flex items-center justify-end gap-2 mt-3">
+                      <button
+                        onClick={() => setJurisDraft(d => { const n = { ...d }; delete n[st.id]; return n; })}
+                        className="px-3 py-1.5 border border-[var(--line)] text-[9px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:bg-[var(--panel-2)] transition-colors"
+                      >
+                        Discard
+                      </button>
+                      <button
+                        onClick={() => saveJurisdiction(st)}
+                        disabled={stationBusy}
+                        className="px-3 py-1.5 bg-[var(--accent)] text-[#fff] text-[9px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90 flex items-center gap-1.5"
+                      >
+                        <Save size={10} /> Save jurisdiction
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -822,7 +1055,7 @@ function TabButton({ icon, label, active, onClick, badge }: any) {
 }
 
 function SeatChip({ user, code }: { user?: ManagedUser; code: string }) {
-  const style = ROLE_STYLES[code === 'PD' ? 'PRECINCT_CAPTAIN' : 'BARANGAY_CAPTAIN'];
+  const style = ROLE_STYLES[code === 'PD' ? 'PNP_ADMIN' : 'BARANGAY_ADMIN'];
   if (!user) {
     return (
       <span className="flex items-center gap-1.5 text-[9px] px-2 py-1 border border-dashed border-[var(--line)] text-[var(--text-3)] uppercase tracking-wide">

@@ -339,8 +339,8 @@ const fetchCameras = async (userObj: any) => {
   if (!currentUser) return <div className="min-h-screen" style={{ background: 'var(--bg)' }} />;
 
   const pendingAlerts = alerts.filter(a => a.status === 'pending');
-  const isPolice = currentUser.role === 'POLICE' || currentUser.role === 'PRECINCT_CAPTAIN';
-  const isBarangay = currentUser.role === 'BARANGAY' || currentUser.role === 'BARANGAY_CAPTAIN';
+  const isPolice = currentUser.role === 'PNP_OFFICER' || currentUser.role === 'PNP_ADMIN';
+  const isBarangay = currentUser.role === 'BARANGAY_STAFF' || currentUser.role === 'BARANGAY_ADMIN';
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden" style={{ background: 'var(--bg)', color: 'var(--text)' }}>
@@ -464,7 +464,7 @@ const fetchCameras = async (userObj: any) => {
                 <NavItem label="Hardware" icon={<Zap size={16} />} active={activeTab === 'health'} onClick={() => setActiveTab('health')} />
               </>
             )}
-            {(currentUser.role === 'PRECINCT_CAPTAIN' || currentUser.role === 'BARANGAY_CAPTAIN') && (
+            {(currentUser.role === 'PNP_ADMIN' || currentUser.role === 'BARANGAY_ADMIN') && (
               <>
                 <NavSectionLabel>Administration</NavSectionLabel>
                 <NavItem label="Personnel" icon={<Users size={16} />} active={activeTab === 'manage-users'} onClick={() => setActiveTab('manage-users')} />

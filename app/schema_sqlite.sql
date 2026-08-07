@@ -25,27 +25,63 @@ CREATE TABLE IF NOT EXISTS barangays (
     approved_at  TEXT
 );
 
+-- ── ORGANIZATIONS ────────────────────────────────────────────────────────
+-- See schema_final.sql for the full rationale. Short version: a barangay IS
+-- one place, a police station COVERS many, and that asymmetry is why the old
+-- one-PRECINCT_CAPTAIN-per-barangay index was wrong.
+--
+-- OWNERSHIP RULE: cameras, incidents, video_records and telemetry_readings
+-- hang off barangays and only barangays. A station owns no assets --
+-- station_barangays is a lens granting visibility, not a parent link.
+CREATE TABLE IF NOT EXISTS police_stations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS station_barangays (
+    station_id  TEXT NOT NULL REFERENCES police_stations(id) ON DELETE CASCADE,
+    barangay_id TEXT NOT NULL REFERENCES barangays(id)       ON DELETE CASCADE,
+    PRIMARY KEY (station_id, barangay_id)
+);
+CREATE INDEX IF NOT EXISTS idx_station_barangays_barangay
+    ON station_barangays(barangay_id);
+
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     username        TEXT UNIQUE NOT NULL,
     password        TEXT NOT NULL,
     role            TEXT NOT NULL CHECK (role IN
-                        ('DEVTEAM','PRECINCT_CAPTAIN','BARANGAY_CAPTAIN','POLICE','BARANGAY')),
+                        ('DEVTEAM','PNP_ADMIN','PNP_OFFICER','BARANGAY_ADMIN','BARANGAY_STAFF')),
     barangay_id     TEXT REFERENCES barangays(id) ON DELETE RESTRICT,
+    station_id      TEXT REFERENCES police_stations(id) ON DELETE RESTRICT,
     assignment      TEXT NOT NULL DEFAULT '',
     parent_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_active       INTEGER NOT NULL DEFAULT 1,
     display_title   TEXT,
-    is_sub_admin    INTEGER NOT NULL DEFAULT 0
+    is_sub_admin    INTEGER NOT NULL DEFAULT 0,
+
+    -- Scope as a database invariant. SQLite enforces CHECK the same as
+    -- Postgres here, so a malformed user is rejected on both backends
+    -- rather than only on the "real" one.
+    CONSTRAINT chk_user_scope CHECK (
+         (role IN ('BARANGAY_ADMIN','BARANGAY_STAFF')
+            AND barangay_id IS NOT NULL AND station_id IS NULL)
+      OR (role IN ('PNP_ADMIN','PNP_OFFICER')
+            AND station_id  IS NOT NULL AND barangay_id IS NULL)
+      OR (role = 'DEVTEAM'
+            AND barangay_id IS NULL AND station_id IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_users_parent ON users(parent_admin_id);
 CREATE INDEX IF NOT EXISTS idx_users_barangay ON users(barangay_id);
+CREATE INDEX IF NOT EXISTS idx_users_station ON users(station_id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_one_precinct_captain_per_barangay
-    ON users(barangay_id) WHERE role = 'PRECINCT_CAPTAIN';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_one_barangay_captain_per_barangay
-    ON users(barangay_id) WHERE role = 'BARANGAY_CAPTAIN';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_barangay_admin_per_barangay
+    ON users(barangay_id) WHERE role = 'BARANGAY_ADMIN';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pnp_admin_per_station
+    ON users(station_id) WHERE role = 'PNP_ADMIN';
 
 CREATE TABLE IF NOT EXISTS permission_keys (
     key     TEXT PRIMARY KEY,

@@ -17,7 +17,7 @@ export type Camera = {
   status: 'online' | 'offline';
 };
 
-export type UserRole = 'DEVTEAM' | 'PRECINCT_CAPTAIN' | 'POLICE' | 'BARANGAY_CAPTAIN' | 'BARANGAY';
+export type UserRole = 'DEVTEAM' | 'PNP_ADMIN' | 'PNP_OFFICER' | 'BARANGAY_ADMIN' | 'BARANGAY_STAFF';
 
 export type User = {
   id: number;
@@ -29,8 +29,10 @@ export type User = {
   permissions?: Record<string, boolean>;
 };
 
-export const ADMIN_ROLES: UserRole[] = ['PRECINCT_CAPTAIN', 'BARANGAY_CAPTAIN'];
-export const STANDARD_ROLES: UserRole[] = ['POLICE', 'BARANGAY'];
+export const ADMIN_ROLES: UserRole[] = ['PNP_ADMIN', 'BARANGAY_ADMIN'];
+export const STANDARD_ROLES: UserRole[] = ['PNP_OFFICER', 'BARANGAY_STAFF'];
+export const PNP_ROLES: UserRole[] = ['PNP_ADMIN', 'PNP_OFFICER'];
+export const BARANGAY_ROLES: UserRole[] = ['BARANGAY_ADMIN', 'BARANGAY_STAFF'];
 
 export type Telemetry = {
   battery: number;
