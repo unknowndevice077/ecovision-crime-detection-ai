@@ -27,10 +27,10 @@ const CREATABLE_ROLES = [
 // Two operating branches, distinguished the way a dispatch board would:
 // a callsign-style two-letter code and a single accent, nothing more.
 const ROLE_STYLES: Record<string, { code: string; text: string; border: string; bg: string; barText: string }> = {
-  PRECINCT_CAPTAIN: { code: 'PD', text: 'text-[#8FA8D9]', border: 'border-[#8FA8D9]/25', bg: 'bg-[#8FA8D9]/[0.07]', barText: 'text-[#8FA8D9]' },
-  BARANGAY_CAPTAIN: { code: 'BG', text: 'text-[#6FBF8F]', border: 'border-[#6FBF8F]/25', bg: 'bg-[#6FBF8F]/[0.07]', barText: 'text-[#6FBF8F]' },
-  POLICE: { code: 'PD', text: 'text-[#8FA8D9]/70', border: 'border-[#8FA8D9]/15', bg: 'bg-[#8FA8D9]/[0.04]', barText: 'text-[#8FA8D9]/70' },
-  BARANGAY: { code: 'BG', text: 'text-[#6FBF8F]/70', border: 'border-[#6FBF8F]/15', bg: 'bg-[#6FBF8F]/[0.04]', barText: 'text-[#6FBF8F]/70' },
+  PRECINCT_CAPTAIN: { code: 'PD', text: 'text-[var(--accent)]', border: 'border-[var(--accent)]/25', bg: 'bg-[var(--accent)]/[0.07]', barText: 'text-[var(--accent)]' },
+  BARANGAY_CAPTAIN: { code: 'BG', text: 'text-[var(--ok)]', border: 'border-[var(--ok)]/25', bg: 'bg-[var(--ok)]/[0.07]', barText: 'text-[var(--ok)]' },
+  POLICE: { code: 'PD', text: 'text-[var(--accent)]/70', border: 'border-[var(--accent)]/15', bg: 'bg-[var(--accent)]/[0.04]', barText: 'text-[var(--accent)]/70' },
+  BARANGAY: { code: 'BG', text: 'text-[var(--ok)]/70', border: 'border-[var(--ok)]/15', bg: 'bg-[var(--ok)]/[0.04]', barText: 'text-[var(--ok)]/70' },
 };
 
 function authHeaders() {
@@ -308,10 +308,10 @@ export default function DevteamView() {
 
   if (isLoading) {
     return (
-      <div className="fixed inset-0 bg-[#111214] flex items-center justify-center font-mono">
+      <div className="fixed inset-0 bg-[var(--bg)] flex items-center justify-center font-mono">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-8 h-8 border border-[#2B2D31] border-t-[#8FA8D9] animate-spin" />
-          <span className="text-[10px] tracking-[0.25em] text-[#6B6D73] uppercase">Establishing link</span>
+          <div className="w-8 h-8 border border-[var(--line)] border-t-[var(--accent)] animate-spin" />
+          <span className="text-[10px] tracking-[0.25em] text-[var(--text-2)] uppercase">Establishing link</span>
         </div>
       </div>
     );
@@ -319,10 +319,10 @@ export default function DevteamView() {
 
   if (!data || loadFailed) {
     return (
-      <div className="fixed inset-0 bg-[#111214] flex flex-col items-center justify-center gap-4 font-mono">
-        <ShieldAlert size={22} className="text-[#D9756A]" />
-        <span className="text-[10px] tracking-[0.25em] text-[#D9756A] uppercase">Console link failed</span>
-        <button onClick={fetchOverview} className="mt-1 px-5 py-2 border border-[#D9756A]/40 hover:border-[#D9756A] text-[10px] tracking-[0.2em] uppercase text-[#D9756A] transition-colors">
+      <div className="fixed inset-0 bg-[var(--bg)] flex flex-col items-center justify-center gap-4 font-mono">
+        <ShieldAlert size={22} className="text-[var(--critical)]" />
+        <span className="text-[10px] tracking-[0.25em] text-[var(--critical)] uppercase">Console link failed</span>
+        <button onClick={fetchOverview} className="mt-1 px-5 py-2 border border-[var(--critical)]/40 hover:border-[var(--critical)] text-[10px] tracking-[0.2em] uppercase text-[var(--critical)] transition-colors">
           Retry connection
         </button>
       </div>
@@ -330,45 +330,45 @@ export default function DevteamView() {
   }
 
   return (
-    <div className="fixed inset-0 bg-[#111214] text-[#C4C6CC] flex flex-col overflow-hidden z-40 font-mono">
+    <div className="fixed inset-0 bg-[var(--bg)] text-[var(--text)] flex flex-col overflow-hidden z-40 font-mono">
       {/* HEADER — dispatch console strip, not a hero */}
-      <div className="relative flex items-center justify-between px-7 py-4 shrink-0 border-b border-[#2B2D31]">
+      <div className="relative flex items-center justify-between px-7 py-4 shrink-0 border-b border-[var(--line)]">
         <div className="flex items-center gap-3">
-          <div className="p-1.5 border border-[#8FA8D9]/30 bg-[#8FA8D9]/10">
-            <Radio size={14} className="text-[#8FA8D9]" />
+          <div className="p-1.5 border border-[var(--accent)]/30 bg-[var(--accent)]/10">
+            <Radio size={14} className="text-[var(--accent)]" />
           </div>
           <div className="leading-tight">
-            <h1 className="text-[11px] tracking-[0.2em] uppercase text-[#F0F1F3]">Oversight Console</h1>
-            <p className="text-[9px] tracking-[0.15em] text-[#6B6D73] uppercase">All locations &middot; full authority</p>
+            <h1 className="text-[11px] tracking-[0.2em] uppercase text-[#fff]">Oversight Console</h1>
+            <p className="text-[9px] tracking-[0.15em] text-[var(--text-2)] uppercase">All locations &middot; full authority</p>
           </div>
         </div>
         <div className="flex items-center gap-5">
-          <div className={`flex items-center gap-1.5 text-[9px] tracking-[0.15em] uppercase ${connected ? 'text-[#6FBF8F]' : 'text-[#D9756A]'}`}>
+          <div className={`flex items-center gap-1.5 text-[9px] tracking-[0.15em] uppercase ${connected ? 'text-[var(--ok)]' : 'text-[var(--critical)]'}`}>
             {connected ? <Wifi size={11} /> : <WifiOff size={11} />} {connected ? 'Synced' : 'Reconnecting'}
           </div>
-          <button onClick={handleLogout} className="flex items-center gap-1.5 text-[9px] tracking-[0.15em] uppercase text-[#6B6D73] hover:text-[#D9756A] transition-colors">
+          <button onClick={handleLogout} className="flex items-center gap-1.5 text-[9px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--critical)] transition-colors">
             <LogOut size={12} /> Sign out
           </button>
         </div>
       </div>
 
       {toast && (
-        <div className="shrink-0 text-[10px] tracking-[0.1em] text-[#8FA8D9] border-b border-[#2B2D31] bg-[#8FA8D9]/[0.04] px-7 py-1.5">
+        <div className="shrink-0 text-[10px] tracking-[0.1em] text-[var(--accent)] border-b border-[var(--line)] bg-[var(--accent)]/[0.04] px-7 py-1.5">
           &gt; {toast}
         </div>
       )}
 
       {/* STAT STRIP — inline ledger, not cards */}
-      <div className="shrink-0 flex items-stretch border-b border-[#2B2D31] px-7">
+      <div className="shrink-0 flex items-stretch border-b border-[var(--line)] px-7">
         <StatCell icon={<Users2 size={13} />} label="Users" val={data.totals.users} />
         <StatCell icon={<ShieldAlert size={13} />} label="Incidents" val={data.totals.incidents} />
-        <StatCell icon={<Activity size={13} />} label="Active" val={data.totals.active_incidents} accent="text-[#D9756A]" />
+        <StatCell icon={<Activity size={13} />} label="Active" val={data.totals.active_incidents} accent="text-[var(--critical)]" />
         <StatCell icon={<Video size={13} />} label="Cameras" val={data.totals.cameras} />
         <StatCell icon={<Film size={13} />} label="Records" val={data.totals.video_records} last />
       </div>
 
       {/* TABS */}
-      <div className="shrink-0 flex items-center gap-1 px-7 border-b border-[#2B2D31]">
+      <div className="shrink-0 flex items-center gap-1 px-7 border-b border-[var(--line)]">
         <TabButton icon={<LayoutGrid size={12} />} label="Directory" active={tab === 'directory'} onClick={() => setTab('directory')} />
         <TabButton
           icon={<ClipboardList size={12} />}
@@ -384,19 +384,19 @@ export default function DevteamView() {
       {/* ================= DIRECTORY TAB ================= */}
       {tab === 'directory' && (
         <div className="flex-1 min-h-0 grid grid-cols-12 gap-0 px-7 pb-7 pt-4">
-          <div className="col-span-4 flex flex-col border border-[#2B2D31] border-r-0">
-            <div className="px-3 py-2.5 border-b border-[#2B2D31] flex items-center gap-2">
-              <Search size={12} className="text-[#6B6D73] shrink-0" />
+          <div className="col-span-4 flex flex-col border border-[var(--line)] border-r-0">
+            <div className="px-3 py-2.5 border-b border-[var(--line)] flex items-center gap-2">
+              <Search size={12} className="text-[var(--text-2)] shrink-0" />
               <input
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder="search callsign or location"
-                className="bg-transparent text-[11px] text-[#F0F1F3] outline-none w-full placeholder:text-[#4A4C50]"
+                className="bg-transparent text-[11px] text-[#fff] outline-none w-full placeholder:text-[var(--text-3)]"
               />
             </div>
             <div className="flex-1 overflow-y-auto custom-scrollbar">
               {admins.length === 0 ? (
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50] text-center py-10">No matching admins</p>
+                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching admins</p>
               ) : admins.map(a => {
                 const count = (childrenByAdmin.get(a.id) || []).length;
                 const active = selectedAdmin?.id === a.id;
@@ -405,44 +405,44 @@ export default function DevteamView() {
                   <button
                     key={a.id}
                     onClick={() => setSelectedAdminId(a.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left border-b border-[#1E2023] transition-colors ${active ? 'bg-[#18191C]' : 'hover:bg-[#151517]'}`}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left border-b border-[var(--panel-2)] transition-colors ${active ? 'bg-[var(--panel)]' : 'hover:bg-[var(--panel)]'}`}
                   >
                     <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{style.code}</span>
                     <div className="min-w-0 flex-1">
-                      <p className={`text-[11px] truncate ${active ? 'text-[#F0F1F3]' : 'text-[#C4C6CC]'}`}>{a.username}</p>
-                      <p className="text-[9px] text-[#6B6D73] truncate">{a.barangay_id} &middot; {count} sub-account{count === 1 ? '' : 's'}</p>
+                      <p className={`text-[11px] truncate ${active ? 'text-[#fff]' : 'text-[var(--text)]'}`}>{a.username}</p>
+                      <p className="text-[9px] text-[var(--text-2)] truncate">{a.barangay_id} &middot; {count} sub-account{count === 1 ? '' : 's'}</p>
                     </div>
-                    {active && <span className="w-1 h-1 rounded-full bg-[#8FA8D9] shrink-0" />}
+                    {active && <span className="w-1 h-1 rounded-full bg-[var(--accent)] shrink-0" />}
                   </button>
                 );
               })}
             </div>
           </div>
 
-          <div className="col-span-8 border border-[#2B2D31] overflow-y-auto custom-scrollbar">
+          <div className="col-span-8 border border-[var(--line)] overflow-y-auto custom-scrollbar">
             {!selectedAdmin ? (
               <div className="h-full flex items-center justify-center">
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50]">Select an admin from the directory</p>
+                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">Select an admin from the directory</p>
               </div>
             ) : (
               <div className="p-6">
-                <div className="flex items-start justify-between mb-6 pb-5 border-b border-[#1E2023]">
+                <div className="flex items-start justify-between mb-6 pb-5 border-b border-[var(--panel-2)]">
                   <div className="flex items-center gap-4">
                     <span className={`text-[10px] font-bold px-2 py-1.5 border ${ROLE_STYLES[selectedAdmin.role].border} ${ROLE_STYLES[selectedAdmin.role].text}`}>
                       {ROLE_STYLES[selectedAdmin.role].code}
                     </span>
                     <div>
-                      <h2 className="text-[13px] text-[#F0F1F3] tracking-wide">{selectedAdmin.username}</h2>
-                      <p className="text-[10px] text-[#6B6D73] mt-1 flex items-center gap-1 tracking-wide">
+                      <h2 className="text-[13px] text-[#fff] tracking-wide">{selectedAdmin.username}</h2>
+                      <p className="text-[10px] text-[var(--text-2)] mt-1 flex items-center gap-1 tracking-wide">
                         <MapPinned size={10} /> {selectedAdmin.assignment} &middot; {selectedAdmin.barangay_id}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button onClick={() => openEdit(selectedAdmin)} className="flex items-center gap-1.5 px-3 py-1.5 border border-[#2B2D31] hover:border-[#8FA8D9]/40 text-[#6B6D73] hover:text-[#8FA8D9] transition-colors text-[9px] tracking-[0.15em] uppercase">
+                    <button onClick={() => openEdit(selectedAdmin)} className="flex items-center gap-1.5 px-3 py-1.5 border border-[var(--line)] hover:border-[var(--accent)]/40 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors text-[9px] tracking-[0.15em] uppercase">
                       <Pencil size={11} /> Edit
                     </button>
-                    <button onClick={() => handleDelete(selectedAdmin)} className="flex items-center gap-1.5 px-3 py-1.5 border border-[#2B2D31] hover:border-[#D9756A]/40 text-[#6B6D73] hover:text-[#D9756A] transition-colors text-[9px] tracking-[0.15em] uppercase">
+                    <button onClick={() => handleDelete(selectedAdmin)} className="flex items-center gap-1.5 px-3 py-1.5 border border-[var(--line)] hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors text-[9px] tracking-[0.15em] uppercase">
                       <Trash2 size={11} /> Remove
                     </button>
                   </div>
@@ -454,42 +454,42 @@ export default function DevteamView() {
                   const pair = locationPairs.find(p => p.loc === selectedAdmin.barangay_id);
                   const counterpart = selectedAdmin.role === 'PRECINCT_CAPTAIN' ? pair?.barangay : pair?.precinct;
                   return (
-                    <div className="mb-6 flex items-center gap-3 px-3 py-2.5 border border-dashed border-[#2B2D31]">
-                      <span className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] shrink-0">Connected at {selectedAdmin.barangay_id}</span>
+                    <div className="mb-6 flex items-center gap-3 px-3 py-2.5 border border-dashed border-[var(--line)]">
+                      <span className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] shrink-0">Connected at {selectedAdmin.barangay_id}</span>
                       {counterpart ? (
                         <span className={`text-[10px] px-2 py-0.5 border ${ROLE_STYLES[counterpart.role].border} ${ROLE_STYLES[counterpart.role].text}`}>
                           {ROLE_STYLES[counterpart.role].code} &middot; {counterpart.username}
                         </span>
                       ) : (
-                        <span className="text-[9px] text-[#4A4C50] uppercase tracking-wide">No counterpart yet — vacant</span>
+                        <span className="text-[9px] text-[var(--text-3)] uppercase tracking-wide">No counterpart yet — vacant</span>
                       )}
                     </div>
                   );
                 })()}
 
                 <div className="flex items-center gap-2 mb-3">
-                  <Users2 size={11} className="text-[#6B6D73]" />
-                  <span className="text-[9px] tracking-[0.2em] uppercase text-[#6B6D73]">Sub-accounts &middot; {selectedChildren.length}</span>
+                  <Users2 size={11} className="text-[var(--text-2)]" />
+                  <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text-2)]">Sub-accounts &middot; {selectedChildren.length}</span>
                 </div>
 
                 {selectedChildren.length === 0 ? (
-                  <div className="border border-dashed border-[#2B2D31] py-10 text-center">
-                    <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50]">No sub-accounts created by this admin yet</p>
+                  <div className="border border-dashed border-[var(--line)] py-10 text-center">
+                    <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No sub-accounts created by this admin yet</p>
                   </div>
                 ) : (
-                  <div className="border border-[#1E2023] divide-y divide-[#1E2023]">
+                  <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
                     {selectedChildren.map(c => {
                       const style = ROLE_STYLES[c.role] || ROLE_STYLES.POLICE;
                       return (
                         <div key={c.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(c.id) ? 'opacity-40' : ''}`}>
                           <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{style.code}</span>
                           <div className="min-w-0 flex-1">
-                            <p className="text-[11px] text-[#F0F1F3] truncate">{c.username}</p>
-                            <p className="text-[9px] text-[#6B6D73] truncate">{c.assignment}</p>
+                            <p className="text-[11px] text-[#fff] truncate">{c.username}</p>
+                            <p className="text-[9px] text-[var(--text-2)] truncate">{c.assignment}</p>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
-                            <button onClick={() => openEdit(c)} className="p-1.5 text-[#6B6D73] hover:text-[#8FA8D9] transition-colors"><Pencil size={12} /></button>
-                            <button onClick={() => handleDelete(c)} className="p-1.5 text-[#6B6D73] hover:text-[#D9756A] transition-colors"><Trash2 size={12} /></button>
+                            <button onClick={() => openEdit(c)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
+                            <button onClick={() => handleDelete(c)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
                           </div>
                         </div>
                       );
@@ -505,18 +505,18 @@ export default function DevteamView() {
       {/* ================= APPROVALS TAB ================= */}
       {tab === 'approvals' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
-          <div className="border border-[#2B2D31]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#2B2D31] bg-[#8FA8D9]/[0.03]">
-              <UserCheck size={12} className="text-[#8FA8D9]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[#8FA8D9]">Awaiting verification</span>
-              <span className="ml-auto text-[9px] text-[#8FA8D9]/70">{pendingLocations.length} pending</span>
+          <div className="border border-[var(--line)]">
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+              <UserCheck size={12} className="text-[var(--accent)]" />
+              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--accent)]">Awaiting verification</span>
+              <span className="ml-auto text-[9px] text-[var(--accent)]/70">{pendingLocations.length} pending</span>
             </div>
             {pendingLocations.length === 0 ? (
               <div className="py-14 text-center">
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50]">No captain signups waiting on review</p>
+                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No captain signups waiting on review</p>
               </div>
             ) : (
-              <div className="divide-y divide-[#1E2023]">
+              <div className="divide-y divide-[var(--panel-2)]">
                 {pendingLocations.map(loc => {
                   const busy = pendingActionIds.has(loc.id);
                   const roleMeta = ROLE_STYLES[loc.requester_role || ''] || ROLE_STYLES.POLICE;
@@ -525,15 +525,15 @@ export default function DevteamView() {
                       <div className="flex items-center gap-3 min-w-0">
                         <span className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${roleMeta.border} ${roleMeta.text}`}>{roleMeta.code}</span>
                         <div className="min-w-0">
-                          <p className="text-[11px] text-[#F0F1F3] truncate">{loc.requester_username} <span className="text-[#6B6D73]">requests</span> {loc.name}</p>
-                          <p className="text-[9px] text-[#6B6D73] flex items-center gap-1">
+                          <p className="text-[11px] text-[#fff] truncate">{loc.requester_username} <span className="text-[var(--text-2)]">requests</span> {loc.name}</p>
+                          <p className="text-[9px] text-[var(--text-2)] flex items-center gap-1">
                             <MapPinned size={9} /> {loc.requester_role} &middot; {loc.requester_assignment} &middot; {new Date(loc.created_at).toLocaleDateString()}
                           </p>
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
-                        <button onClick={() => handleApproval(loc.id, 'reject')} className="p-1.5 border border-transparent hover:border-[#D9756A]/40 text-[#6B6D73] hover:text-[#D9756A] transition-colors"><ShieldX size={13} /></button>
-                        <button onClick={() => handleApproval(loc.id, 'approve')} className="p-1.5 border border-transparent hover:border-[#6FBF8F]/40 text-[#6B6D73] hover:text-[#6FBF8F] transition-colors"><ShieldCheck size={13} /></button>
+                        <button onClick={() => handleApproval(loc.id, 'reject')} className="p-1.5 border border-transparent hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={13} /></button>
+                        <button onClick={() => handleApproval(loc.id, 'approve')} className="p-1.5 border border-transparent hover:border-[var(--ok)]/40 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={13} /></button>
                       </div>
                     </div>
                   );
@@ -542,19 +542,19 @@ export default function DevteamView() {
             )}
           </div>
 
-          <div className="mt-6 border border-[#2B2D31]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#2B2D31]">
-              <MapPinned size={12} className="text-[#6B6D73]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[#6B6D73]">Locations &amp; their two captain seats</span>
+          <div className="mt-6 border border-[var(--line)]">
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)]">
+              <MapPinned size={12} className="text-[var(--text-2)]" />
+              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text-2)]">Locations &amp; their two captain seats</span>
             </div>
-            <div className="divide-y divide-[#1E2023]">
+            <div className="divide-y divide-[var(--panel-2)]">
               {locationPairs.length === 0 ? (
                 <div className="py-10 text-center">
-                  <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50]">No locations with captains yet</p>
+                  <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No locations with captains yet</p>
                 </div>
               ) : locationPairs.map(p => (
                 <div key={p.loc} className="flex items-center gap-4 px-4 py-3">
-                  <span className="text-[10px] text-[#F0F1F3] w-28 shrink-0 truncate uppercase tracking-wide">{p.loc}</span>
+                  <span className="text-[10px] text-[#fff] w-28 shrink-0 truncate uppercase tracking-wide">{p.loc}</span>
                   <SeatChip user={p.precinct} code="PD" />
                   <SeatChip user={p.barangay} code="BG" />
                 </div>
@@ -567,12 +567,12 @@ export default function DevteamView() {
       {/* ================= CREATE USER TAB ================= */}
       {tab === 'create' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
-          <div className="max-w-2xl border border-[#2B2D31] p-6">
+          <div className="max-w-2xl border border-[var(--line)] p-6">
             <div className="flex items-center gap-2 mb-1">
-              <UserPlus size={13} className="text-[#8FA8D9]" />
-              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[#F0F1F3]">Create account — any role</h2>
+              <UserPlus size={13} className="text-[var(--accent)]" />
+              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[#fff]">Create account — any role</h2>
             </div>
-            <p className="text-[9px] text-[#6B6D73] tracking-wide mb-5">
+            <p className="text-[9px] text-[var(--text-2)] tracking-wide mb-5">
               Skips the self-signup approval queue. Connects the account to a location and grants permissions from the same tree admins use.
             </p>
 
@@ -584,10 +584,10 @@ export default function DevteamView() {
                   <button
                     key={r.role}
                     onClick={() => setCreateForm({ ...createForm, role: r.role, parent_admin_id: '' })}
-                    className={`flex items-center gap-2.5 px-3 py-2.5 border text-left transition-colors ${active ? `${style.border} ${style.bg}` : 'border-[#2B2D31] hover:border-[#3A3C40]'}`}
+                    className={`flex items-center gap-2.5 px-3 py-2.5 border text-left transition-colors ${active ? `${style.border} ${style.bg}` : 'border-[var(--line)] hover:border-[var(--line-2)]'}`}
                   >
                     <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text}`}>{r.code}</span>
-                    <span className={`text-[10px] tracking-wide uppercase ${active ? style.text : 'text-[#C4C6CC]'}`}>{r.label}</span>
+                    <span className={`text-[10px] tracking-wide uppercase ${active ? style.text : 'text-[var(--text)]'}`}>{r.label}</span>
                   </button>
                 );
               })}
@@ -603,28 +603,28 @@ export default function DevteamView() {
             </div>
 
             <div className="mb-3 relative">
-              <label className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] mb-1 block">Location — connects this account to one barangay/precinct</label>
+              <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Location — connects this account to one barangay/precinct</label>
               <button
                 type="button"
                 onClick={() => setLocPickerOpen(o => !o)}
-                className="w-full bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none flex items-center justify-between transition-colors"
+                className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none flex items-center justify-between transition-colors"
               >
-                <span className={createForm.barangay_id ? '' : 'text-[#4A4C50]'}>{createForm.barangay_id || 'select or type a location id'}</span>
-                <ChevronDown size={12} className="text-[#6B6D73]" />
+                <span className={createForm.barangay_id ? '' : 'text-[var(--text-3)]'}>{createForm.barangay_id || 'select or type a location id'}</span>
+                <ChevronDown size={12} className="text-[var(--text-2)]" />
               </button>
               <input
                 value={createForm.barangay_id}
                 onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
                 placeholder="type to create a new location id, e.g. 'cogon'"
-                className="w-full mt-2 bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none placeholder:text-[#4A4C50] transition-colors"
+                className="w-full mt-2 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
               />
               {locPickerOpen && knownLocationIds.length > 0 && (
-                <div className="mt-1 border border-[#2B2D31] bg-[#151517] max-h-32 overflow-y-auto custom-scrollbar">
+                <div className="mt-1 border border-[var(--line)] bg-[var(--panel)] max-h-32 overflow-y-auto custom-scrollbar">
                   {knownLocationIds.map(loc => (
                     <button
                       key={loc}
                       onClick={() => { setCreateForm({ ...createForm, barangay_id: loc }); setLocPickerOpen(false); }}
-                      className="w-full text-left px-3 py-1.5 text-[10px] text-[#C4C6CC] hover:bg-[#1E2023] hover:text-[#F0F1F3] transition-colors"
+                      className="w-full text-left px-3 py-1.5 text-[10px] text-[var(--text)] hover:bg-[var(--panel-2)] hover:text-[#fff] transition-colors"
                     >
                       {loc}
                     </button>
@@ -635,11 +635,11 @@ export default function DevteamView() {
 
             {(createForm.role === 'POLICE' || createForm.role === 'BARANGAY') && (
               <div className="mb-4">
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] mb-1 block">Reports to (optional — auto-attaches to the location's captain if left blank)</label>
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Reports to (optional — auto-attaches to the location's captain if left blank)</label>
                 <select
                   value={createForm.parent_admin_id}
                   onChange={e => setCreateForm({ ...createForm, parent_admin_id: e.target.value })}
-                  className="w-full bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
                 >
                   <option value="">Auto-attach to location captain</option>
                   {eligibleParents.map(p => (
@@ -649,19 +649,19 @@ export default function DevteamView() {
               </div>
             )}
 
-            <div className="mb-5 pt-4 border-t border-[#1E2023]">
-              <div className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] flex items-center gap-1.5 mb-2">
+            <div className="mb-5 pt-4 border-t border-[var(--panel-2)]">
+              <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
                 <KeyRound size={10} /> Permissions — same tree used everywhere else
               </div>
-              <div className="border border-[#1E2023] divide-y divide-[#1E2023]">
+              <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
                 {PERMISSION_KEYS.map(p => (
-                  <label key={p.key} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#151517] transition-colors">
-                    <span className="text-[10px] text-[#C4C6CC]">{p.label}</span>
+                  <label key={p.key} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel)] transition-colors">
+                    <span className="text-[10px] text-[var(--text)]">{p.label}</span>
                     <input
                       type="checkbox"
                       checked={!!createPerms[p.key]}
                       onChange={e => setCreatePerms({ ...createPerms, [p.key]: e.target.checked })}
-                      className="w-3.5 h-3.5 accent-[#8FA8D9]"
+                      className="w-3.5 h-3.5 accent-[var(--accent)]"
                     />
                   </label>
                 ))}
@@ -669,13 +669,13 @@ export default function DevteamView() {
             </div>
 
             {createError && (
-              <p className="text-[10px] text-[#D9756A] uppercase tracking-wide mb-3">{createError}</p>
+              <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide mb-3">{createError}</p>
             )}
 
             <button
               onClick={handleCreateUser}
               disabled={createBusy}
-              className="w-full py-2.5 bg-[#8FA8D9] text-[#0A0A0B] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[#A3BAE3] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+              className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
             >
               <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
             </button>
@@ -687,31 +687,31 @@ export default function DevteamView() {
       {tab === 'cameras' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-6">
           {camerasByLocation.length === 0 ? (
-            <div className="border border-[#2B2D31] py-14 text-center">
-              <p className="text-[10px] tracking-[0.15em] uppercase text-[#4A4C50]">No cameras registered at any location yet</p>
+            <div className="border border-[var(--line)] py-14 text-center">
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No cameras registered at any location yet</p>
             </div>
           ) : camerasByLocation.map(group => (
-            <div key={group.loc} className="border border-[#2B2D31]">
-              <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[#2B2D31] bg-[#8FA8D9]/[0.03]">
+            <div key={group.loc} className="border border-[var(--line)]">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
                 <div className="flex items-center gap-2">
-                  <MapPinned size={12} className="text-[#8FA8D9]" />
-                  <span className="text-[10px] tracking-[0.15em] uppercase text-[#F0F1F3]">{group.loc}</span>
-                  <span className="text-[9px] text-[#6B6D73]">&middot; {group.cameras.length} camera{group.cameras.length === 1 ? '' : 's'}</span>
+                  <MapPinned size={12} className="text-[var(--accent)]" />
+                  <span className="text-[10px] tracking-[0.15em] uppercase text-[#fff]">{group.loc}</span>
+                  <span className="text-[9px] text-[var(--text-2)]">&middot; {group.cameras.length} camera{group.cameras.length === 1 ? '' : 's'}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <SeatChip user={group.precinct} code="PD" />
                   <SeatChip user={group.barangay} code="BG" />
                 </div>
               </div>
-              <div className="divide-y divide-[#1E2023]">
+              <div className="divide-y divide-[var(--panel-2)]">
                 {group.cameras.map(cam => (
                   <div key={cam.id} className="flex items-center gap-3 px-4 py-2.5">
-                    <Video size={12} className={cam.status === 'online' ? 'text-[#6FBF8F]' : 'text-[#D9756A]'} />
+                    <Video size={12} className={cam.status === 'online' ? 'text-[var(--ok)]' : 'text-[var(--critical)]'} />
                     <div className="min-w-0 flex-1">
-                      <p className="text-[11px] text-[#F0F1F3] truncate">{cam.name}</p>
-                      <p className="text-[9px] text-[#6B6D73] font-mono truncate">{cam.url}</p>
+                      <p className="text-[11px] text-[#fff] truncate">{cam.name}</p>
+                      <p className="text-[9px] text-[var(--text-2)] font-mono truncate">{cam.url}</p>
                     </div>
-                    <span className={`text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border ${cam.status === 'online' ? 'border-[#6FBF8F]/25 text-[#6FBF8F]' : 'border-[#D9756A]/25 text-[#D9756A]'}`}>
+                    <span className={`text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border ${cam.status === 'online' ? 'border-[var(--ok)]/25 text-[var(--ok)]' : 'border-[var(--critical)]/25 text-[var(--critical)]'}`}>
                       {cam.status}
                     </span>
                   </div>
@@ -724,65 +724,65 @@ export default function DevteamView() {
 
       {/* EDIT + PERMISSIONS MODAL */}
       {editingUser && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[#0A0A0B]/85">
-          <div className="bg-[#18191C] border border-[#2B2D31] w-full max-w-sm p-6 max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
-            <div className="flex items-center justify-between mb-5 pb-4 border-b border-[#1E2023]">
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-sm p-6 max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
+            <div className="flex items-center justify-between mb-5 pb-4 border-b border-[var(--panel-2)]">
               <div className="flex items-center gap-2">
                 <span className={`text-[8px] font-bold px-1.5 py-1 border ${(ROLE_STYLES[editingUser.role] || ROLE_STYLES.POLICE).border} ${(ROLE_STYLES[editingUser.role] || ROLE_STYLES.POLICE).text}`}>
                   {(ROLE_STYLES[editingUser.role] || ROLE_STYLES.POLICE).code}
                 </span>
-                <span className="text-[10px] tracking-[0.15em] uppercase text-[#C4C6CC]">{editingUser.role.replace('_', ' ')}</span>
+                <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">{editingUser.role.replace('_', ' ')}</span>
               </div>
-              <button onClick={() => setEditingUser(null)}><X size={15} className="text-[#6B6D73] hover:text-[#F0F1F3]" /></button>
+              <button onClick={() => setEditingUser(null)}><X size={15} className="text-[var(--text-2)] hover:text-[#fff]" /></button>
             </div>
             <div className="space-y-3">
               <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] mb-1 block">Username</label>
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Username</label>
                 <input
                   value={editDraft.username}
                   onChange={e => setEditDraft({ ...editDraft, username: e.target.value })}
-                  className="w-full bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
                 />
               </div>
               <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] mb-1 block">Assignment</label>
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Assignment</label>
                 <input
                   value={editDraft.assignment}
                   onChange={e => setEditDraft({ ...editDraft, assignment: e.target.value })}
-                  className="w-full bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
                 />
               </div>
               <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] mb-1 block">New password</label>
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">New password</label>
                 <input
                   type="password"
                   value={editDraft.password}
                   onChange={e => setEditDraft({ ...editDraft, password: e.target.value })}
                   placeholder="leave blank to keep current"
-                  className="w-full bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none placeholder:text-[#4A4C50] transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
                 />
               </div>
 
-              <div className="pt-3 border-t border-[#1E2023]">
-                <div className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] flex items-center gap-1.5 mb-2">
+              <div className="pt-3 border-t border-[var(--panel-2)]">
+                <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
                   <KeyRound size={10} /> Permissions
                 </div>
-                <div className="border border-[#1E2023] divide-y divide-[#1E2023]">
+                <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
                   {PERMISSION_KEYS.map(p => (
-                    <label key={p.key} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#151517] transition-colors">
-                      <span className="text-[10px] text-[#C4C6CC]">{p.label}</span>
+                    <label key={p.key} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel)] transition-colors">
+                      <span className="text-[10px] text-[var(--text)]">{p.label}</span>
                       <input
                         type="checkbox"
                         checked={!!permsDraft[p.key]}
                         onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
-                        className="w-3.5 h-3.5 accent-[#8FA8D9]"
+                        className="w-3.5 h-3.5 accent-[var(--accent)]"
                       />
                     </label>
                   ))}
                 </div>
               </div>
 
-              <button onClick={saveEdit} className="w-full py-2.5 bg-[#8FA8D9] text-[#0A0A0B] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[#A3BAE3] transition-colors flex items-center justify-center gap-2 mt-2">
+              <button onClick={saveEdit} className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] transition-colors flex items-center justify-center gap-2 mt-2">
                 <Save size={12} /> Save changes
               </button>
             </div>
@@ -795,11 +795,11 @@ export default function DevteamView() {
 
 function StatCell({ icon, label, val, accent, last }: any) {
   return (
-    <div className={`flex items-center gap-2.5 py-3 pr-6 ${!last ? 'border-r border-[#1E2023] mr-6' : ''}`}>
-      <span className={accent || 'text-[#6B6D73]'}>{icon}</span>
+    <div className={`flex items-center gap-2.5 py-3 pr-6 ${!last ? 'border-r border-[var(--panel-2)] mr-6' : ''}`}>
+      <span className={accent || 'text-[var(--text-2)]'}>{icon}</span>
       <div className="leading-tight">
-        <span className={`text-[13px] font-semibold tabular-nums ${accent || 'text-[#F0F1F3]'}`}>{val}</span>
-        <p className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73]">{label}</p>
+        <span className={`text-[13px] font-semibold tabular-nums ${accent || 'text-[#fff]'}`}>{val}</span>
+        <p className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)]">{label}</p>
       </div>
     </div>
   );
@@ -810,12 +810,12 @@ function TabButton({ icon, label, active, onClick, badge }: any) {
     <button
       onClick={onClick}
       className={`flex items-center gap-2 px-4 py-2.5 text-[9px] tracking-[0.15em] uppercase border-b-2 -mb-px transition-colors ${
-        active ? 'border-[#8FA8D9] text-[#F0F1F3]' : 'border-transparent text-[#6B6D73] hover:text-[#C4C6CC]'
+        active ? 'border-[var(--accent)] text-[#fff]' : 'border-transparent text-[var(--text-2)] hover:text-[var(--text)]'
       }`}
     >
       {icon} {label}
       {typeof badge === 'number' && badge > 0 && (
-        <span className={`text-[8px] px-1.5 py-0.5 rounded-full ${active ? 'bg-[#8FA8D9] text-[#0A0A0B]' : 'bg-[#2B2D31] text-[#C4C6CC]'}`}>{badge}</span>
+        <span className={`text-[8px] px-1.5 py-0.5 rounded-full ${active ? 'bg-[var(--accent)] text-[var(--bg)]' : 'bg-[var(--line)] text-[var(--text)]'}`}>{badge}</span>
       )}
     </button>
   );
@@ -825,7 +825,7 @@ function SeatChip({ user, code }: { user?: ManagedUser; code: string }) {
   const style = ROLE_STYLES[code === 'PD' ? 'PRECINCT_CAPTAIN' : 'BARANGAY_CAPTAIN'];
   if (!user) {
     return (
-      <span className="flex items-center gap-1.5 text-[9px] px-2 py-1 border border-dashed border-[#2B2D31] text-[#4A4C50] uppercase tracking-wide">
+      <span className="flex items-center gap-1.5 text-[9px] px-2 py-1 border border-dashed border-[var(--line)] text-[var(--text-3)] uppercase tracking-wide">
         {code} vacant
       </span>
     );
@@ -840,13 +840,13 @@ function SeatChip({ user, code }: { user?: ManagedUser; code: string }) {
 function FieldInput({ label, value, onChange, type = 'text', placeholder }: any) {
   return (
     <div>
-      <label className="text-[8px] tracking-[0.15em] uppercase text-[#6B6D73] mb-1 block">{label}</label>
+      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
       <input
         type={type}
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full bg-[#0A0A0B] border border-[#2B2D31] focus:border-[#8FA8D9]/50 p-2.5 text-[11px] text-[#F0F1F3] outline-none placeholder:text-[#4A4C50] transition-colors"
+        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
       />
     </div>
   );

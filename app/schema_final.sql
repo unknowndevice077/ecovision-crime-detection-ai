@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS cameras (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_cameras_barangay ON cameras(barangay_id);
+-- backend.py filters cameras with WHERE LOWER(barangay_id) = ?, which a plain
+-- btree index on barangay_id can't serve -- needs a matching expression index.
+CREATE INDEX IF NOT EXISTS idx_cameras_barangay_lower ON cameras(LOWER(barangay_id));
 
 CREATE TABLE IF NOT EXISTS incidents (
     id              TEXT PRIMARY KEY,
@@ -91,6 +94,8 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 CREATE INDEX IF NOT EXISTS idx_incidents_barangay_date ON incidents(barangay_id, occurred_date);
 CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+-- backend.py's get_incidents filters with WHERE LOWER(barangay_id) = ?
+CREATE INDEX IF NOT EXISTS idx_incidents_barangay_lower ON incidents(LOWER(barangay_id));
 
 CREATE TABLE IF NOT EXISTS incident_details (
     incident_id         TEXT PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,

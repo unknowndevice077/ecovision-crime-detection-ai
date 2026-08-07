@@ -2,7 +2,7 @@
 
 import React, { useState, useRef } from 'react';
 import {
-  ShieldAlert, Film, Clapperboard, Edit3, Save, Play,
+  ShieldAlert, Clapperboard, Edit3, Save, Play,
   ListFilter, Calendar, Clock, Scissors, AlertCircle
 } from 'lucide-react';
 import { useLiveChannel } from '../context/WebSocketContext';
@@ -127,137 +127,283 @@ export default function RecordsView() {
     return true;
   });
 
+  const inputStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
+
+  const tabStyle = (on: boolean) =>
+    on
+      ? { background: 'var(--accent)', color: '#fff', borderColor: 'var(--accent)' }
+      : { background: 'transparent', color: 'var(--text-2)', borderColor: 'var(--line-2)' };
+
   return (
-    <div className="flex flex-col gap-4 h-full w-full animate-in fade-in duration-300">
-      {/* FILTER CONTROL CONSOLE */}
-      <div className="bg-[#11141b] border border-white/5 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4 shrink-0 shadow-lg">
-        <div className="flex items-center gap-4 flex-wrap">
-          <div className="flex items-center gap-2">
-            <Calendar size={14} className="text-slate-500"/>
-            <input type="text" title="Filter Records by Date Target" placeholder="YYYY-MM-DD" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} className="bg-black/30 border border-white/5 rounded-xl px-3 py-1.5 text-[11px] font-mono text-white outline-none focus:border-emerald-500 w-36" />
+    <div className="flex flex-col gap-2 h-full w-full min-h-0">
+
+      {/* ═══ FILTER BAR ═══════════════════════════════════════════════════ */}
+      <div
+        className="border flex flex-wrap items-center justify-between gap-2 p-2 shrink-0"
+        style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+      >
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <div className="flex items-center gap-1.5 px-2 py-1.5 border" style={inputStyle}>
+            <Calendar size={12} style={{ color: 'var(--text-3)' }} />
+            <input
+              type="text"
+              title="Filter records by date"
+              placeholder="YYYY-MM-DD"
+              value={filterDate}
+              onChange={(e) => setFilterDate(e.target.value)}
+              className="data bg-transparent text-[11px] text-white outline-none w-[92px]"
+            />
           </div>
+
           {subView === 'CLIPS' && (
-            <div className="flex items-center gap-2">
-              <ListFilter size={14} className="text-slate-500"/>
-              <select title="Filter Incident Categories" value={filterCrimeType} onChange={(e) => setFilterCrimeType(e.target.value)} className="bg-black/30 border border-white/5 rounded-xl px-3 py-1.5 text-[11px] font-mono text-slate-300 outline-none focus:border-emerald-500">
-                <option value="ALL">All Threat Signatures</option>
-                <option value="ASSAULT">Assault Intercepts</option>
-                <option value="FIREARM">Weapons/Firearms Detects</option>
-                <option value="PANIC">Hardware Panic Triggers</option>
+            <div className="flex items-center gap-1.5 px-2 py-1.5 border" style={inputStyle}>
+              <ListFilter size={12} style={{ color: 'var(--text-3)' }} />
+              <select
+                title="Filter by incident type"
+                value={filterCrimeType}
+                onChange={(e) => setFilterCrimeType(e.target.value)}
+                className="data bg-transparent text-[11px] outline-none cursor-pointer"
+                style={{ color: 'var(--text-2)' }}
+              >
+                <option value="ALL">All types</option>
+                <option value="ASSAULT">Assault</option>
+                <option value="FIREARM">Weapons / firearms</option>
+                <option value="PANIC">Panic triggers</option>
               </select>
             </div>
           )}
         </div>
 
-        <div className="flex bg-black/40 border border-white/5 rounded-2xl p-1 gap-1">
-          <button onClick={() => { setSubView('CLIPS'); setActivePlayback(null); }} className={`px-4 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all ${subView === 'CLIPS' ? 'bg-emerald-500 text-black' : 'text-slate-400 hover:text-white'}`}>Automated Clips</button>
-          <button onClick={() => { setSubView('DVR'); setActivePlayback(null); }} className={`px-4 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all ${subView === 'DVR' ? 'bg-emerald-500 text-black' : 'text-slate-400 hover:text-white'}`}>24/7 Records</button>
+        <div className="flex gap-px">
+          <button
+            onClick={() => { setSubView('CLIPS'); setActivePlayback(null); }}
+            className="px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider transition-colors"
+            style={tabStyle(subView === 'CLIPS')}
+          >
+            Event Clips
+          </button>
+          <button
+            onClick={() => { setSubView('DVR'); setActivePlayback(null); }}
+            className="px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider transition-colors"
+            style={tabStyle(subView === 'DVR')}
+          >
+            24/7 Archive
+          </button>
         </div>
       </div>
 
       {error && (
-        <div className="px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-[10px] font-bold uppercase text-red-400 text-center shrink-0">
+        <div
+          className="px-2.5 py-1.5 border text-[10px] font-bold uppercase tracking-wider shrink-0"
+          style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
+        >
           {error}
         </div>
       )}
 
-      <div className="flex-1 bg-[#11141b] border border-white/5 rounded-[2rem] p-6 shadow-2xl flex overflow-hidden min-h-0">
-        <div className="grid grid-cols-12 gap-6 w-full h-full">
+      {/* ═══ PLAYBACK + ARCHIVE LIST ══════════════════════════════════════ */}
+      <div className="flex-1 grid grid-cols-12 gap-2 min-h-0">
 
-          {/* Surveillance Video Display Target Viewport */}
-          <div className="col-span-7 flex flex-col gap-4 h-full">
-            {activePlayback ? (
-              <div className="bg-black rounded-3xl border border-white/5 p-4 flex flex-col gap-4 shadow-inner relative h-full justify-center">
-                <video ref={videoRef} controls autoPlay className="w-full rounded-2xl aspect-video bg-neutral-950 shadow-2xl" src={`${API_URL}/static/recordings/${activePlayback.filename}`} />
-
-                <div className="w-full bg-white/5 h-8 rounded-xl relative overflow-hidden flex items-center px-3 border border-white/10 shrink-0">
-                  <div className="absolute left-0 top-0 bottom-0 bg-emerald-500/10 w-full" />
-                  {subView === 'CLIPS' && activePlayback.crime_time_marker && (
-                    <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 bg-red-600/90 text-white font-mono text-[9px] font-bold px-4 flex items-center animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.6)] rounded-lg h-full">
-                      <ShieldAlert size={12} className="mr-1.5 inline"/> CRIME INTERCEPT TIME: {activePlayback.crime_time_marker}
-                    </div>
-                  )}
-                  {subView === 'DVR' && crimes.filter(c => c.occurred_date === activePlayback.recorded_at.split(' ')[0]).map((crime, idx) => {
-                    const offsetValue = Math.min(84, 15 + (idx * 22));
-                    const markerId = `dvr-marker-${idx}`;
-                    return (
-                      <React.Fragment key={idx}>
-                        <style>{`
-                          .${markerId} { left: ${offsetValue}%; }
-                        `}</style>
-                        <div className={`absolute h-full bg-red-600/70 border-x border-red-500 px-2 text-[8px] font-mono text-white flex items-center hover:bg-red-500 z-10 cursor-help ${markerId}`} title={`[${crime.type}] Flagged at ${crime.occurred_time}`}>
-                          ⚠️ THREAT DETECT: {crime.occurred_time}
-                        </div>
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-
-                <div className="bg-black/40 p-4 rounded-2xl flex items-center justify-between gap-4 shrink-0 border border-white/5">
-                  <div className="flex items-center gap-4">
-                    <div className="space-y-1">
-                      <span className="text-[8px] font-mono uppercase text-slate-500 flex items-center gap-1"><Clock size={10}/> Clip Start</span>
-                      <input type="text" title="Start Time Range" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="bg-black/60 border border-white/5 rounded-lg px-2 py-1 text-[10px] font-mono text-white outline-none focus:border-emerald-500 w-20 text-center" />
-                    </div>
-                    <div className="space-y-1">
-                      <span className="text-[8px] font-mono uppercase text-slate-500 flex items-center gap-1"><Clock size={10}/> Clip End</span>
-                      <input type="text" title="End Time Range" value={endTime} onChange={(e) => setEndTime(e.target.value)} className="bg-black/60 border border-white/5 rounded-lg px-2 py-1 text-[10px] font-mono text-white outline-none focus:border-emerald-500 w-20 text-center" />
-                    </div>
-                  </div>
-                  <button title="Extract Range Segment" onClick={handleExtractClip} className="bg-emerald-500 hover:bg-emerald-400 text-black px-4 py-2 rounded-xl text-[10px] uppercase font-bold flex items-center gap-1.5 active:scale-95 transition-all"><Scissors size={12}/> Extract Segment</button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex-1 border-2 border-dashed border-white/5 rounded-3xl flex flex-col items-center justify-center text-slate-600 opacity-40 h-full">
-                <Clapperboard size={48} className="mb-2 text-slate-500"/>
-                <span className="text-[10px] font-bold uppercase tracking-widest">Select an archive video to load playback stream</span>
-              </div>
+        {/* Playback viewport */}
+        <div className="col-span-7 flex flex-col min-h-0 border" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+          <div className="h-9 shrink-0 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+            <span className="label" style={{ color: 'var(--text)' }}>Playback</span>
+            {activePlayback && (
+              <span className="data text-[10px] truncate max-w-[60%]" style={{ color: 'var(--text-2)' }}>
+                {activePlayback.filename}
+              </span>
             )}
           </div>
 
-          {/* Incident List Records Track metadata Directory column */}
-          <div className="col-span-5 flex flex-col overflow-y-auto custom-scrollbar gap-3 h-full pr-1">
+          {activePlayback ? (
+            <div className="flex-1 flex flex-col min-h-0 p-2 gap-2">
+              <video
+                ref={videoRef}
+                controls
+                autoPlay
+                className="w-full aspect-video min-h-0"
+                style={{ background: '#000' }}
+                src={`${API_URL}/static/recordings/${activePlayback.filename}`}
+              />
+
+              {/* Timeline scrub bar with threat markers */}
+              <div
+                className="w-full h-7 relative overflow-hidden flex items-center px-2 border shrink-0"
+                style={{ background: 'var(--bg)', borderColor: 'var(--line)' }}
+              >
+                {subView === 'CLIPS' && activePlayback.crime_time_marker && (
+                  <div
+                    className="absolute left-1/2 -translate-x-1/2 inset-y-0 px-3 flex items-center data text-[9px] font-bold text-white"
+                    style={{ background: 'var(--critical)' }}
+                  >
+                    <ShieldAlert size={11} className="mr-1.5" /> DETECTED {activePlayback.crime_time_marker}
+                  </div>
+                )}
+                {subView === 'DVR' && crimes
+                  .filter(c => c.occurred_date === activePlayback.recorded_at.split(' ')[0])
+                  .map((crime, idx) => (
+                    // Inline left offset -- the old version emitted a fresh
+                    // <style> tag per marker on every render just to set one
+                    // percentage, which piled up style nodes during playback.
+                    <div
+                      key={idx}
+                      className="absolute inset-y-0 px-1.5 flex items-center data text-[8px] text-white z-10 cursor-help"
+                      style={{ left: `${Math.min(84, 15 + idx * 22)}%`, background: 'var(--critical)' }}
+                      title={`[${crime.type}] flagged at ${crime.occurred_time}`}
+                    >
+                      {crime.occurred_time}
+                    </div>
+                  ))}
+              </div>
+
+              {/* Extract range */}
+              <div
+                className="flex items-end justify-between gap-3 p-2 border shrink-0"
+                style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
+              >
+                <div className="flex items-end gap-3">
+                  <div>
+                    <span className="label flex items-center gap-1 mb-1"><Clock size={10} /> Start</span>
+                    <input
+                      type="text"
+                      title="Segment start time"
+                      value={startTime}
+                      onChange={(e) => setStartTime(e.target.value)}
+                      className="data border px-2 py-1 text-[11px] text-white outline-none focus:border-[var(--accent)] w-[68px] text-center"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <span className="label flex items-center gap-1 mb-1"><Clock size={10} /> End</span>
+                    <input
+                      type="text"
+                      title="Segment end time"
+                      value={endTime}
+                      onChange={(e) => setEndTime(e.target.value)}
+                      className="data border px-2 py-1 text-[11px] text-white outline-none focus:border-[var(--accent)] w-[68px] text-center"
+                      style={inputStyle}
+                    />
+                  </div>
+                </div>
+                <button
+                  title="Extract this time range as a new clip"
+                  onClick={handleExtractClip}
+                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white flex items-center gap-1.5 transition-opacity hover:opacity-90"
+                  style={{ background: 'var(--accent)' }}
+                >
+                  <Scissors size={11} /> Extract
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2">
+              <Clapperboard size={26} style={{ color: 'var(--text-3)' }} />
+              <span className="label">Select a recording to begin playback</span>
+            </div>
+          )}
+        </div>
+
+        {/* Archive list */}
+        <div className="col-span-5 flex flex-col min-h-0 border" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+          <div className="h-9 shrink-0 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+            <span className="label" style={{ color: 'var(--text)' }}>
+              {subView === 'CLIPS' ? 'Event Clips' : '24/7 Archive'}
+            </span>
+            <span className="data text-[10px] px-1.5 py-0.5 border" style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}>
+              {String(filteredRecords.length).padStart(3, '0')}
+            </span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto custom-scrollbar">
             {isLoading ? (
-              <div className="space-y-3">
+              <div className="p-2 space-y-2">
                 {Array.from({ length: 4 }).map((_, i) => <SkeletonRow key={i} />)}
               </div>
             ) : filteredRecords.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center border border-dashed border-white/5 rounded-3xl p-8 opacity-20 text-slate-500">
-                <AlertCircle size={32} className="mb-2"/>
-                <span className="text-[10px] font-bold uppercase tracking-widest">No matching record files found.</span>
+              <div className="h-full flex flex-col items-center justify-center gap-2 py-12">
+                <AlertCircle size={22} style={{ color: 'var(--text-3)' }} />
+                <span className="label">No recordings match the current filters</span>
               </div>
             ) : (
-              filteredRecords.map((track) => (
-                <div key={track.id} className={`p-4 rounded-2xl border transition-all flex flex-col gap-3 ${activePlayback?.id === track.id ? 'bg-emerald-500/5 border-emerald-500/30' : 'bg-black/20 border-white/5 hover:border-white/10'}`}>
-                  <div className="flex justify-between items-start gap-2">
-                    <div className="min-w-0">
-                      <h4 className="text-xs font-bold text-white truncate font-mono">{track.filename}</h4>
-                      <span className="text-[9px] font-mono text-slate-500 block mt-1">Logged: {track.recorded_at} // Length: {track.duration}</span>
-                    </div>
-                    <button title="Play Track Stream" onClick={() => setActivePlayback(track)} className="p-2 bg-emerald-500 text-black rounded-xl hover:bg-emerald-400 transition-all shadow-md shrink-0"><Play size={12}/></button>
-                  </div>
-
-                  <div className="bg-black/40 p-3 rounded-xl border border-white/5 flex flex-col gap-2">
-                    {editingId === track.id ? (
-                      <div className="flex flex-col gap-2">
-                        <textarea title="Modify Notes" placeholder="Enter custom notes..." value={editNotes} onChange={(e) => setEditNotes(e.target.value)} className="w-full bg-[#1a1e26] border border-white/10 text-[11px] text-white rounded-lg p-2 focus:border-emerald-500 outline-none font-sans" rows={2} />
-                        <div className="flex justify-end gap-1.5">
-                          <button onClick={() => setEditingId(null)} className="px-2.5 py-1 border border-white/5 text-[9px] text-slate-400 uppercase font-bold rounded hover:bg-white/5">Cancel</button>
-                          <button onClick={() => handleUpdateNotes(track.id)} className="px-2.5 py-1 bg-emerald-500 text-black text-[9px] uppercase font-bold rounded hover:bg-emerald-400 flex items-center gap-1"><Save size={10}/>Save</button>
+              filteredRecords.map((track) => {
+                const selected = activePlayback?.id === track.id;
+                return (
+                  <div
+                    key={track.id}
+                    className="border-b p-2.5 transition-colors"
+                    style={{
+                      borderColor: 'var(--line)',
+                      background: selected ? 'rgba(45,111,247,0.10)' : 'transparent',
+                      borderLeft: selected ? '3px solid var(--accent)' : '3px solid transparent',
+                    }}
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="min-w-0">
+                        <div className="data text-[11px] font-bold text-white truncate">{track.filename}</div>
+                        <div className="data text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+                          {track.recorded_at} · {track.duration}
                         </div>
                       </div>
-                    ) : (
-                      <div className="flex justify-between items-start gap-4">
-                        <p className="text-[11px] text-slate-400 font-sans italic">{track.notes || "No metadata descriptive log notes filled."}</p>
-                        <button title="Modify Description" onClick={() => { setEditingId(track.id); setEditNotes(track.notes); }} className="text-slate-500 hover:text-emerald-400 transition-all shrink-0"><Edit3 size={12}/></button>
-                      </div>
-                    )}
+                      <button
+                        title="Play this recording"
+                        onClick={() => setActivePlayback(track)}
+                        className="p-1.5 shrink-0 text-white transition-opacity hover:opacity-90"
+                        style={{ background: 'var(--accent)' }}
+                      >
+                        <Play size={11} />
+                      </button>
+                    </div>
+
+                    <div className="mt-2 p-2 border" style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}>
+                      {editingId === track.id ? (
+                        <div className="flex flex-col gap-1.5">
+                          <textarea
+                            title="Edit notes"
+                            placeholder="Add case notes…"
+                            value={editNotes}
+                            onChange={(e) => setEditNotes(e.target.value)}
+                            className="w-full border text-[11px] text-white p-1.5 outline-none focus:border-[var(--accent)]"
+                            style={inputStyle}
+                            rows={2}
+                          />
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              onClick={() => setEditingId(null)}
+                              className="px-2 py-1 border text-[9px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
+                              style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => handleUpdateNotes(track.id)}
+                              className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-white flex items-center gap-1 transition-opacity hover:opacity-90"
+                              style={{ background: 'var(--accent)' }}
+                            >
+                              <Save size={9} /> Save
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex justify-between items-start gap-2">
+                          <p className="text-[10px] leading-snug" style={{ color: 'var(--text-2)' }}>
+                            {track.notes || 'No notes on file.'}
+                          </p>
+                          <button
+                            title="Edit notes"
+                            onClick={() => { setEditingId(track.id); setEditNotes(track.notes); }}
+                            className="shrink-0 transition-colors hover:text-white"
+                            style={{ color: 'var(--text-3)' }}
+                          >
+                            <Edit3 size={11} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
-
         </div>
       </div>
     </div>

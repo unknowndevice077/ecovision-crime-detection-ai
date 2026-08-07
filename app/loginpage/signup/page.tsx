@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Shield, UserPlus, ArrowRight, Building, Lock, User, MapPin } from 'lucide-react';
+import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
@@ -27,112 +27,153 @@ export default function SignupPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) router.push('/loginpage/login');
-      else setError(data.detail || "System Error: Username Conflict");
+      else setError(data.detail || "That username is already taken");
     } catch (err) {
-      setError("Backend Connection Failure");
+      setError("Cannot reach server — check that the backend is running");
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const fieldStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
+  const fieldClass =
+    "data w-full px-2.5 py-2.5 text-[12px] text-white border outline-none focus:border-[var(--accent)] transition-colors disabled:opacity-50";
+
   return (
-    <div className="min-h-screen bg-[#0a0c10] flex items-center justify-center p-6 text-slate-200">
-      <div className="w-full max-w-md bg-[#11141b] border border-white/5 rounded-[3rem] p-10 shadow-2xl space-y-8">
-        <div className="text-center">
-          <div className="inline-block p-4 bg-emerald-500/10 rounded-2xl text-emerald-500 mb-4">
-            <UserPlus size={32} />
+    <div className="min-h-screen flex items-center justify-center p-6" style={{ background: 'var(--bg)' }}>
+      <div className="w-full max-w-[340px]">
+
+        {/* Same identity block as the sign-in screen so the two read as one system */}
+        <div className="flex items-center gap-2.5 mb-5 pb-4 border-b" style={{ borderColor: 'var(--line)' }}>
+          <Shield size={20} style={{ color: 'var(--accent)' }} className="stroke-[2.2]" />
+          <div>
+            <h1 className="text-[13px] font-bold tracking-[0.18em] text-white leading-none">ECOVISION SENTINEL</h1>
+            <p className="label mt-1.5">Security Monitoring System</p>
           </div>
-          <h1 className="text-xl font-bold text-white uppercase tracking-widest">Create Admin Account</h1>
-          <p className="text-[10px] text-slate-500 uppercase font-mono mt-1">Precinct Captain / Barangay Captain Registration</p>
-          <p className="text-[9px] text-slate-600 font-mono mt-2 leading-relaxed">
-            Standard operator accounts aren't created here -- once you're signed in
-            as an admin, you'll create and manage your own users from the dashboard.
-          </p>
         </div>
 
-        <form onSubmit={handleSignup} className="space-y-4 font-sans">
-          <div className="relative">
-            <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
-            <input 
-              title="Set Username ID"
-              placeholder="Username ID" 
-              value={formData.username}
-              onChange={e => setFormData({...formData, username: e.target.value})}
-              disabled={isSubmitting}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
-              required
-            />
+        <div className="border" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+          <div className="h-8 flex items-center px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+            <span className="label" style={{ color: 'var(--text)' }}>Administrator Registration</span>
           </div>
 
-          <div className="relative">
-            <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
-            <input 
-              type="password" 
-              title="Set Secure Access Key"
-              placeholder="Secure Access Key" 
-              value={formData.password}
-              onChange={e => setFormData({...formData, password: e.target.value})}
-              disabled={isSubmitting}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
-              required
-            />
-          </div>
+          <form onSubmit={handleSignup} className="p-3.5 space-y-3.5">
+            <div>
+              <label htmlFor="su-user" className="label flex items-center gap-1.5 mb-1.5">
+                <User size={11} /> Username
+              </label>
+              <input
+                id="su-user"
+                title="Username"
+                autoComplete="username"
+                value={formData.username}
+                onChange={e => setFormData({ ...formData, username: e.target.value })}
+                disabled={isSubmitting}
+                className={fieldClass}
+                style={fieldStyle}
+                required
+              />
+            </div>
 
-          <div className="relative group">
-            <Shield className="absolute left-4 top-1/2 -translate-y-1/2 text-emerald-500" size={16} />
-            <select 
-              title="Designate Admin Role"
-              aria-label="Designate Admin Role"
-              value={formData.role} 
-              onChange={e => setFormData({...formData, role: e.target.value})}
+            <div>
+              <label htmlFor="su-pass" className="label flex items-center gap-1.5 mb-1.5">
+                <Lock size={11} /> Password
+              </label>
+              <input
+                id="su-pass"
+                type="password"
+                title="Password"
+                autoComplete="new-password"
+                value={formData.password}
+                onChange={e => setFormData({ ...formData, password: e.target.value })}
+                disabled={isSubmitting}
+                className={fieldClass}
+                style={fieldStyle}
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="su-role" className="label flex items-center gap-1.5 mb-1.5">
+                <Shield size={11} /> Administrator role
+              </label>
+              <select
+                id="su-role"
+                title="Administrator role"
+                value={formData.role}
+                onChange={e => setFormData({ ...formData, role: e.target.value })}
+                disabled={isSubmitting}
+                className={`${fieldClass} cursor-pointer`}
+                style={fieldStyle}
+              >
+                <option value="PRECINCT_CAPTAIN">Precinct Captain (police admin)</option>
+                <option value="BARANGAY_CAPTAIN">Barangay Captain (barangay admin)</option>
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="su-loc" className="label flex items-center gap-1.5 mb-1.5">
+                <MapPin size={11} /> Location
+              </label>
+              <input
+                id="su-loc"
+                title="Location"
+                placeholder="e.g. Cogon"
+                value={formData.barangayId}
+                onChange={e => setFormData({ ...formData, barangayId: e.target.value })}
+                disabled={isSubmitting}
+                className={fieldClass}
+                style={fieldStyle}
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="su-station" className="label flex items-center gap-1.5 mb-1.5">
+                <Building size={11} /> Station / precinct
+              </label>
+              <input
+                id="su-station"
+                title="Station or precinct name"
+                placeholder="e.g. Station 3"
+                value={formData.assignment}
+                onChange={e => setFormData({ ...formData, assignment: e.target.value })}
+                disabled={isSubmitting}
+                className={fieldClass}
+                style={fieldStyle}
+                required
+              />
+            </div>
+
+            {error && (
+              <div
+                className="flex items-start gap-2 px-2.5 py-2 border"
+                style={{ background: 'rgba(229,52,47,0.10)', borderColor: 'var(--critical)' }}
+                role="alert"
+              >
+                <AlertTriangle size={13} style={{ color: 'var(--critical)' }} className="shrink-0 mt-px" />
+                <span className="text-[11px] leading-snug" style={{ color: 'var(--critical)' }}>{error}</span>
+              </div>
+            )}
+
+            <button
               disabled={isSubmitting}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all appearance-none cursor-pointer disabled:opacity-50"
+              className="w-full py-2.5 text-[11px] font-bold uppercase tracking-[0.15em] text-white transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
+              style={{ background: 'var(--accent)' }}
             >
-              <option value="PRECINCT_CAPTAIN" className="bg-[#0f172a]">PRECINCT CAPTAIN (POLICE ADMIN)</option>
-              <option value="BARANGAY_CAPTAIN" className="bg-[#0f172a]">BARANGAY CAPTAIN (BARANGAY ADMIN)</option>
-            </select>
-          </div>
+              {isSubmitting ? "Creating…" : "Create Account"} <ArrowRight size={13} />
+            </button>
+          </form>
+        </div>
 
-          <div className="relative">
-            <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
-            <input 
-              title="Enter Location (e.g. Cogon)"
-              placeholder="Location (e.g. Cogon)" 
-              value={formData.barangayId}
-              onChange={e => setFormData({...formData, barangayId: e.target.value})}
-              disabled={isSubmitting}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
-              required
-            />
-          </div>
-
-          <div className="relative">
-            <Building className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
-            <input 
-              title="Enter Station / Precinct Name"
-              placeholder="Station / Precinct Name" 
-              value={formData.assignment}
-              onChange={e => setFormData({...formData, assignment: e.target.value})}
-              disabled={isSubmitting}
-              className="w-full bg-black/40 border border-white/5 rounded-xl p-4 pl-12 text-xs text-white outline-none focus:border-emerald-500 transition-all disabled:opacity-50" 
-              required
-            />
-          </div>
-
-          {error && <p className="text-red-500 text-[9px] text-center uppercase font-bold">{error}</p>}
-
-          <button
-            disabled={isSubmitting}
-            className="w-full py-4 bg-emerald-600 text-black font-black uppercase text-[10px] tracking-widest rounded-xl hover:bg-emerald-500 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:active:scale-100"
-          >
-            {isSubmitting ? "Submitting…" : "Establish Account"} <ArrowRight size={14} />
-          </button>
-        </form>
-
-        <div className="text-center border-t border-white/5 pt-6">
-          <Link href="/loginpage/login" className="text-[10px] text-slate-500 hover:text-emerald-500 uppercase font-bold transition-colors">
-            Return to Authorization
+        <div className="mt-3 pt-3 border-t space-y-2" style={{ borderColor: 'var(--line)' }}>
+          <Link href="/loginpage/login" className="label block transition-colors hover:text-white">
+            ← Back to sign-in
           </Link>
+          <p className="text-[10px] leading-relaxed" style={{ color: 'var(--text-3)' }}>
+            Only precinct and barangay administrator accounts are registered here. Once signed in,
+            you create and manage your own operator accounts from the dashboard.
+          </p>
         </div>
       </div>
     </div>

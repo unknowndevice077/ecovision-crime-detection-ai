@@ -7,6 +7,7 @@ import {
   Calendar, ListFilter, ShieldAlert, Radio, Check, Video, ArrowLeft, Globe, ImageIcon
 } from 'lucide-react';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
+import { useLiveChannel } from '../context/WebSocketContext';
 
 type SmartpoleNode = {
   id: string; name: string; street: string; lat: number; lng: number;
@@ -140,8 +141,17 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     const isCurrentSelected = selectedId === pole.id;
     return L.divIcon({
       className: 'custom-pole-icon',
-      html: `<div class="w-7 h-7 ${isCurrentSelected ? 'bg-emerald-500 text-black scale-110 ring-4 ring-emerald-500/20 font-black' : 'bg-[#0b0f17] text-emerald-400 font-bold'} rounded-full border-2 border-emerald-400 shadow-2xl flex items-center justify-center text-[10px] transition-all duration-200">📡</div>`,
-      iconSize: [28, 28], iconAnchor: [14, 14]
+      // Inline styles, not Tailwind classes: this HTML is handed to Leaflet
+      // and injected outside React, so it reads the same design tokens the
+      // rest of the console uses rather than a second, drifting palette.
+      html: `<div style="
+        width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+        font-size:11px;line-height:1;
+        background:${isCurrentSelected ? 'var(--accent)' : 'var(--panel)'};
+        border:2px solid ${isCurrentSelected ? 'var(--accent)' : 'var(--line-2)'};
+        box-shadow:${isCurrentSelected ? '0 0 0 4px rgba(45,111,247,0.25)' : '0 1px 3px rgba(0,0,0,0.6)'};
+      ">📡</div>`,
+      iconSize: [26, 26], iconAnchor: [13, 13]
     });
   };
 
@@ -188,12 +198,16 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       .filter(inc => inc.map_hidden !== 1 && inc.map_hidden !== true)
       .forEach(inc => {
         const isConfirmed = (inc.status || '').toLowerCase() === 'confirmed';
-        const ringColor = isConfirmed ? 'border-emerald-500' : 'border-red-500';
-        const textColor = isConfirmed ? 'text-emerald-400' : 'text-red-400';
+        const tone = isConfirmed ? 'var(--ok)' : 'var(--critical)';
         const icon = L.divIcon({
           className: 'custom-div-icon',
-          html: `<div class="w-6 h-6 bg-[#1e293b] rounded-full border-2 ${ringColor} shadow-xl flex items-center justify-center text-[10px] ${textColor} font-extrabold">!</div>`,
-          iconSize: [24, 24], iconAnchor: [12, 12]
+          html: `<div style="
+            width:22px;height:22px;display:flex;align-items:center;justify-content:center;
+            font-size:11px;font-weight:800;line-height:1;
+            background:var(--panel);border:2px solid ${tone};color:${tone};
+            box-shadow:0 1px 3px rgba(0,0,0,0.6);
+          ">!</div>`,
+          iconSize: [22, 22], iconAnchor: [11, 11]
         });
         // interactive: false + a negative zIndexOffset keeps these purely
         // visual so they never steal clicks meant for a pole underneath.
@@ -234,12 +248,12 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       refreshPoleIcons();
     }
   }, [selectedPole]);
-  useEffect(() => {
-    fetchIncidents();
-    const interval = setInterval(fetchIncidents, 5000);
-    return () => clearInterval(interval);
-  }, []);
-  
+  // Was an unconditional 5s setInterval poll even though useLiveChannel
+  // (push-based, backed by the app-wide shared WebSocket) is already used
+  // elsewhere in the app for this exact purpose -- this view just never got
+  // migrated.
+  useLiveChannel("incidents", fetchIncidents);
+
   useEffect(() => {
     if (!document.getElementById('leaflet-css')) {
       const link = document.createElement('link');
@@ -247,13 +261,10 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
       link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
       document.head.appendChild(link);
     }
-    const script = document.createElement('script');
-    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-    script.async = true;
-    script.onload = () => {
+
+    const initLeafletMap = () => {
       const L = (window as any).L;
-      if (!mapRef.current && mapContainerRef.current) 
-      {
+      if (!mapRef.current && mapContainerRef.current) {
         mapRef.current = L.map(mapContainerRef.current, {
           center: [11.0176, 124.6031], zoom: 17, zoomControl: false, attributionControl: false, doubleClickZoom: false
         });
@@ -261,7 +272,25 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
         createPoleMarkers();
       }
     };
-    document.body.appendChild(script);
+
+    // The CSS injection above was guarded by an id check, but this script
+    // tag wasn't -- switching to the Map tab, away, and back (normal
+    // operator behavior) appended a fresh duplicate <script> every time,
+    // each refetched over the network. If Leaflet is already loaded (or
+    // mid-load from an earlier mount), don't inject it again.
+    const existingScript = document.getElementById('leaflet-js') as HTMLScriptElement | null;
+    if ((window as any).L) {
+      initLeafletMap();
+    } else if (existingScript) {
+      existingScript.addEventListener('load', initLeafletMap, { once: true });
+    } else {
+      const script = document.createElement('script');
+      script.id = 'leaflet-js';
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.async = true;
+      script.onload = initLeafletMap;
+      document.body.appendChild(script);
+    }
   }, []);
   const handleExpunge = (incidentId: string) => {
     setExpungeTargetId(incidentId);
@@ -363,41 +392,45 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   };
 
   const finalLogsDisplay = filteredIncidents;
-  const inputClass = "w-full bg-white/[0.02] border border-white/5 rounded-lg p-2.5 text-xs text-white outline-none focus:border-emerald-500 font-mono";
-  const labelClass = "text-[8px] font-mono text-slate-500 uppercase block mb-1";
+  const fieldStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
+  const inputClass = "data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors";
+  const labelClass = "label block mb-1";
 
   return (
-    <div className="flex h-full flex-col gap-4 animate-in fade-in duration-500 relative w-full overflow-hidden">
-      
-      {/* BOX HEADER FOR THE CORE ESSENTIALS CONTROL SYSTEM */}
-      <div className="w-full h-14 flex items-center justify-between px-6 rounded-2xl border border-white/[0.04] bg-[#0E131F]/80 backdrop-blur-md shadow-xl shrink-0">
-        <div className="flex items-center gap-3">
-          <Radio size={14} className="text-emerald-400 animate-pulse" />
-          <span className="text-[11px] font-mono font-black text-white uppercase tracking-widest">Tactical Core Essentials</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-[9px] font-mono text-slate-400 uppercase tracking-wider font-bold">Jump To Sector:</span>
-            <select 
-              title="Navigate directly to specific sector maps"
-              onChange={(e) => {
-                const val = e.target.value;
-                if (val === 'cogon') handleBarangayJump(11.0176, 124.6031);
-                else if (val === 'valencia') handleBarangayJump(11.0055, 124.6122);
-                else if (val === 'district18') handleBarangayJump(11.0145, 124.6055);
-              }}
-              className="bg-[#0b0f17] border border-white/10 rounded-xl px-3 py-1.5 text-[10px] text-slate-200 font-mono outline-none cursor-pointer focus:border-emerald-500 transition-colors"
-            >
-              <option value="">Select Barangay...</option>
-              <option value="cogon">Brgy. Cogon Core</option>
-              <option value="valencia">Brgy. Valencia Sector</option>
-              <option value="district18">District 18 HQ</option>
-            </select>
-          </div>
-          
-          <div className="w-px h-6 bg-white/10" />
+    <div className="flex h-full flex-col gap-2 relative w-full overflow-hidden">
 
-          <button 
+      {/* ═══ MAP TOOLBAR ══════════════════════════════════════════════════ */}
+      <div
+        className="w-full h-10 flex items-center justify-between px-2.5 border shrink-0"
+        style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+      >
+        <div className="flex items-center gap-2">
+          <Radio size={13} style={{ color: 'var(--accent)' }} />
+          <span className="label" style={{ color: 'var(--text)' }}>Incident Map</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="label">Jump to</span>
+          <select
+            title="Navigate directly to a specific area"
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === 'cogon') handleBarangayJump(11.0176, 124.6031);
+              else if (val === 'valencia') handleBarangayJump(11.0055, 124.6122);
+              else if (val === 'district18') handleBarangayJump(11.0145, 124.6055);
+            }}
+            className="data border px-2 py-1.5 text-[11px] outline-none cursor-pointer focus:border-[var(--accent)] transition-colors"
+            style={{ ...fieldStyle, color: 'var(--text-2)' }}
+          >
+            <option value="">Select area…</option>
+            <option value="cogon">Brgy. Cogon</option>
+            <option value="valencia">Brgy. Valencia</option>
+            <option value="district18">District 18 HQ</option>
+          </select>
+
+          <div className="w-px h-5" style={{ background: 'var(--line-2)' }} />
+
+          <button
             onClick={() => {
               const name = prompt("Enter New Smartpole Identifier Label:", "Sector D Terminal");
               const path = prompt("Enter Network RTSP Surveillance Feed Stream Path:", "rtsp://192.168.1.50/live");
@@ -406,213 +439,268 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                 alert(`Successfully initiated secure configuration link for ${name} at parameters:\nLat: ${center.lat.toFixed(4)}\nLng: ${center.lng.toFixed(4)}`);
               }
             }}
-            className="flex items-center gap-1.5 text-[10px] font-mono font-black text-black bg-emerald-400 hover:bg-emerald-300 px-3 py-2 rounded-xl transition-all shadow-md uppercase tracking-wider"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+            style={{ background: 'var(--accent)' }}
           >
-            <Plus size={12} className="stroke-[3]"/>
-            <span>Add Smartpole</span>
+            <Plus size={12} /> Add smartpole
           </button>
         </div>
       </div>
 
-      <div className="flex-1 flex gap-4 min-h-0 w-full">
-        {/* LEFT PANEL: MAP BOUNDS CANVAS CONTAINER */}
-        <div className="flex-1 bg-[#f1f5f9] border border-white/5 rounded-[2.5rem] relative overflow-hidden shadow-2xl h-full">
+      <div className="flex-1 flex gap-2 min-h-0 w-full">
+        {/* ═══ MAP CANVAS ═════════════════════════════════════════════════ */}
+        <div
+          className="flex-1 border relative overflow-hidden h-full"
+          style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+        >
           <div ref={mapContainerRef} className="w-full h-full z-0" />
         </div>
 
-        {/* RIGHT PANEL: RADAR WORKSPACE DATA SLATE LOG FEED */}
-        <div className="w-96 bg-[#0a0c10] border border-white/5 rounded-[2.5rem] p-6 flex flex-col overflow-hidden shadow-2xl z-20 text-slate-200 h-full">
-          <div className="animate-in fade-in duration-300 flex flex-col h-full min-h-0">
-            
-            <div className="pb-4 border-b border-white/5 mb-4 flex justify-between items-center shrink-0">
-              {selectedPole ? (
-                <button
-                  title="Return to unfiltered dashboard stream overview"
-                  onClick={() => { updatePoleSelectionIcons(null); setSelectedPoleId(null); setIsManualFilingActive(false); }}
-                  className="flex items-center gap-1.5 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 hover:text-emerald-400 transition-colors"
-                >
-                  <ArrowLeft size={13} className="stroke-[2.5]"/>
-                  <span>Back</span>
-                </button>
-              ) : (
-                <div className="w-12 h-4 shrink-0" /> 
-              )}
-
-              <div className="text-center min-w-0 px-2 flex-1">
-                <h4 className="text-[10px] font-black text-white uppercase tracking-wider truncate flex items-center justify-center gap-1">
-                  {selectedPole ? <Radio size={11} className="text-emerald-400 animate-pulse" /> : <Globe size={11} className="text-teal-400" />}
-                  <span>{selectedPole ? selectedPole.name : 'Global Inbound Feed'}</span>
-                </h4>
-                <p className="text-[8px] font-mono text-slate-500 uppercase truncate">
-                  {selectedPole ? selectedPole.street : 'Monitoring All Sector Streets'}
-                </p>
-              </div>
-
+        {/* ═══ INCIDENT FEED ══════════════════════════════════════════════ */}
+        <div
+          className="w-[340px] shrink-0 border flex flex-col overflow-hidden z-20 h-full"
+          style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+        >
+          {/* Panel header */}
+          <div
+            className="h-9 shrink-0 flex justify-between items-center gap-2 px-2.5 border-b"
+            style={{ borderColor: 'var(--line)' }}
+          >
+            {selectedPole ? (
               <button
-                onClick={() => selectedPole && setIsManualFilingActive(!isManualFilingActive)}
-                disabled={!selectedPole}
-                className="text-[9px] font-mono font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded hover:bg-emerald-500/20 uppercase tracking-wider disabled:opacity-20 transition-all shrink-0"
+                title="Back to all incidents"
+                onClick={() => { updatePoleSelectionIcons(null); setSelectedPoleId(null); setIsManualFilingActive(false); }}
+                className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider transition-colors hover:text-white shrink-0"
+                style={{ color: 'var(--text-2)' }}
               >
-                {isManualFilingActive ? 'Cancel' : '+ Add Report'}
+                <ArrowLeft size={12} /> Back
               </button>
-            </div>
-
-            {isManualFilingActive && selectedPole && (
-              <form onSubmit={handleCreateManualReport} className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl mb-4 space-y-3 animate-in slide-in-from-top duration-300 shrink-0">
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <span className={labelClass}>Classification</span>
-                    <select title="Select incident classification" value={manualType} onChange={(e) => setFormManualType(e.target.value)} className="w-full bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white outline-none">
-                      <option value="ASSAULT">Assault</option>
-                      <option value="THEFT">Theft</option>
-                      <option value="PHYSICAL ALTERCATION">Altercation</option>
-                      <option value="VANDALISM">Vandalism</option>
-                    </select>
-                  </div>
-                  <div>
-                    <span className={labelClass}>Severity</span>
-                    <select title="Select threat severity scale" value={manualSeverity} onChange={(e) => setFormManualSeverity(e.target.value)} className="w-full bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white outline-none">
-                      <option value="LOW">Low</option>
-                      <option value="MEDIUM">Medium</option>
-                      <option value="HIGH">High</option>
-                      <option value="CRITICAL">Critical</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <span className={labelClass}>Narrative Statement</span>
-                  <textarea 
-                    value={manualNarrative} 
-                    onChange={(e) => setFormManualNarrative(e.target.value)} 
-                    placeholder="Enter manual police filing dispatch entry observations..." 
-                    className="w-full h-14 bg-[#0e121a] border border-white/5 rounded-lg p-2 text-[10px] text-white resize-none outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <button type="submit" className="w-full py-2 bg-emerald-500 hover:bg-emerald-400 text-black text-[9px] font-black uppercase tracking-wider rounded-lg transition-colors">
-                  File Manual Entry
-                </button>
-              </form>
+            ) : (
+              <Globe size={12} className="shrink-0" style={{ color: 'var(--text-3)' }} />
             )}
 
-            <div className="grid grid-cols-2 gap-2 mb-4 shrink-0">
-              <div className="flex items-center gap-1 bg-black/40 border border-white/5 rounded-xl px-2.5 py-1.5">
-                <Calendar size={12} className="text-slate-500 shrink-0"/>
-                <input
-                  type="text"
-                  title="Filter incidents by date"
-                  placeholder="YYYY-MM-DD"
-                  value={poleDateFilter}
-                  onChange={(e) => setPoleDateFilter(e.target.value)}
-                  className="bg-transparent text-[10px] text-slate-300 font-mono outline-none w-full border-none p-0"
+            <div className="min-w-0 flex-1 text-center">
+              <div className="text-[11px] font-bold text-white uppercase tracking-wide truncate">
+                {selectedPole ? selectedPole.name : 'All Incidents'}
+              </div>
+            </div>
+
+            <button
+              onClick={() => selectedPole && setIsManualFilingActive(!isManualFilingActive)}
+              disabled={!selectedPole}
+              title={selectedPole ? 'File a manual report for this pole' : 'Select a smartpole first'}
+              className="px-2 py-1 border text-[9px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5 disabled:opacity-25 shrink-0"
+              style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+            >
+              {isManualFilingActive ? 'Cancel' : '+ Report'}
+            </button>
+          </div>
+
+          {/* Pole subtitle */}
+          <div className="shrink-0 px-2.5 py-1.5 border-b" style={{ borderColor: 'var(--line)', background: 'var(--bg)' }}>
+            <span className="data text-[10px] truncate block" style={{ color: 'var(--text-3)' }}>
+              {selectedPole ? selectedPole.street : 'Monitoring all areas'}
+            </span>
+          </div>
+
+          {isManualFilingActive && selectedPole && (
+            <form
+              onSubmit={handleCreateManualReport}
+              className="shrink-0 p-2.5 border-b space-y-2.5"
+              style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
+            >
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <span className={labelClass}>Type</span>
+                  <select
+                    title="Select incident type"
+                    value={manualType}
+                    onChange={(e) => setFormManualType(e.target.value)}
+                    className="data w-full border p-1.5 text-[11px] text-white outline-none focus:border-[var(--accent)]"
+                    style={fieldStyle}
+                  >
+                    <option value="ASSAULT">Assault</option>
+                    <option value="THEFT">Theft</option>
+                    <option value="PHYSICAL ALTERCATION">Altercation</option>
+                    <option value="VANDALISM">Vandalism</option>
+                  </select>
+                </div>
+                <div>
+                  <span className={labelClass}>Severity</span>
+                  <select
+                    title="Select severity"
+                    value={manualSeverity}
+                    onChange={(e) => setFormManualSeverity(e.target.value)}
+                    className="data w-full border p-1.5 text-[11px] text-white outline-none focus:border-[var(--accent)]"
+                    style={fieldStyle}
+                  >
+                    <option value="LOW">Low</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="HIGH">High</option>
+                    <option value="CRITICAL">Critical</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <span className={labelClass}>Narrative</span>
+                <textarea
+                  value={manualNarrative}
+                  onChange={(e) => setFormManualNarrative(e.target.value)}
+                  placeholder="What was observed…"
+                  className="w-full h-14 border p-2 text-[11px] text-white resize-none outline-none focus:border-[var(--accent)]"
+                  style={fieldStyle}
                 />
               </div>
-              <div className="flex items-center gap-1 bg-black/40 border border-white/5 rounded-xl px-2 py-1.5">
-                <ListFilter size={12} className="text-slate-500 shrink-0"/>
-                <select
-                  title="Filter incidents by crime type"
-                  value={poleTypeFilter}
-                  onChange={(e) => setPoleTypeFilter(e.target.value)}
-                  className="bg-transparent text-[10px] text-slate-300 font-mono outline-none w-full cursor-pointer border-none p-0 h-4"
-                >
-                  <option value="ALL">All Crimes</option>
-                  <option value="ASSAULT">Assault</option>
-                  <option value="THEFT">Theft</option>
-                  <option value="PHYSICAL ALTERCATION">Altercation</option>
-                  <option value="VANDALISM">Vandalism</option>
-                </select>
+              <button
+                type="submit"
+                className="w-full py-2 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+                style={{ background: 'var(--accent)' }}
+              >
+                File report
+              </button>
+            </form>
+          )}
+
+          {/* Filters */}
+          <div className="shrink-0 grid grid-cols-2 gap-1.5 p-2 border-b" style={{ borderColor: 'var(--line)' }}>
+            <div className="flex items-center gap-1.5 px-2 py-1.5 border" style={fieldStyle}>
+              <Calendar size={11} className="shrink-0" style={{ color: 'var(--text-3)' }} />
+              <input
+                type="text"
+                title="Filter incidents by date"
+                placeholder="YYYY-MM-DD"
+                value={poleDateFilter}
+                onChange={(e) => setPoleDateFilter(e.target.value)}
+                className="data bg-transparent text-[10px] outline-none w-full border-none p-0"
+                style={{ color: 'var(--text)' }}
+              />
+            </div>
+            <div className="flex items-center gap-1.5 px-2 py-1.5 border" style={fieldStyle}>
+              <ListFilter size={11} className="shrink-0" style={{ color: 'var(--text-3)' }} />
+              <select
+                title="Filter incidents by type"
+                value={poleTypeFilter}
+                onChange={(e) => setPoleTypeFilter(e.target.value)}
+                className="data bg-transparent text-[10px] outline-none w-full cursor-pointer border-none p-0"
+                style={{ color: 'var(--text-2)' }}
+              >
+                <option value="ALL">All types</option>
+                <option value="ASSAULT">Assault</option>
+                <option value="THEFT">Theft</option>
+                <option value="PHYSICAL ALTERCATION">Altercation</option>
+                <option value="VANDALISM">Vandalism</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Feed */}
+          <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
+            {finalLogsDisplay.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 py-12">
+                <AlertCircle size={20} style={{ color: 'var(--text-3)' }} />
+                <span className="label">No incidents on record</span>
               </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-3 bg-black/10 p-2 rounded-xl custom-scrollbar min-h-0">
-              {finalLogsDisplay.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center opacity-30 py-12 text-center">
-                  <AlertCircle size={20} className="mb-2 text-slate-500"/>
-                  <span className="text-[9px] font-bold uppercase tracking-widest font-mono">No Incident History</span>
-                </div>
-              ) : (
-                finalLogsDisplay.map(inc => {
-                  const isImageBroken = brokenImages[inc.id];
-                  return (
-                    <div key={inc.id} className="w-full text-left p-5 bg-[#0a0d14] border border-white/[0.04] rounded-xl flex flex-col gap-2 hover:border-white/10 transition-all relative">
-                      <div className="flex justify-between items-center text-[10px] font-mono">
-                        <span className="text-emerald-400 font-bold select-all">{inc.case_id}</span>
-                        <span className="text-slate-500 tabular-nums">{formatTo12Hour(inc.occurred_time)}</span>
-                      </div>
-
-                      <h5 className="text-[14px] font-black uppercase text-slate-200 tracking-wide mt-0.5">{inc.type}</h5>
-                      
-                      {inc.screenshot_path && !isImageBroken ? (
-                        <div className="w-full h-24 bg-black border border-white/5 rounded-lg overflow-hidden relative shadow-inner mt-1">
-                          <img 
-                            src={inc.screenshot_path.startsWith('http') ? inc.screenshot_path : `${API_URL}${inc.screenshot_path}`} 
-                            className="w-full h-full object-cover" 
-                            alt="AI Camera Log Snap" 
-                            onError={() => setBrokenImages(prev => ({ ...prev, [inc.id]: true }))}
-                          />
-                        </div>
-                      ) : inc.screenshot_path ? (
-                        <div className="w-full h-20 bg-white/[0.02] border border-white/5 border-dashed rounded-lg mt-1 flex flex-col items-center justify-center text-slate-600 gap-1 animate-in fade-in">
-                          <AlertCircle size={14} className="text-slate-500" />
-                          <span className="text-[8px] font-mono font-bold uppercase tracking-wider">Scene Image Missing (404)</span>
-                        </div>
-                      ) : null}
-
-                      <p className="text-[10px] text-slate-400 mt-1 select-text">"{inc.narrative}"</p>
-                      
-                      <div className="flex gap-2 pt-2 mt-1 border-t border-white/5 justify-end items-center text-[10px] uppercase tracking-wider font-extrabold">
-                        <div className="flex items-center gap-3">
-                          <button
-                            title={`Generate official incident report form for case ${inc.case_id}`}
-                            onClick={() => handleOpenReportFiler(inc)}
-                            className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 font-black"
-                          >
-                            <FileSignature size={12}/> Generate Police Report
-                          </button>
-                          
-                          <button
-                            onClick={() => handleExpunge(inc.id)}
-                            title="Delete log record sheet"
-                            className="p-1 text-slate-600 hover:text-rose-400 transition-colors rounded"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      </div>
+            ) : (
+              finalLogsDisplay.map(inc => {
+                const isImageBroken = brokenImages[inc.id];
+                return (
+                  <div
+                    key={inc.id}
+                    className="w-full text-left p-2.5 border-b flex flex-col gap-1.5 transition-colors hover:bg-white/[0.02] relative"
+                    style={{ borderColor: 'var(--line)' }}
+                  >
+                    <div className="flex justify-between items-center">
+                      <span className="data text-[10px] font-bold select-all" style={{ color: 'var(--accent)' }}>
+                        {inc.case_id}
+                      </span>
+                      <span className="data text-[10px]" style={{ color: 'var(--text-3)' }}>
+                        {formatTo12Hour(inc.occurred_time)}
+                      </span>
                     </div>
-                  );
-                })
-              )}
-            </div>
+
+                    <h5 className="text-[13px] font-bold uppercase text-white tracking-wide">{inc.type}</h5>
+
+                    {inc.screenshot_path && !isImageBroken ? (
+                      <div className="w-full h-24 border overflow-hidden relative" style={{ background: '#000', borderColor: 'var(--line)' }}>
+                        <img
+                          src={inc.screenshot_path.startsWith('http') ? inc.screenshot_path : `${API_URL}${inc.screenshot_path}`}
+                          className="w-full h-full object-cover"
+                          alt={`Scene capture for ${inc.case_id}`}
+                          onError={() => setBrokenImages(prev => ({ ...prev, [inc.id]: true }))}
+                        />
+                      </div>
+                    ) : inc.screenshot_path ? (
+                      <div
+                        className="w-full h-16 border border-dashed flex flex-col items-center justify-center gap-1"
+                        style={{ background: 'var(--bg)', borderColor: 'var(--line-2)' }}
+                      >
+                        <AlertCircle size={13} style={{ color: 'var(--text-3)' }} />
+                        <span className="label">Scene image unavailable</span>
+                      </div>
+                    ) : null}
+
+                    <p className="text-[10px] leading-snug select-text" style={{ color: 'var(--text-2)' }}>
+                      {inc.narrative}
+                    </p>
+
+                    <div
+                      className="flex gap-2 pt-1.5 border-t justify-end items-center"
+                      style={{ borderColor: 'var(--line)' }}
+                    >
+                      <button
+                        title={`Generate official incident report form for case ${inc.case_id}`}
+                        onClick={() => handleOpenReportFiler(inc)}
+                        className="flex items-center gap-1.5 px-2 py-1 border text-[9px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
+                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                      >
+                        <FileSignature size={11} /> Police report
+                      </button>
+
+                      <button
+                        onClick={() => handleExpunge(inc.id)}
+                        title="Remove this incident from the map"
+                        className="p-1.5 border transition-colors hover:bg-[rgba(229,52,47,0.12)]"
+                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-3)' }}
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       </div>
 
       {/* EXPUNGE CONFIRM POPUP */}
       {expungeTargetId && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-[#11141b] border border-white/10 rounded-2xl w-full max-w-sm shadow-2xl text-slate-200 p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2.5 rounded-xl bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                <Trash2 size={18} />
-              </div>
-              <h3 className="text-sm font-bold uppercase tracking-wide text-white">Remove From Map</h3>
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+          <div className="border w-full max-w-sm" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
+            <div className="h-9 flex items-center gap-2 px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <Trash2 size={13} style={{ color: 'var(--critical)' }} />
+              <span className="label" style={{ color: 'var(--text)' }}>Remove From Map</span>
             </div>
-            <p className="text-[12px] text-slate-400 leading-relaxed mb-6">
-              This case will be removed from the Map / Crime Reports view. It stays in Crime History permanently.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setExpungeTargetId(null)}
-                className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider text-slate-400 border border-white/10 hover:bg-white/5 transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmExpunge}
-                className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider bg-rose-500 text-black hover:bg-rose-400 transition-all"
-              >
-                Remove
-              </button>
+            <div className="p-4">
+              <p className="text-[12px] leading-relaxed mb-4" style={{ color: 'var(--text-2)' }}>
+                This case will be removed from the Incident Map view. It stays in the Incident Log permanently.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setExpungeTargetId(null)}
+                  className="px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmExpunge}
+                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+                  style={{ background: 'var(--critical)' }}
+                >
+                  Remove
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -620,59 +708,86 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
       {/* FILING MODAL */}
       {showFilingModal && filingTarget && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/95 backdrop-blur-md animate-in fade-in duration-300">
-          <div className="bg-[#0b0f19] border border-white/10 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl text-slate-200">
-            <div className="sticky top-0 bg-[#0b0f19] z-10 flex justify-between items-center px-6 py-4 border-b border-white/5">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-500"><FileSignature size={20}/></div>
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.82)' }}>
+          <div
+            className="border w-full max-w-3xl max-h-[90vh] overflow-y-auto custom-scrollbar"
+            style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}
+          >
+            <div
+              className="sticky top-0 z-10 h-11 flex justify-between items-center px-3 border-b"
+              style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+            >
+              <div className="flex items-center gap-2.5">
+                <FileSignature size={15} style={{ color: 'var(--accent)' }} />
                 <div>
-                  <h2 className="text-sm font-bold uppercase tracking-widest text-white">Official Police Incident Report</h2>
-                  <p className="text-[9px] text-slate-500 font-mono uppercase">Republic of the Philippines // Ormoc Police District</p>
+                  <div className="text-[12px] font-bold uppercase tracking-wide text-white leading-none">Official Police Incident Report</div>
+                  <div className="label mt-1">Republic of the Philippines · Ormoc Police District</div>
                 </div>
               </div>
               <button
-                title="Close report filing modal"
+                title="Close report filing form"
                 onClick={closeModal}
-                className="p-2 bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white rounded-full transition-all"
+                className="transition-colors hover:text-white"
+                style={{ color: 'var(--text-3)' }}
               >
-                <X size={18}/>
+                <X size={16} />
               </button>
             </div>
 
-            <div className="p-6 space-y-5">
-              <div className="grid grid-cols-3 gap-4 bg-black/20 p-4 rounded-xl border border-white/5 font-mono text-xs text-slate-400">
-                <div><span className={labelClass}>Case ID</span><span className="text-emerald-500 font-bold">{filingTarget.case_id}</span></div>
-                <div><span className={labelClass}>Type</span><span className="text-white font-bold uppercase">{filingTarget.type}</span></div>
-                <div><span className={labelClass}>Timestamp</span><span className="text-slate-300">{filingTarget.occurred_date} {formatTo12Hour(filingTarget.occurred_time)}</span></div>
+            <div className="p-4 space-y-4">
+              <div
+                className="grid grid-cols-3 gap-4 p-3 border"
+                style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
+              >
+                <div>
+                  <span className={labelClass}>Case ID</span>
+                  <span className="data text-[12px] font-bold" style={{ color: 'var(--accent)' }}>{filingTarget.case_id}</span>
+                </div>
+                <div>
+                  <span className={labelClass}>Type</span>
+                  <span className="text-[12px] font-bold uppercase text-white">{filingTarget.type}</span>
+                </div>
+                <div>
+                  <span className={labelClass}>Occurred</span>
+                  <span className="data text-[12px]" style={{ color: 'var(--text)' }}>
+                    {filingTarget.occurred_date} {formatTo12Hour(filingTarget.occurred_time)}
+                  </span>
+                </div>
               </div>
 
-              <div className="space-y-2 animate-in fade-in duration-300">
-                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                  <Video size={11} className="text-emerald-500"/> Secured Scene Forensic Evidence Snapshot
+              <div className="space-y-2">
+                <h4 className="label flex items-center gap-1.5">
+                  <Video size={11} style={{ color: 'var(--text-3)' }} /> Scene evidence capture
                 </h4>
                 {!brokenImages[filingTarget.id] ? (
-                  <div className="w-full max-h-72 bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl relative flex items-center justify-center">
-                    <img 
+                  <div
+                    className="w-full max-h-72 overflow-hidden border relative flex items-center justify-center"
+                    style={{ background: '#000', borderColor: 'var(--line)' }}
+                  >
+                    <img
                       src={reportImageUrl}
-                      className="w-full h-full object-contain max-h-72" 
-                      alt="AI Visual Evidence Log Data"
+                      className="w-full h-full object-contain max-h-72"
+                      alt={`Evidence capture for case ${filingTarget.case_id}`}
                       onError={() => setBrokenImages(prev => ({ ...prev, [filingTarget.id]: true }))}
                     />
                   </div>
                 ) : (
-                  <div className="w-full h-36 bg-white/[0.01] border border-white/5 border-dashed rounded-xl flex flex-col items-center justify-center text-slate-500 gap-1.5 shadow-inner">
-                    <ImageIcon size={18} className="text-slate-600" />
-                    <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">Secured Forensic Capture Not Found (404)</span>
+                  <div
+                    className="w-full h-32 border border-dashed flex flex-col items-center justify-center gap-1.5"
+                    style={{ background: 'var(--bg)', borderColor: 'var(--line-2)' }}
+                  >
+                    <ImageIcon size={18} style={{ color: 'var(--text-3)' }} />
+                    <span className="label">Evidence capture not found</span>
                   </div>
                 )}
                 {!filingTarget.screenshot_path && (
-                  <p className="text-[8px] text-slate-500 uppercase tracking-widest font-mono">Placeholder crime scene image used because no AI evidence frame was attached.</p>
+                  <p className="label">Placeholder image — no AI evidence frame was attached to this case.</p>
                 )}
               </div>
 
               <div className="space-y-3">
-                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                  <ShieldCheck size={11} className="text-emerald-500"/> I: Officer Credentials
+                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
+                  <ShieldCheck size={11} style={{ color: 'var(--text-3)' }} /> Officer credentials
                 </h4>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
@@ -715,8 +830,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
               </div>
 
               <div className="space-y-3">
-                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                  <MapPin size={11} className="text-emerald-500"/> II: Scene Parameters
+                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
+                  <MapPin size={11} style={{ color: 'var(--text-3)' }} /> Scene details
                 </h4>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -747,8 +862,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
               </div>
 
               <div className="space-y-3">
-                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                  <Info size={11} className="text-emerald-500"/> III: Involved Parties
+                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
+                  <Info size={11} style={{ color: 'var(--text-3)' }} /> Involved parties
                 </h4>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -777,8 +892,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
               </div>
 
               <div className="space-y-3">
-                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                  <FileText size={11} className="text-emerald-500"/> IV: Evidence & Damage
+                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
+                  <FileText size={11} style={{ color: 'var(--text-3)' }} /> Evidence and damage
                 </h4>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -809,8 +924,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
               </div>
 
               <div className="space-y-3">
-                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-                  <ShieldAlert size={11} className="text-emerald-500"/> V: Disposition & Signatures
+                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
+                  <ShieldAlert size={11} style={{ color: 'var(--text-3)' }} /> Disposition and signatures
                 </h4>
                 <div className="space-y-3">
                   <div>
@@ -821,7 +936,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                       rows={2}
                       value={filingTarget.narrative}
                       disabled
-                      className="w-full bg-black/40 border border-white/5 rounded-lg p-2.5 text-xs text-slate-400 cursor-not-allowed outline-none font-sans"
+                      className="w-full border p-2.5 text-[12px] cursor-not-allowed outline-none resize-none"
+                      style={{ background: 'var(--panel-2)', borderColor: 'var(--line)', color: 'var(--text-2)' }}
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -854,22 +970,37 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
               </div>
             </div>
 
-            <div className="sticky bottom-0 bg-[#0b0f19] border-t border-white/5 px-6 py-4 flex justify-end gap-3">
-              <button
-                title="Cancel and close report filing"
-                onClick={closeModal}
-                className="px-5 py-2.5 border border-white/5 text-[10px] uppercase font-bold text-slate-400 hover:bg-white/5 rounded-xl tracking-widest transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                title="Commit and sign the official police report"
-                onClick={handleSubmitOfficialReport}
-                disabled={!reportForm.badgeNumber || !reportForm.reportingOfficer}
-                className="px-6 py-2.5 bg-emerald-500 disabled:opacity-20 disabled:cursor-not-allowed text-black text-[10px] tracking-widest font-black uppercase rounded-xl hover:bg-emerald-400 transition-all flex items-center gap-2 shadow-xl"
-              >
-                <Check size={14}/> Commit & Sign Report
-              </button>
+            <div
+              className="sticky bottom-0 border-t px-4 py-3 flex justify-between items-center gap-3"
+              style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+            >
+              {/* Say WHY the submit is disabled -- an officer staring at a
+                  greyed-out button otherwise has to guess which of ~11 fields
+                  is the blocker. */}
+              <span className="label">
+                {(!reportForm.badgeNumber || !reportForm.reportingOfficer)
+                  ? 'Officer name and badge number are required'
+                  : 'Ready to file'}
+              </span>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  title="Cancel and close report filing"
+                  onClick={closeModal}
+                  className="px-3.5 py-2 border text-[10px] uppercase font-bold tracking-wider transition-colors hover:bg-white/5"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  title="Commit and sign the official police report"
+                  onClick={handleSubmitOfficialReport}
+                  disabled={!reportForm.badgeNumber || !reportForm.reportingOfficer}
+                  className="px-4 py-2 text-[10px] tracking-wider font-bold uppercase text-white transition-opacity hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-2"
+                  style={{ background: 'var(--accent)' }}
+                >
+                  <Check size={13} /> File report
+                </button>
+              </div>
             </div>
 
           </div>

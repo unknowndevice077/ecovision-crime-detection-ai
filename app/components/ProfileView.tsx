@@ -14,98 +14,137 @@ interface ProfileViewProps {
     display_title?: string;
     is_sub_admin?: boolean;
   };
-  time: string;
   onLogout: () => void;
+}
+
+/* A labelled read-only field -- the profile screen is a credentials record,
+   so every value gets the same label-over-value treatment as the incident
+   log rather than bespoke card styling per item. */
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="border p-3" style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}>
+      <span className="label block mb-1.5">{label}</span>
+      {children}
+    </div>
+  );
 }
 
 export default function ProfileView({ currentUser, onLogout }: ProfileViewProps) {
   const { permissions } = usePermissions();
 
-  if (!currentUser) return <div className="p-8 text-slate-500 font-mono text-xs">Awaiting operator scope ingestion...</div>;
+  if (!currentUser) {
+    return <div className="label p-6">Loading operator record…</div>;
+  }
 
-  const labelClass = "text-[8px] font-mono text-slate-500 uppercase block mb-1 font-black tracking-widest";
   const activePerms = Object.entries(permissions).filter(([, v]) => v).map(([k]) => k);
 
   return (
-    <div className="h-full bg-[#0E131F]/40 border border-white/[0.04] p-8 rounded-[2.5rem] shadow-2xl flex flex-col gap-6 overflow-y-auto custom-scrollbar animate-in fade-in duration-300 text-slate-200">
-      
-      {/* PROFILE HEADER WITH MINI ICON LOGOUT REPOSITIONED TO THE RIGHT */}
-      <div className="flex items-center justify-between pb-4 border-b border-white/5 shrink-0">
-        <div className="flex items-center gap-4 min-w-0">
-          <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-500/20 to-teal-500/5 text-emerald-400 border border-emerald-500/20 shadow-xl shadow-emerald-500/5 shrink-0">
-            <User size={32} />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-lg font-mono font-black text-white uppercase tracking-wide truncate">{currentUser.username || "Unknown Operator"}</h3>
-            <p className="text-xs font-mono text-slate-500 uppercase tracking-widest mt-1">
-              {currentUser.display_title || "Personnel Authentication Summary Ledger"}
-            </p>
-          </div>
-        </div>
-
-        {/* COMPACT CLEAN LOGOUT ACTION PLACED NEXT TO NAME */}
+    <div
+      className="h-full border flex flex-col overflow-y-auto custom-scrollbar"
+      style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+    >
+      {/* Header */}
+      <div className="h-9 shrink-0 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+        <span className="label" style={{ color: 'var(--text)' }}>Operator Record</span>
         <button
           onClick={onLogout}
-          title="Terminate active session shell"
-          className="p-3 bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-black border border-rose-500/20 rounded-xl transition-all duration-200 shadow-md group shrink-0 ml-4 flex items-center gap-1.5 text-[10px] font-mono font-bold uppercase tracking-wider"
+          title="Sign out of this terminal"
+          className="flex items-center gap-1.5 px-2 py-1 border text-[10px] font-bold uppercase tracking-wider transition-colors hover:bg-[rgba(229,52,47,0.12)]"
+          style={{ borderColor: 'var(--critical)', color: 'var(--critical)' }}
         >
-          <LogOut size={14} />
-          <span className="hidden sm:inline">Logout</span>
+          <LogOut size={12} /> Sign out
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 shrink-0">
-        <div className="bg-black/30 border border-white/[0.03] p-5 rounded-2xl font-mono shadow-inner">
-          <span className={labelClass}>Clearance Mapping Group</span>
-          <div className="flex items-center gap-2 mt-1">
-            <Shield size={14} className="text-emerald-400" />
-            <span className="text-xs font-bold text-white uppercase">{(currentUser.role || "GUEST").toUpperCase()} ACCESS CONTROL</span>
+      <div className="p-3 space-y-3">
+        {/* Identity */}
+        <div className="flex items-center gap-3 border p-3" style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}>
+          <div
+            className="w-12 h-12 shrink-0 flex items-center justify-center border"
+            style={{ background: 'var(--bg)', borderColor: 'var(--line-2)', color: 'var(--accent)' }}
+          >
+            <User size={24} />
           </div>
-        </div>
-        <div className="bg-black/30 border border-white/[0.03] p-5 rounded-2xl font-mono shadow-inner">
-          <span className={labelClass}>Assigned Deployment Field</span>
-          <div className="flex items-center gap-2 mt-1">
-            <MapPin size={14} className="text-teal-400" />
-            <span className="text-xs font-bold text-slate-200 uppercase">{(currentUser.barangay_id?.toUpperCase() || "GLOBAL")} SECTOR DETACHMENT</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-black/20 border border-white/[0.03] rounded-2xl p-6 space-y-4 font-mono shadow-2xl flex-1">
-        <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-2">
-          <Key size={12} className="text-emerald-400"/> {`Operational Cryptographic Signatures`}
-        </h4>
-        <div className="grid grid-cols-3 gap-4 border-t border-white/5 pt-4 text-xs">
-          <div>
-            <span className={labelClass}>Badge Status</span>
-            <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[9px] font-black uppercase tracking-wider flex items-center gap-1 w-max">
-              <ShieldCheck size={10}/> Verified
-            </span>
-          </div>
-          <div>
-            <span className={labelClass}>Station Base Terminal</span>
-            <span className="text-slate-300 font-bold uppercase text-[11px]">{currentUser.assignment || "UNASSIGNED"}</span>
-          </div>
-          <div>
-            <span className={labelClass}>Node Reference Token</span>
-            <span className="text-slate-500 font-bold font-mono text-[11px]">SEC-ID: {currentUser.id || "0"}026</span>
-          </div>
-        </div>
-
-        {currentUser.is_sub_admin && (
-          <div className="border-t border-white/5 pt-4">
-            <span className={labelClass}>Granted Permission Scopes</span>
-            <div className="flex flex-wrap gap-2 mt-2">
-              {activePerms.length > 0 ? activePerms.map((p) => (
-                <span key={p} className="px-2 py-1 rounded bg-teal-500/10 text-teal-400 border border-teal-500/20 text-[9px] font-black uppercase tracking-wider">
-                  {p.replace(/_/g, ' ')}
-                </span>
-              )) : (
-                <span className="text-slate-600 text-[10px] uppercase">No scopes granted</span>
-              )}
+          <div className="min-w-0">
+            <div className="text-[15px] font-bold text-white tracking-wide truncate">
+              {currentUser.username || 'Unknown operator'}
+            </div>
+            <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--text-2)' }}>
+              {currentUser.display_title || 'Personnel authentication record'}
             </div>
           </div>
-        )}
+        </div>
+
+        {/* Clearance + posting */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Clearance level">
+            <div className="flex items-center gap-1.5">
+              <Shield size={13} style={{ color: 'var(--accent)' }} />
+              <span className="text-[12px] font-bold text-white uppercase tracking-wide">
+                {(currentUser.role || 'GUEST').toUpperCase()}
+              </span>
+            </div>
+          </Field>
+          <Field label="Assigned area">
+            <div className="flex items-center gap-1.5">
+              <MapPin size={13} style={{ color: 'var(--text-3)' }} />
+              <span className="text-[12px] font-bold uppercase tracking-wide" style={{ color: 'var(--text)' }}>
+                {currentUser.barangay_id?.toUpperCase() || 'GLOBAL'}
+              </span>
+            </div>
+          </Field>
+        </div>
+
+        {/* Credentials */}
+        <div className="border" style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}>
+          <div className="h-8 flex items-center gap-1.5 px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+            <Key size={11} style={{ color: 'var(--text-3)' }} />
+            <span className="label">Credentials</span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 p-3">
+            <div>
+              <span className="label block mb-1.5">Badge status</span>
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider"
+                style={{ color: 'var(--ok)', borderColor: 'var(--ok)' }}
+              >
+                <ShieldCheck size={10} /> Verified
+              </span>
+            </div>
+            <div>
+              <span className="label block mb-1.5">Station</span>
+              <span className="text-[11px] font-bold uppercase" style={{ color: 'var(--text)' }}>
+                {currentUser.assignment || 'UNASSIGNED'}
+              </span>
+            </div>
+            <div>
+              <span className="label block mb-1.5">Operator ID</span>
+              <span className="data text-[11px]" style={{ color: 'var(--text-2)' }}>
+                SEC-{currentUser.id || '0'}026
+              </span>
+            </div>
+          </div>
+
+          {currentUser.is_sub_admin && (
+            <div className="border-t p-3" style={{ borderColor: 'var(--line)' }}>
+              <span className="label block mb-1.5">Granted permissions</span>
+              <div className="flex flex-wrap gap-1.5">
+                {activePerms.length > 0 ? activePerms.map((p) => (
+                  <span
+                    key={p}
+                    className="px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider"
+                    style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}
+                  >
+                    {p.replace(/_/g, ' ')}
+                  </span>
+                )) : (
+                  <span className="label">None granted</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

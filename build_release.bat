@@ -6,13 +6,29 @@ echo ─────────────────────────
 
 cd /d "%~dp0"
 
-echo [0/5] Verifying python-env exists (run setup.bat first if missing)...
+echo [0/5] Verifying python-env and model weights exist (run setup.bat first if missing)...
 if not exist "python-env\Scripts\python.exe" (
     echo ❌ python-env not found or incomplete. Run setup.bat before building.
     pause
     exit /b 1
 )
-echo  =^> python-env found.
+if not exist "weights\x3d_xs_violence_best.pt" (
+    echo ❌ weights\x3d_xs_violence_best.pt not found -- the packaged app would ship
+    echo    non-functional. See README.md "Add Model Weights".
+    pause
+    exit /b 1
+)
+if not exist "weights\yolo11s-pose.pt" if not exist "weights\yolo11s-pose.engine" (
+    echo ❌ weights\yolo11s-pose.pt (or .engine^) not found.
+    pause
+    exit /b 1
+)
+if not exist "weights\weapon_signs.pt" if not exist "weights\weapon_signs.engine" (
+    echo ❌ weights\weapon_signs.pt (or .engine^) not found.
+    pause
+    exit /b 1
+)
+echo  =^> python-env and weights found.
 
 echo.
 echo [1/5] Cleaning previous build output...

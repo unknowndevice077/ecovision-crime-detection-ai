@@ -40,6 +40,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const listenersRef = useRef<Map<string, Set<Listener>>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Fixed 3s-forever reconnect would hammer a genuinely-down backend
+  // indefinitely (a real 24/7-monitoring failure mode: backend crash,
+  // extended brownout). Back off exponentially instead, capped at 30s, and
+  // reset back to the fast 3s delay the moment a connection actually opens.
+  const reconnectDelay = useRef(3000);
+  const RECONNECT_MIN_MS = 3000;
+  const RECONNECT_MAX_MS = 30000;
 
   const connect = useCallback(() => {
     // apiUrl starts at the historical default and updates once
@@ -51,7 +58,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      reconnectDelay.current = RECONNECT_MIN_MS; // connection succeeded, reset backoff
+    };
 
     ws.onmessage = (event) => {
       try {
@@ -69,9 +79,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
     ws.onclose = () => {
       setConnected(false);
-      // simple backoff reconnect -- a dropped wifi link on a smartpole
-      // shouldn't require a manual page refresh to recover live updates
-      reconnectTimer.current = setTimeout(connect, 3000);
+      // Exponential backoff reconnect -- a dropped wifi link on a smartpole
+      // shouldn't require a manual page refresh to recover live updates, but
+      // an extended backend outage shouldn't be hammered at a fixed 3s pace
+      // forever either.
+      reconnectTimer.current = setTimeout(connect, reconnectDelay.current);
+      reconnectDelay.current = Math.min(reconnectDelay.current * 2, RECONNECT_MAX_MS);
     };
 
     ws.onerror = () => ws.close();

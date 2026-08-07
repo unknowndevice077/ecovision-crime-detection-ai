@@ -16,6 +16,7 @@ import numpy as np
 import threading
 import collections
 import requests
+import asyncio
 from datetime import datetime, timedelta
 import time
 import hashlib
@@ -528,15 +529,44 @@ def _user_permissions_json(cursor, user_id: int) -> str:
     granted = {row[0]: True for row in cursor.fetchall()}
     return json.dumps(granted)
 
-def _row_to_user_dict(cursor, row) -> dict:
+def _user_permissions_json_batch(cursor, user_ids: list) -> dict:
+    """Same as _user_permissions_json but for many users in ONE query --
+    use this whenever building more than one user dict at a time (was a
+    per-user query in a loop, i.e. N+1, in list_my_users/devteam_overview)."""
+    if not user_ids:
+        return {}
+    placeholders = ",".join("?" for _ in user_ids)
+    cursor.execute(
+        f"SELECT user_id, permission_key FROM user_permissions WHERE user_id IN ({placeholders})",
+        tuple(user_ids),
+    )
+    grouped: dict = {uid: {} for uid in user_ids}
+    for row in cursor.fetchall():
+        grouped.setdefault(row["user_id"], {})[row["permission_key"]] = True
+    return {uid: json.dumps(perms) for uid, perms in grouped.items()}
+
+def _row_to_user_dict_base(row) -> dict:
     d = dict(row)
     return {
         "id": d["id"], "username": d["username"], "role": d["role"],
         "barangay_id": d.get("barangay_id"), "assignment": d.get("assignment"),
         "parent_admin_id": d.get("parent_admin_id"), "display_title": d.get("display_title"),
         "is_sub_admin": bool(d.get("is_sub_admin")),
-        "permissions": _user_permissions_json(cursor, d["id"]),
     }
+
+def _row_to_user_dict(cursor, row) -> dict:
+    u = _row_to_user_dict_base(row)
+    u["permissions"] = _user_permissions_json(cursor, u["id"])
+    return u
+
+def _rows_to_user_dicts_batch(cursor, rows) -> list:
+    """Batched equivalent of [_row_to_user_dict(cursor, r) for r in rows] --
+    one permissions query total instead of one per row."""
+    users = [_row_to_user_dict_base(r) for r in rows]
+    perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])
+    for u in users:
+        u["permissions"] = perms_by_id.get(u["id"], "{}")
+    return users
 
 
 # --- PERSISTENT CAMERA ROUTINES ---
@@ -647,13 +677,24 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
         redact = False
 
     inc_rows = cursor.fetchall()
+
+    # Was 2 extra queries PER incident row (N+1) -- batch both child tables
+    # in one IN(...) query each instead, keyed by incident_id.
+    inc_ids = [inc["id"] for inc in inc_rows]
+    details_by_id: dict = {}
+    vis_by_id: dict = {}
+    if inc_ids:
+        placeholders = ",".join("?" for _ in inc_ids)
+        cursor.execute(f"SELECT * FROM incident_details WHERE incident_id IN ({placeholders})", tuple(inc_ids))
+        for row in cursor.fetchall():
+            details_by_id[row["incident_id"]] = row
+        cursor.execute(f"SELECT * FROM incident_visibility WHERE incident_id IN ({placeholders})", tuple(inc_ids))
+        for row in cursor.fetchall():
+            vis_by_id[row["incident_id"]] = row
+
     results = []
     for inc in inc_rows:
-        cursor.execute("SELECT * FROM incident_details WHERE incident_id = ?", (inc["id"],))
-        details = cursor.fetchone()
-        cursor.execute("SELECT * FROM incident_visibility WHERE incident_id = ?", (inc["id"],))
-        vis = cursor.fetchone()
-        record = _row_to_incident_dict(inc, details, vis)
+        record = _row_to_incident_dict(inc, details_by_id.get(inc["id"]), vis_by_id.get(inc["id"]))
         if redact:
             record["narrative"] = "🔒 [RESTRICTED] Investigative logs masked for non-police profiles."
             record["nature_of_call"] = "CONFIDENTIAL // RESTRICTED"
@@ -751,7 +792,12 @@ async def panic_trigger(data: PanicSchema):
 
     screenshot_url = ""
     try:
-        cap_res = requests.post(_ai_core_capture_url(), json={"incident_id": incident_id}, timeout=2.0)
+        # requests.post is blocking I/O -- run it off the event loop so this
+        # (up to 2s) call doesn't stall every other in-flight request and the
+        # /ws WebSocket for its duration.
+        cap_res = await asyncio.to_thread(
+            requests.post, _ai_core_capture_url(), json={"incident_id": incident_id}, timeout=2.0
+        )
         if cap_res.ok:
             screenshot_url = cap_res.json().get("screenshot_path") or ""
             print(f"🚨 [PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
@@ -905,7 +951,7 @@ async def siren_activate(authorization: Optional[str] = Header(None)):
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     conn.close()
     try:
-        requests.post(f"http://{ESP32_IP}/siren/on", timeout=2.0)
+        await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/on", timeout=2.0)
     except Exception as e:
         print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
     return {"status": "activate_sent"}
@@ -918,7 +964,7 @@ async def siren_deactivate(authorization: Optional[str] = Header(None)):
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     conn.close()
     try:
-        requests.post(f"http://{ESP32_IP}/siren/off", timeout=2.0)
+        await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/off", timeout=2.0)
     except Exception as e:
         print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
     return {"status": "deactivate_sent"}
@@ -1144,7 +1190,7 @@ async def list_my_users(authorization: Optional[str] = Header(None)):
     else:
         cursor.execute("SELECT * FROM users WHERE parent_admin_id = ?", (payload["id"],))
     rows = cursor.fetchall()
-    result = [_row_to_user_dict(cursor, r) for r in rows]
+    result = _rows_to_user_dicts_batch(cursor, rows)
     conn.close()
     return result
 
@@ -1392,11 +1438,11 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     cursor = conn.cursor()
 
     cursor.execute("SELECT id, username, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin FROM users")
-    users = []
-    for r in cursor.fetchall():
-        u = dict(r)
-        u["permissions"] = _user_permissions_json(cursor, u["id"])
-        users.append(u)
+    user_rows = cursor.fetchall()
+    users = [dict(r) for r in user_rows]
+    perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])
+    for u in users:
+        u["permissions"] = perms_by_id.get(u["id"], "{}")
 
     cursor.execute("SELECT COUNT(*) AS c FROM incidents")
     incident_count = cursor.fetchone()["c"]

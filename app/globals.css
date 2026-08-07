@@ -1,100 +1,130 @@
-/* 1. The new v4 Entry Point */
+/* 1. Tailwind v4 entry point */
 @import "tailwindcss";
 
-/* 2. Link your config file so Tailwind knows your custom colors/animations */
+/* 2. Link config file for custom colors/animations */
 @config "../tailwind.config.ts";
 
-/* 3. Tactical UI Utilities */
-@layer utilities {
-  .glass {
-    @apply bg-slate-900/40 backdrop-blur-xl border border-white/10;
-  }
-  .glass-dark {
-    @apply bg-black/40 backdrop-blur-2xl border border-white/5;
-  }
-  .neon-blue {
-    box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
-  }
-  .neon-red {
-    box-shadow: 0 0 30px rgba(239, 68, 68, 0.3);
-  }
-  .text-balance {
-    text-wrap: balance;
-  }
+/* ==========================================================================
+   EcoVision Sentinel -- Command Console design tokens
+   --------------------------------------------------------------------------
+   Design intent: this is a 24/7 security monitoring station, not a consumer
+   app. Priorities, in order:
+     1. Legibility of live video and incident data at a glance
+     2. Color reserved STRICTLY for status semantics -- never decoration, so
+        that anything colored genuinely means something to the operator
+     3. Low visual noise -- an operator stares at this for a full shift;
+        gradients, glows and idle animation cause fatigue and dilute real
+        alerts
+   ========================================================================== */
+:root {
+  --bg:        #0A0C10;   /* base canvas */
+  --panel:     #111419;   /* panel surface */
+  --panel-2:   #161A21;   /* raised surface / hover */
+  --line:      #232936;   /* borders, dividers */
+  --line-2:    #2E3644;   /* emphasized border */
+
+  --text:      #DDE3EC;   /* primary text */
+  --text-2:    #8892A4;   /* secondary / labels */
+  --text-3:    #5C6474;   /* tertiary / disabled */
+
+  --accent:    #2D6FF7;   /* institutional blue -- selection, active nav */
+  --critical:  #E5342F;   /* active threat, requires action */
+  --warn:      #E08A00;   /* degraded, pending review */
+  --ok:        #1FA34A;   /* nominal */
 }
 
-/* 4. Global Core Styles */
 body {
-  @apply bg-[#020617] text-slate-100 antialiased overflow-hidden;
-  font-family: 'Inter', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
-/* 5. Neon Command Accents */
-.neon-border-emerald {
-  @apply border-emerald-500/50;
-  box-shadow: 0 0 15px rgba(16, 185, 129, 0.2);
+/* All numeric/identifier data uses tabular monospace so columns align and
+   digits don't jitter as values update -- important when reading timestamps
+   and confidence values off a live feed. */
+.data {
+  font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
-.neon-border-red {
-  @apply border-red-500/50;
-  box-shadow: 0 0 15px rgba(239, 68, 68, 0.2);
+/* Section/field label convention */
+.label {
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
-/* 6. Neural Scan Animation */
-.scanline {
-  width: 100%;
-  height: 2px;
-  background: rgba(16, 185, 129, 0.2);
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 10;
-  animation: scan 4s linear infinite;
+/* Status dot -- the single approved use of a "glow", because a live/recording
+   indicator genuinely needs to read instantly from across a room. */
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  display: inline-block;
+  flex: none;
+}
+.status-dot.live  { background: var(--critical); box-shadow: 0 0 6px rgba(229, 52, 47, 0.9); }
+.status-dot.ok    { background: var(--ok); }
+.status-dot.warn  { background: var(--warn); }
+.status-dot.off   { background: var(--text-3); }
+
+/* Slow, low-amplitude pulse. Reserved for genuinely-active threat states
+   only -- fast/constant pulsing across the UI is what makes an operator stop
+   noticing the one thing that matters. */
+@keyframes sentinel-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.pulse-alert { animation: sentinel-pulse 1.8s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-alert { animation: none; }
 }
 
-@keyframes scan {
-  0% { top: 0; }
-  100% { top: 100%; }
+/* Burned-in video overlay text -- mimics real CCTV OSD, kept legible over
+   arbitrary bright/dark footage via a hard shadow rather than a panel. */
+.osd {
+  font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 1px rgba(0, 0, 0, 1);
+  letter-spacing: 0.04em;
 }
 
-/* 7. Custom Tactical Scrollbar (Module Level) */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 4px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
+/* Scrollbars: thin, neutral, always visible enough to show position */
+.custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: var(--bg); }
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  @apply bg-white/5 rounded-full;
+  background: var(--line-2);
+  border: 2px solid var(--bg);
+  border-radius: 0;
 }
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  @apply bg-white/10;
-}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3B4557; }
 
-/* 8. Global Scrollbar (Browser Level) */
-::-webkit-scrollbar { 
-  width: 3px; 
-}
-::-webkit-scrollbar-track { 
-  background: transparent; 
-}
-::-webkit-scrollbar-thumb { 
-  background: #1e293b; 
-  border-radius: 10px; 
-}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 0; }
 
-/* 9. Map Marker Logic (Crucial for CrimeReportsView) */
+/* Leaflet marker reset (CrimeReportsView) */
 .custom-div-icon {
   background: none !important;
   border: none !important;
 }
 
-/* 10. Accessibility & UI Polish */
 ::selection {
-  @apply bg-emerald-500/30 text-emerald-400;
+  background: rgba(45, 111, 247, 0.35);
+  color: #fff;
 }
 
-/* Fix for Select visibility in certain browsers */
-select {
-  color-scheme: dark;
+select { color-scheme: dark; }
+
+input:focus-visible,
+button:focus-visible,
+select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }

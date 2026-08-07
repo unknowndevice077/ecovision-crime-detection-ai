@@ -18,25 +18,45 @@ if errorlevel 1 (
 )
 
 echo.
-echo [1/4] Installing frontend dependencies...
+echo [1/5] Installing frontend dependencies...
 call npm install
 if errorlevel 1 goto :error
 
 echo.
-echo [2/4] Building frontend...
+echo [2/5] Building frontend...
 call npm run build
 if errorlevel 1 goto :error
 
 echo.
-echo [3/4] Creating Python environment (CPU build by default)...
-python -m venv python-env
-call python-env\Scripts\pip install --upgrade pip
-call python-env\Scripts\pip install -r requirements.txt
+echo [3/5] Creating dev environment (.venv) -- this is what run_dev_system.bat uses...
+if exist .venv (
+    echo  =^> .venv already exists, skipping creation. Delete it first to rebuild from scratch.
+) else (
+    python -m venv .venv
+    if errorlevel 1 goto :error
+)
+call .venv\Scripts\pip install --upgrade pip
+call .venv\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 if errorlevel 1 goto :error
 
 echo.
-echo [4/4] Setup complete. python-env is ready for build_release.bat.
-echo Run start.bat (or npx electron .) to launch the app locally.
+echo [4/5] Creating portable-build environment (python-env) -- this is what gets
+echo       bundled into the installer by build_release.bat...
+if exist python-env (
+    echo  =^> python-env already exists, skipping creation. Delete it first to rebuild from scratch.
+) else (
+    python -m venv python-env
+    if errorlevel 1 goto :error
+)
+call python-env\Scripts\pip install --upgrade pip
+call python-env\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+if errorlevel 1 goto :error
+
+echo.
+echo [5/5] Setup complete.
+echo  - Run run_dev_system.bat for hot-reload local development (uses .venv)
+echo  - Run build_release.bat to package the installer (uses python-env)
+echo  - Run start.bat to test the packaged-style app locally without building an exe
 goto :end
 
 :error

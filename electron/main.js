@@ -3,6 +3,7 @@ const { spawn, execSync } = require("child_process");
 const path = require("path");
 const http = require("http");
 const fs = require("fs");
+const fsp = require("fs/promises");
 const os = require("os");
 
 app.disableHardwareAcceleration();
@@ -470,7 +471,12 @@ ipcMain.handle("setup:select-directory", async () => {
   return { path: installDir };
 });
 
-function copyAppResourcesInto(targetDir) {
+// Was fs.cpSync -- fully synchronous, so copying "weights" (large ML model
+// files) blocked the Electron main process for the whole duration, which
+// also stalls the setup window's IPC (sendLog/sendProgress calls queued
+// behind it, making the window appear frozen). fs.promises.cp does the copy
+// on libuv's threadpool instead, keeping the main process responsive.
+async function copyAppResourcesInto(targetDir) {
   const entries = [
     { from: path.join(RESOURCES_ROOT, "backend"), to: path.join(targetDir, "backend") },
     { from: path.join(RESOURCES_ROOT, "maincode"), to: path.join(targetDir, "maincode") },
@@ -481,7 +487,7 @@ function copyAppResourcesInto(targetDir) {
   for (const { from, to } of entries) {
     if (!fs.existsSync(from)) continue;
     sendLog(`Copying ${path.basename(from)}...`);
-    fs.cpSync(from, to, { recursive: true, force: true });
+    await fsp.cp(from, to, { recursive: true, force: true });
   }
 }
 
@@ -513,27 +519,29 @@ function surfaceBootstrapCredentials(appDataDir) {
   }
 }
 
-ipcMain.on("setup:start", (_event, targetInstallDir) => {
-  const appDataDir = targetInstallDir || resolveVenvInstallDir();
-  const venvDir = path.join(appDataDir, ".venv");
+ipcMain.on("setup:start", async (_event, targetInstallDir) => {
+  try {
+    const appDataDir = targetInstallDir || resolveVenvInstallDir();
+    const venvDir = path.join(appDataDir, ".venv");
 
-  fs.mkdirSync(appDataDir, { recursive: true });
-  sendInstallPath(appDataDir);
+    fs.mkdirSync(appDataDir, { recursive: true });
+    sendInstallPath(appDataDir);
 
-  sendProgress(2, "Copying application files...");
-  copyAppResourcesInto(appDataDir);
+    sendProgress(2, "Copying application files...");
+    await copyAppResourcesInto(appDataDir);
 
-  runFirstTimeSetup(venvDir, path.join(appDataDir, "requirements.txt"))
-    .then(() => {
-      const configDir = path.dirname(CONFIG_PATH);
-      if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
-      }
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ venvDir, appDataDir }), "utf8");
-      sendProgress(100, "Launching...");
-      setTimeout(() => { setupWindow.close(); launchMainApp(); }, 800);
-    })
-    .catch((err) => sendError(err.message));
+    await runFirstTimeSetup(venvDir, path.join(appDataDir, "requirements.txt"));
+
+    const configDir = path.dirname(CONFIG_PATH);
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ venvDir, appDataDir }), "utf8");
+    sendProgress(100, "Launching...");
+    setTimeout(() => { setupWindow.close(); launchMainApp(); }, 800);
+  } catch (err) {
+    sendError(err.message);
+  }
 });
 
 async function launchMainApp() {

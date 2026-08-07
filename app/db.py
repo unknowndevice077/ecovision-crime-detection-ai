@@ -27,17 +27,26 @@ _QMARK_RE = re.compile(r"\?")
 
 
 class Row:
-    __slots__ = ("_cols", "_vals")
+    __slots__ = ("_cols", "_vals", "_idx")
 
-    def __init__(self, cols, vals):
+    def __init__(self, cols, vals, idx=None):
         self._cols = cols
         self._vals = vals
+        # `idx` is a name->position map shared across every Row built from the
+        # same query result (built once in fetchall()/_wrap() below), so
+        # column lookups by name are O(1) instead of the O(columns) linear
+        # scan `_cols.index(key)` would do on every single field access --
+        # this matters because Row is used pervasively (dict(row), row["col"])
+        # including per-row loops that touch a dozen-plus fields each.
+        self._idx = idx
 
     def keys(self):
         return self._cols
 
     def __getitem__(self, key):
         if isinstance(key, str):
+            if self._idx is not None:
+                return self._vals[self._idx[key]]
             return self._vals[self._cols.index(key)]
         return self._vals[key]
 
@@ -94,14 +103,16 @@ class _PostgresCursor:
         if raw_row is None:
             return None
         cols = [d[0] for d in self._c.description]
-        return Row(cols, list(raw_row))
+        idx = {c: i for i, c in enumerate(cols)}
+        return Row(cols, list(raw_row), idx)
 
     def fetchone(self):
         return self._wrap(self._c.fetchone())
 
     def fetchall(self):
         cols = [d[0] for d in self._c.description] if self._c.description else []
-        return [Row(cols, list(r)) for r in self._c.fetchall()]
+        idx = {c: i for i, c in enumerate(cols)}
+        return [Row(cols, list(r), idx) for r in self._c.fetchall()]
 
     @property
     def rowcount(self):
@@ -129,15 +140,35 @@ class _PostgresConnection:
         self._conn.rollback()
 
     def close(self):
-        self._conn.close()
+        # Return the connection to the pool instead of actually closing the
+        # socket -- every route in backend.py does get_conn()...close() per
+        # request, which previously meant a fresh TCP handshake + auth to
+        # Postgres on every single API call. Pooling here is transparent to
+        # every existing call site since they only ever call .close().
+        if _pg_pool is not None:
+            # A connection left mid-transaction (an exception before commit)
+            # would poison the pool for the next borrower -- roll back first.
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            _pg_pool.putconn(self._conn)
+        else:
+            self._conn.close()
 
     def executescript(self, script: str):
         cur = self.cursor()
         cur.executescript(script)
 
 
+_pg_pool = None
+if DB_KIND == "postgres":
+    from psycopg2.pool import ThreadedConnectionPool
+    _pg_pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=DATABASE_URL)
+
+
 def _get_conn_postgres():
-    raw = psycopg2.connect(DATABASE_URL)
+    raw = _pg_pool.getconn() if _pg_pool is not None else psycopg2.connect(DATABASE_URL)
     return _PostgresConnection(raw)
 
 
@@ -188,14 +219,16 @@ class _SQLiteCursor:
         if raw_row is None:
             return None
         cols = [d[0] for d in self._c.description]
-        return Row(cols, list(raw_row))
+        idx = {c: i for i, c in enumerate(cols)}
+        return Row(cols, list(raw_row), idx)
 
     def fetchone(self):
         return self._wrap(self._c.fetchone())
 
     def fetchall(self):
         cols = [d[0] for d in self._c.description] if self._c.description else []
-        return [Row(cols, list(r)) for r in self._c.fetchall()]
+        idx = {c: i for i, c in enumerate(cols)}
+        return [Row(cols, list(r), idx) for r in self._c.fetchall()]
 
     @property
     def lastrowid(self):

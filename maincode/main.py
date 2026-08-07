@@ -13,6 +13,13 @@ class UltralyticsNoiseFilter(logging.Filter):
 # Bind our custom diagnostic filter straight into the main Ultralytics logging registry
 logging.getLogger("ultralytics").addFilter(UltralyticsNoiseFilter())
 
+# OpenCV's OBSENSOR backend (for Orbbec depth cameras -- hardware this project
+# does not use) probes UVC channels on every VideoCapture attempt and throws an
+# untranslated C++ exception out of both open() and read() when the index has no
+# device on it. That killed the AI core on startup. Must be set BEFORE cv2 is
+# imported -- the videoio backend registry is built at import time.
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_OBSENSOR", "0")
+
 import cv2
 import time
 import signal
@@ -27,7 +34,17 @@ from unittest.mock import MagicMock
 from types import ModuleType
 from concurrent.futures import ThreadPoolExecutor
 import torch
-from port_utils import find_free_port, write_runtime_port
+try:
+    # Packaged builds have port_utils.py copied next to this file (see
+    # package.json extraResources), so this plain import succeeds there.
+    from port_utils import find_free_port, write_runtime_port
+except ModuleNotFoundError:
+    # Running from the repo in dev: port_utils.py lives in app\, not
+    # maincode\, so sys.path[0] (this file's dir) doesn't contain it.
+    # run_dev_system.bat sets PYTHONPATH for this, but fall back here too so
+    # invoking "python maincode/main.py" directly still works.
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
+    from port_utils import find_free_port, write_runtime_port
 # ──────────────────────────────────────────────────────────────────────────────
 # 0. DEPENDENCY CHECK
 # ──────────────────────────────────────────────────────────────────────────────
@@ -358,15 +375,20 @@ x3d_detector   = X3DViolenceDetector(model_path=x3d_model_path, device=TARGET_DE
 print(f"📦 [ENGINE LOADER] Using Pose Pipeline: {pose_file_name}")
 print(f"📦 [ENGINE LOADER] Using Weapon Pipeline: {weapon_file_name}")
 
+# NOTE: do NOT call .model.half() here. Ultralytics converts to fp16 itself
+# when half=True is passed to predict()/track(), and it does so in the right
+# ORDER -- it fuses conv+bn layers FIRST, then halves. Pre-halving the
+# weights here meant fuse_conv_and_bn() later hit fp16 conv weights against
+# fp32 batchnorm params and died with
+#   "expected mat1 and mat2 to have the same dtype: c10::Half != float"
+# on the very first warmup predict. Passing half= to the inference calls
+# (below, and in _run_weapon_detection / the pose track call) still gets the
+# full fp16 speedup -- verified the predictor model ends up torch.float16.
 if pose_file_name.endswith(".pt"):
     pose_model.to(TARGET_DEVICE)
-    if USE_CUDA:
-        pose_model.model.half()
 
 if weapon_file_name.endswith(".pt"):
     violence_model.to(TARGET_DEVICE)
-    if USE_CUDA:
-        violence_model.model.half()
 
 _dummy = np.zeros((POSE_IMGSZ, POSE_IMGSZ, 3), dtype=np.uint8)
 pose_model.predict(_dummy, verbose=False, imgsz=POSE_IMGSZ, half=(USE_CUDA and pose_file_name.endswith(".pt")))
@@ -738,12 +760,63 @@ def _draw_x3d_confidence(frame, p_box, debug_info: dict):
 # 14. CAMERA INIT (DYNAMIC HARDWARE DETECTION INDEX)
 # ──────────────────────────────────────────────────────────────────────────────
 camera_idx = sys_config["camera"].get("index", 5)
-cap = cv2.VideoCapture(camera_idx)
-
 res_w, res_h = map(int, sys_config["camera"]["default_resolution"].lower().split('x'))
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  res_w)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+# On Windows the default backend selection can land on OBSENSOR, whose UVC
+# channel probe RAISES a C++ exception ("Camera index out of range") out of
+# both VideoCapture() and cap.read() instead of just reporting failure --
+# which took the whole process down at the top of the main loop. DirectShow
+# is the correct backend for webcams and OBS Virtual Camera anyway, so we ask
+# for it explicitly and only fall back to auto-select if DSHOW can't open.
+_CAP_BACKENDS = [cv2.CAP_DSHOW, cv2.CAP_ANY] if sys.platform == "win32" else [cv2.CAP_ANY]
+
+
+def _open_capture(idx):
+    """Opens camera `idx`, trying each backend in turn. Returns an opened
+    VideoCapture or None. Never raises -- OpenCV backend probes can throw."""
+    for backend in _CAP_BACKENDS:
+        try:
+            c = cv2.VideoCapture(idx, backend)
+            if c.isOpened():
+                c.set(cv2.CAP_PROP_FRAME_WIDTH,  res_w)
+                c.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+                c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                return c
+            c.release()
+        except Exception:
+            pass
+    return None
+
+
+def _probe_for_working_camera():
+    """Scans indices 0-9 for the first camera that actually opens. Used when
+    the configured index is dead so a stale config.json (or a webcam that
+    moved indices after a reboot) degrades to 'found a different camera'
+    rather than 'process exits on startup'."""
+    for idx in range(10):
+        if idx == camera_idx:
+            continue
+        c = _open_capture(idx)
+        if c is not None:
+            return idx, c
+    return None, None
+
+
+cap = _open_capture(camera_idx)
+if cap is None:
+    print(f"⚠️  [CAMERA] Configured index {camera_idx} could not be opened. Probing 0-9...")
+    found_idx, found_cap = _probe_for_working_camera()
+    if found_cap is not None:
+        print(f"✅ [CAMERA] Using index {found_idx} instead "
+              f"(update config.json or pick it in the Monitor view to make this permanent).")
+        camera_idx, cap = found_idx, found_cap
+    else:
+        # Keep running headless: the HTTP server, /available_cameras and
+        # /set_camera_index all still work, so the operator can plug a camera
+        # in and select it from the UI without restarting the AI core.
+        print("❌ [CAMERA] No working camera found on indices 0-9. "
+              "Running with no feed -- select a camera from the Monitor view once one is connected.")
+        cap = cv2.VideoCapture()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 14.1 CAMERA RECONNECT HELPER
@@ -755,11 +828,8 @@ def _reopen_camera():
         cap.release()
     except Exception:
         pass
-    new_cap = cv2.VideoCapture(camera_idx)
-    new_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  res_w)
-    new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
-    new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap = new_cap
+    new_cap = _open_capture(camera_idx)
+    cap = new_cap if new_cap is not None else cv2.VideoCapture()
     return cap.isOpened()
 
 
@@ -773,18 +843,23 @@ def get_available_cameras():
     Returns a list of working camera indices (0-9 checked by default)."""
     available = []
     for idx in range(10):  # Check indices 0-9
+        # Probing the CURRENTLY OPEN index would fight the main loop for the
+        # device (Windows webcams are exclusive-access), so trust it instead.
+        if idx == camera_idx and cap.isOpened():
+            available.append(idx)
+            continue
+        test_cap = _open_capture(idx)
+        if test_cap is None:
+            continue
         try:
-            test_cap = cv2.VideoCapture(idx)
-            if test_cap.isOpened():
-                # Try to read a frame to confirm it's actually available
-                ret, _ = test_cap.read()
-                test_cap.release()
-                if ret:
-                    available.append(idx)
-            else:
-                test_cap.release()
+            # Try to read a frame to confirm it's actually available
+            ret, _ = test_cap.read()
+            if ret:
+                available.append(idx)
         except Exception:
             pass
+        finally:
+            test_cap.release()
     return {"available_cameras": available, "current_index": camera_idx}
 
 
@@ -970,25 +1045,44 @@ signal.signal(signal.SIGTERM, _shutdown)
 
 frame_count, fps_timer, fps_display, fps_frame_count = 0, time.perf_counter(), 0.0, 0
 _camera_fail_streak = 0
+_camera_last_ok = time.perf_counter()
+_camera_retry_delay = 2.0
 print("🚀 Sentinel v16.0 — Portable dynamic deployment runtime context pipeline engaged.")
 
 while _running:
-    ret, frame = cap.read()
+    # cap.read() can THROW, not just return False -- a missing/unplugged
+    # device on Windows surfaces as "Unknown C++ exception from OpenCV code"
+    # out of the backend probe. Uncaught, that killed the whole AI core on
+    # startup whenever config.json pointed at an index with no camera on it.
+    try:
+        ret, frame = cap.read()
+    except Exception:
+        ret, frame = False, None
+
     if not ret or frame is None:
         _camera_fail_streak += 1
-        # After ~2s of consecutive failures, try to hard-reopen the device
-        # instead of spinning forever on a dead handle.
-        if _camera_fail_streak >= 200:
-            print("⚠️  Camera read failing repeatedly — attempting reconnect...")
+        # A dead device fails fast (returns immediately), a throwing backend
+        # burns ~0.3s per attempt. Counting attempts rather than wall-clock
+        # made the old 200-strike threshold anywhere from 2s to ~60s, so
+        # reconnect on elapsed time instead and back off once it's clearly
+        # not coming back -- no point re-probing a missing camera at 100Hz.
+        now = time.perf_counter()
+        if now - _camera_last_ok >= _camera_retry_delay:
+            print(f"⚠️  Camera read failing ({_camera_fail_streak} attempts) — attempting reconnect...")
             if _reopen_camera():
                 print("✅ Camera reconnected.")
+                _camera_retry_delay = 2.0
+                _camera_fail_streak = 0
             else:
-                print("❌ Camera reconnect failed, retrying in 1s...")
-                time.sleep(1.0)
-            _camera_fail_streak = 0
-        time.sleep(0.01)
+                _camera_retry_delay = min(_camera_retry_delay * 2, 30.0)
+                print(f"❌ Camera reconnect failed, next retry in {_camera_retry_delay:.0f}s.")
+            _camera_last_ok = now
+        time.sleep(0.05)
         continue
+
     _camera_fail_streak = 0
+    _camera_last_ok = time.perf_counter()
+    _camera_retry_delay = 2.0
 
     frame_count += 1
     fps_frame_count += 1

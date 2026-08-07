@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useState } from 'react';
-import { 
-  MapPin, X, CheckCircle2, Calendar, 
-  ListFilter, ArrowUpDown, FileText, Search, ShieldCheck
+import {
+  MapPin, X, CheckCircle2, Calendar,
+  ListFilter, ArrowUpDown, FileText, Search
 } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
@@ -58,91 +58,155 @@ export default function HistoryView() {
       return sortDescending ? timeB - timeA : timeA - timeB;
     });
 
+  const inputStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
+
   return (
-    <div className="bg-[#11141b] border border-white/5 rounded-[2.5rem] p-8 shadow-2xl h-full flex flex-col min-h-[500px] animate-in fade-in duration-300 w-full">
-      
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pb-6 border-b border-white/5 mb-6 items-center">
-        <div className="col-span-1">
-          <h3 className="text-sm font-bold uppercase tracking-[0.15em] text-white">Incident File Archives</h3>
-          <p className="text-[9px] font-mono text-slate-500 uppercase mt-0.5">Permanent Record // Not Affected By Map Removal</p>
+    <div className="border flex flex-col h-full min-h-[420px]" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+
+      {/* Header + filter bar */}
+      <div className="shrink-0 border-b" style={{ borderColor: 'var(--line)' }}>
+        <div className="h-9 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+          <div className="flex items-baseline gap-2.5">
+            <span className="label" style={{ color: 'var(--text)' }}>Incident Log</span>
+            <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+              Permanent record — retained even when removed from the map
+            </span>
+          </div>
+          <span className="data text-[10px] px-1.5 py-0.5 border" style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}>
+            {String(processedData.length).padStart(3, '0')} RECORDS
+          </span>
         </div>
 
-        <div className="col-span-3 flex flex-wrap md:flex-nowrap gap-3 items-center justify-end">
-          <div className="relative w-full max-w-xs">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600" size={14} />
-            <input title="Search File Records" placeholder="Search Narrative / Case ID..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-black/30 border border-white/5 rounded-xl pl-9 pr-4 py-2 text-[11px] text-white outline-none focus:border-emerald-500 w-full transition-all" />
+        <div className="flex flex-wrap items-center gap-1.5 p-2">
+          <div className="relative flex-1 min-w-[180px]">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2" size={12} style={{ color: 'var(--text-3)' }} />
+            <input
+              title="Search narrative or case ID"
+              placeholder="Search narrative or case ID…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="data w-full pl-7 pr-2 py-1.5 text-[11px] text-white border outline-none"
+              style={inputStyle}
+            />
           </div>
 
-          <div className="flex items-center gap-1.5 bg-black/30 border border-white/5 rounded-xl px-3 py-2">
-            <Calendar size={13} className="text-slate-500"/>
-            <input type="date" title="Select Exact Date Log Filter" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="bg-transparent text-[11px] text-slate-300 font-mono outline-none cursor-pointer" />
+          <div className="flex items-center gap-1.5 px-2 py-1.5 border" style={inputStyle}>
+            <Calendar size={12} style={{ color: 'var(--text-3)' }} />
+            <input
+              type="date"
+              title="Filter by date"
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              className="data bg-transparent text-[11px] outline-none cursor-pointer"
+              style={{ color: 'var(--text-2)' }}
+            />
           </div>
 
-          <div className="flex items-center gap-1.5 bg-black/30 border border-white/5 rounded-xl px-3 py-2">
-            <ListFilter size={13} className="text-slate-500"/>
-            <select title="Filter Threat Classification Categories" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="bg-transparent text-[11px] text-slate-300 font-mono outline-none cursor-pointer">
-              <option value="ALL">All Manifests</option>
-              <option value="ASSAULT">Assault Signatures</option>
-              <option value="ARMED THREAT">Armed Threat</option>
+          <div className="flex items-center gap-1.5 px-2 py-1.5 border" style={inputStyle}>
+            <ListFilter size={12} style={{ color: 'var(--text-3)' }} />
+            <select
+              title="Filter by incident type"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="data bg-transparent text-[11px] outline-none cursor-pointer"
+              style={{ color: 'var(--text-2)' }}
+            >
+              <option value="ALL">All types</option>
+              <option value="ASSAULT">Assault</option>
+              <option value="ARMED THREAT">Armed threat</option>
               <option value="ROBBERY">Robbery</option>
               <option value="VANDALISM">Vandalism</option>
-              <option value="MANUAL_PANIC">Panic Triggers</option>
+              <option value="MANUAL_PANIC">Panic trigger</option>
             </select>
           </div>
 
-          <button title="Toggle Timeline Chronology Direction" onClick={() => setSortDescending(!sortDescending)} className="p-2 bg-black/40 border border-white/5 rounded-xl text-slate-400 hover:text-emerald-400 active:scale-95 transition-all flex items-center gap-1 text-[11px] font-bold uppercase shrink-0">
-            <ArrowUpDown size={14}/> {sortDescending ? "Newest" : "Oldest"}
+          <button
+            title="Toggle sort order"
+            onClick={() => setSortDescending(!sortDescending)}
+            className="flex items-center gap-1.5 px-2 py-1.5 border text-[10px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
+            style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}
+          >
+            <ArrowUpDown size={12} /> {sortDescending ? "Newest" : "Oldest"}
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto pr-1 custom-scrollbar space-y-3">
+      {/* Column headers -- a records archive is tabular data; a table lets an
+          operator scan down one column (time, type, status) instead of
+          re-reading every card. */}
+      {!isLoading && processedData.length > 0 && (
+        <div
+          className="shrink-0 grid grid-cols-[110px_1fr_150px_92px_104px] gap-2 px-2.5 py-1.5 border-b"
+          style={{ borderColor: 'var(--line)', background: 'var(--bg)' }}
+        >
+          <span className="label">Case ID</span>
+          <span className="label">Incident</span>
+          <span className="label">Location</span>
+          <span className="label">Confidence</span>
+          <span className="label text-right">Disposition</span>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
         {isLoading ? (
-          <div className="space-y-3">
+          <div className="p-2 space-y-2">
             {Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)}
           </div>
         ) : processedData.length === 0 ? (
-          <div className="h-48 flex flex-col items-center justify-center opacity-20 border-2 border-dashed border-white/5 rounded-3xl p-8 text-slate-500">
-            <FileText size={32} className="mb-2" />
-            <span className="text-[10px] font-bold uppercase tracking-widest">No structural matching documents recorded.</span>
+          <div className="h-48 flex flex-col items-center justify-center gap-2">
+            <FileText size={22} style={{ color: 'var(--text-3)' }} />
+            <span className="label">No incidents match the current filters</span>
           </div>
         ) : (
-          processedData.map((record) => (
-            <div key={record.id} className="p-5 bg-black/20 border border-white/5 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 group hover:border-white/10 transition-all shadow-md">
-              <div className="space-y-2 flex-1 min-w-0">
-                <div className="flex items-center gap-3">
-                  <span className="px-2 py-0.5 bg-white/5 border border-white/10 text-white rounded text-[9px] font-mono tabular-nums tracking-wider">{record.case_id}</span>
-                  <h4 className="text-sm font-bold uppercase text-slate-200 tracking-tight truncate">{record.type}</h4>
-                </div>
-                <p className="text-[11px] text-slate-400 font-sans leading-relaxed">{record.narrative || "No narrative on file."}</p>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-mono text-slate-500 italic">
-                  <span className="flex items-center gap-1"><MapPin size={12} className="text-emerald-500" />{record.location_name}</span>
-                  <span>Date Tracked: {record.occurred_date}</span>
-                  <span className="tabular-nums">Time: {record.occurred_time}</span>
-                </div>
-              </div>
-
-              <div className="shrink-0 flex items-center gap-2 w-full md:w-auto justify-end border-t md:border-t-0 pt-3 md:pt-0 border-white/5">
-                {record.confidence != null && (
-                  <span className="px-2.5 py-1.5 rounded-xl text-[9px] font-bold uppercase bg-white/5 border border-white/10 text-emerald-400 font-mono tracking-wider flex items-center gap-1">
-                    <ShieldCheck size={11}/> Conf: {(record.confidence * 100).toFixed(1)}%
-                  </span>
-                )}
-                <span className={`px-3 py-1.5 rounded-xl text-[9px] font-bold uppercase tracking-widest flex items-center gap-1.5 font-mono ${
-                  record.status === 'Confirmed' 
-                    ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' 
-                    : 'bg-red-500/10 border border-red-500/20 text-red-400'
-                }`}>
-                  {record.status === 'Confirmed' ? (
-                    <CheckCircle2 size={12} className="text-emerald-500" />
-                  ) : (
-                    <X size={12} className="text-red-500" />
-                  )}
-                  {record.status === 'Confirmed' ? 'ACCEPTED' : 'IGNORED'}
+          processedData.map((record) => {
+            const confirmed = record.status === 'Confirmed';
+            return (
+              <div
+                key={record.id}
+                className="grid grid-cols-[110px_1fr_150px_92px_104px] gap-2 px-2.5 py-2 border-b items-start transition-colors hover:bg-white/[0.02]"
+                style={{ borderColor: 'var(--line)' }}
+              >
+                <span className="data text-[10px] pt-px" style={{ color: 'var(--text-2)' }}>
+                  {record.case_id}
                 </span>
+
+                <div className="min-w-0">
+                  <div className="text-[12px] font-bold text-white tracking-wide">{record.type}</div>
+                  <p className="text-[10px] leading-snug mt-0.5 line-clamp-2" style={{ color: 'var(--text-2)' }}>
+                    {record.narrative || "No narrative on file."}
+                  </p>
+                  <div className="data text-[9px] mt-1" style={{ color: 'var(--text-3)' }}>
+                    {record.occurred_date} · {record.occurred_time}
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-1 min-w-0">
+                  <MapPin size={10} className="shrink-0 mt-0.5" style={{ color: 'var(--text-3)' }} />
+                  <span className="text-[10px] leading-snug" style={{ color: 'var(--text-2)' }}>
+                    {record.location_name}
+                  </span>
+                </div>
+
+                <div className="data text-[11px] pt-px" style={{ color: 'var(--text-2)' }}>
+                  {record.confidence != null ? `${(record.confidence * 100).toFixed(1)}%` : '—'}
+                </div>
+
+                <div className="flex justify-end">
+                  <span
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider"
+                    style={
+                      confirmed
+                        ? { color: 'var(--ok)', borderColor: 'var(--ok)' }
+                        : { color: 'var(--text-3)', borderColor: 'var(--line-2)' }
+                    }
+                  >
+                    {confirmed ? <CheckCircle2 size={10} /> : <X size={10} />}
+                    {confirmed ? 'Confirmed' : 'Dismissed'}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>

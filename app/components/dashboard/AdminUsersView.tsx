@@ -139,38 +139,66 @@ export default function AdminUsersView() {
     }
   };
 
+  const inputStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
+  const modalShell = { background: 'var(--panel)', borderColor: 'var(--line-2)' };
+
   return (
-    <div className="bg-[#11141b] border border-white/5 rounded-[2.5rem] p-8 shadow-2xl h-full flex flex-col min-h-[500px] animate-in fade-in duration-300 w-full">
-      <div className="flex items-center justify-between pb-6 border-b border-white/5 mb-6">
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-[0.15em] text-white flex items-center gap-2">
-            <Users size={16} className="text-emerald-500" /> Manage My Users
-          </h3>
-          <p className="text-[9px] font-mono text-slate-500 uppercase mt-0.5">
-            Accounts you created only -- permissions apply to their access within your location
-          </p>
+    <div className="border h-full flex flex-col w-full min-h-[420px]" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+
+      {/* Header */}
+      <div className="shrink-0 border-b" style={{ borderColor: 'var(--line)' }}>
+        <div className="h-9 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+          <div className="flex items-baseline gap-2.5">
+            <span className="label" style={{ color: 'var(--text)' }}>Personnel</span>
+            <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+              Accounts you created — permissions apply within your assigned area
+            </span>
+          </div>
+          <span className="data text-[10px] px-1.5 py-0.5 border" style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}>
+            {String(users.length).padStart(2, '0')} USERS
+          </span>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-black px-4 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-wider active:scale-95 transition-all"
-        >
-          <UserPlus size={14} /> New User
-        </button>
+
+        <div className="p-2">
+          <button
+            onClick={() => setShowCreate(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+            style={{ background: 'var(--accent)' }}
+          >
+            <UserPlus size={12} /> New user
+          </button>
+        </div>
       </div>
 
       {error && (
-        <div className="mb-4 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-[10px] font-bold uppercase text-red-400 text-center">
+        <div
+          className="shrink-0 px-2.5 py-1.5 border-b text-[10px] font-bold uppercase tracking-wider"
+          style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
+        >
           {error}
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-1">
+      {/* Column headers */}
+      {!isLoading && users.length > 0 && (
+        <div
+          className="shrink-0 grid grid-cols-[1fr_120px_150px_80px] gap-2 px-2.5 py-1.5 border-b"
+          style={{ borderColor: 'var(--line)', background: 'var(--bg)' }}
+        >
+          <span className="label">Operator</span>
+          <span className="label">Role</span>
+          <span className="label">Assignment</span>
+          <span className="label text-right">Actions</span>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
         {isLoading ? (
-          <SkeletonList rows={4} />
+          <div className="p-2"><SkeletonList rows={4} /></div>
         ) : users.length === 0 ? (
-          <div className="h-48 flex flex-col items-center justify-center opacity-20 border-2 border-dashed border-white/5 rounded-3xl text-slate-500">
-            <Users size={32} className="mb-2" />
-            <span className="text-[10px] font-bold uppercase tracking-widest">No users created yet</span>
+          <div className="h-48 flex flex-col items-center justify-center gap-2">
+            <Users size={22} style={{ color: 'var(--text-3)' }} />
+            <span className="label">No users created yet</span>
           </div>
         ) : (
           users.map(u => {
@@ -181,31 +209,43 @@ export default function AdminUsersView() {
             return (
               <div
                 key={u.id}
-                className={`p-4 bg-black/20 border border-white/5 rounded-2xl flex items-center justify-between gap-4 transition-opacity ${isPending ? 'opacity-40 pointer-events-none' : ''}`}
+                className={`grid grid-cols-[1fr_120px_150px_80px] gap-2 px-2.5 py-2 border-b items-center transition-colors hover:bg-white/[0.02] ${isPending ? 'opacity-40 pointer-events-none' : ''}`}
+                style={{ borderColor: 'var(--line)' }}
               >
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h4 className="text-xs font-bold text-white font-mono truncate">{u.username}</h4>
-                    <span className="px-2 py-0.5 bg-white/5 border border-white/10 text-emerald-400 rounded text-[8px] font-mono uppercase">{u.role}</span>
+                  <div className="data text-[12px] font-bold text-white truncate">{u.username}</div>
+                  <div className="text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+                    {activeCount} permission{activeCount === 1 ? '' : 's'} granted
                   </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-1">
-                    {u.assignment} &middot; {activeCount} permission{activeCount === 1 ? '' : 's'} granted
-                  </p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+
+                <span
+                  className="justify-self-start px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider"
+                  style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}
+                >
+                  {u.role}
+                </span>
+
+                <span className="text-[11px] truncate" style={{ color: 'var(--text-2)' }}>
+                  {u.assignment}
+                </span>
+
+                <div className="flex items-center justify-end gap-1.5">
                   <button
                     onClick={() => openPermissions(u)}
-                    title="Edit Permissions"
-                    className="p-2.5 bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-black border border-emerald-500/20 rounded-xl transition-all"
+                    title="Edit permissions"
+                    className="p-1.5 border transition-colors hover:bg-white/5"
+                    style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
                   >
-                    <KeyRound size={14} />
+                    <KeyRound size={12} />
                   </button>
                   <button
                     onClick={() => handleDelete(u.id)}
-                    title="Remove User"
-                    className="p-2.5 bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-black border border-rose-500/20 rounded-xl transition-all"
+                    title="Remove user"
+                    className="p-1.5 border transition-colors hover:bg-[rgba(229,52,47,0.12)]"
+                    style={{ borderColor: 'var(--critical)', color: 'var(--critical)' }}
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={12} />
                   </button>
                 </div>
               </div>
@@ -216,34 +256,53 @@ export default function AdminUsersView() {
 
       {/* CREATE USER MODAL */}
       {showCreate && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-[#11141b] border border-white/10 rounded-2xl w-full max-w-sm shadow-2xl text-slate-200 p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-sm font-bold uppercase tracking-wide text-white">New User</h3>
-              <button onClick={() => setShowCreate(false)}><X size={18} className="text-slate-500 hover:text-white" /></button>
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+          <div className="border w-full max-w-sm" style={modalShell}>
+            <div className="h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <span className="label" style={{ color: 'var(--text)' }}>New User</span>
+              <button onClick={() => setShowCreate(false)} title="Cancel" className="transition-colors hover:text-white" style={{ color: 'var(--text-3)' }}>
+                <X size={15} />
+              </button>
             </div>
-            <form onSubmit={handleCreate} className="space-y-3">
-              <input
-                placeholder="Username" required
-                value={newUser.username}
-                onChange={e => setNewUser({ ...newUser, username: e.target.value })}
-                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-xs text-white outline-none focus:border-emerald-500 font-mono"
-              />
-              <input
-                type="password" placeholder="Password" required
-                value={newUser.password}
-                onChange={e => setNewUser({ ...newUser, password: e.target.value })}
-                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-xs text-white outline-none focus:border-emerald-500 font-mono"
-              />
-              <input
-                placeholder="Assignment (e.g. Patrol Unit 3)" required
-                value={newUser.assignment}
-                onChange={e => setNewUser({ ...newUser, assignment: e.target.value })}
-                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-xs text-white outline-none focus:border-emerald-500 font-mono"
-              />
-              {error && <p className="text-red-500 text-[9px] text-center uppercase font-bold">{error}</p>}
-              <button className="w-full py-3 bg-emerald-500 text-black rounded-xl text-[10px] font-bold uppercase hover:bg-emerald-400 transition-all">
-                Create Account
+            <form onSubmit={handleCreate} className="p-4 space-y-3">
+              <div>
+                <label className="label block mb-1.5">Username</label>
+                <input
+                  placeholder="Username" required
+                  value={newUser.username}
+                  onChange={e => setNewUser({ ...newUser, username: e.target.value })}
+                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label className="label block mb-1.5">Password</label>
+                <input
+                  type="password" placeholder="Password" required
+                  value={newUser.password}
+                  onChange={e => setNewUser({ ...newUser, password: e.target.value })}
+                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label className="label block mb-1.5">Assignment</label>
+                <input
+                  placeholder="e.g. Patrol Unit 3" required
+                  value={newUser.assignment}
+                  onChange={e => setNewUser({ ...newUser, assignment: e.target.value })}
+                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  style={inputStyle}
+                />
+              </div>
+              {error && (
+                <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--critical)' }}>{error}</p>
+              )}
+              <button
+                className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+                style={{ background: 'var(--accent)' }}
+              >
+                Create account
               </button>
             </form>
           </div>
@@ -252,34 +311,47 @@ export default function AdminUsersView() {
 
       {/* PERMISSIONS MODAL */}
       {editingPerms && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-[#11141b] border border-white/10 rounded-2xl w-full max-w-sm shadow-2xl text-slate-200 p-6">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-bold uppercase tracking-wide text-white flex items-center gap-2">
-                <ShieldCheck size={16} className="text-emerald-500" /> Permissions
-              </h3>
-              <button onClick={() => setEditingPerms(null)}><X size={18} className="text-slate-500 hover:text-white" /></button>
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+          <div className="border w-full max-w-sm" style={modalShell}>
+            <div className="h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <span className="label flex items-center gap-1.5" style={{ color: 'var(--text)' }}>
+                <ShieldCheck size={12} style={{ color: 'var(--accent)' }} /> Permissions
+              </span>
+              <button onClick={() => setEditingPerms(null)} title="Cancel" className="transition-colors hover:text-white" style={{ color: 'var(--text-3)' }}>
+                <X size={15} />
+              </button>
             </div>
-            <p className="text-[10px] text-slate-500 font-mono mb-4">{editingPerms.username}</p>
-            <div className="space-y-2 mb-6">
-              {PERMISSION_KEYS.map(p => (
-                <label key={p.key} className="flex items-center justify-between p-3 bg-black/30 border border-white/5 rounded-xl cursor-pointer">
-                  <span className="text-[11px] text-slate-300">{p.label}</span>
-                  <input
-                    type="checkbox"
-                    checked={!!permsDraft[p.key]}
-                    onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
-                    className="w-4 h-4 accent-emerald-500"
-                  />
-                </label>
-              ))}
+
+            <div className="p-4">
+              <div className="data text-[11px] mb-3" style={{ color: 'var(--text-2)' }}>{editingPerms.username}</div>
+
+              <div className="space-y-px mb-4">
+                {PERMISSION_KEYS.map(p => (
+                  <label
+                    key={p.key}
+                    className="flex items-center justify-between p-2.5 border cursor-pointer transition-colors hover:bg-white/[0.02]"
+                    style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
+                  >
+                    <span className="text-[11px]" style={{ color: 'var(--text)' }}>{p.label}</span>
+                    <input
+                      type="checkbox"
+                      checked={!!permsDraft[p.key]}
+                      onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
+                      className="w-4 h-4"
+                      style={{ accentColor: 'var(--accent)' }}
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <button
+                onClick={savePermissions}
+                className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90 flex items-center justify-center gap-2"
+                style={{ background: 'var(--accent)' }}
+              >
+                <Save size={12} /> Save permissions
+              </button>
             </div>
-            <button
-              onClick={savePermissions}
-              className="w-full py-3 bg-emerald-500 text-black rounded-xl text-[10px] font-bold uppercase hover:bg-emerald-400 transition-all flex items-center justify-center gap-2"
-            >
-              <Save size={12} /> Save Permissions
-            </button>
           </div>
         </div>
       )}

@@ -6,6 +6,36 @@ echo ─────────────────────────
 
 cd /d "%~dp0"
 
+if not exist ".venv\Scripts\activate.bat" (
+    echo ❌ .venv not found. Run setup.bat first.
+    pause
+    exit /b 1
+)
+
+if not exist "weights\yolo11s-pose.pt" if not exist "weights\yolo11s-pose.engine" (
+    echo ⚠️  weights\yolo11s-pose.pt (or .engine^) not found -- the AI core will crash on startup.
+    echo    See README.md "Add Model Weights" for what needs to go in weights\.
+    pause
+)
+if not exist "weights\weapon_signs.pt" if not exist "weights\weapon_signs.engine" (
+    echo ⚠️  weights\weapon_signs.pt (or .engine^) not found -- the AI core will crash on startup.
+    pause
+)
+if not exist "weights\x3d_xs_violence_best.pt" (
+    echo ⚠️  weights\x3d_xs_violence_best.pt not found -- the AI core will crash on startup.
+    pause
+)
+
+:: maincode\main.py does "from port_utils import ..." but port_utils.py lives
+:: in app\. The PACKAGED build works because package.json's extraResources
+:: copies app\port_utils.py into BOTH backend\ and maincode\ -- dev mode has
+:: no such copy, so running "python maincode/main.py" put sys.path[0] at
+:: maincode\ and the import died with ModuleNotFoundError. Putting app\ on
+:: PYTHONPATH reproduces the packaged layout's import resolution without
+:: duplicating the file in the repo (a second copy would silently drift).
+set "PYTHONPATH=%~dp0app;%PYTHONPATH%"
+echo  =^> PYTHONPATH set for shared modules (port_utils).
+
 echo [1/4] Scanning for background orphan service instances...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000 ^| findstr LISTENING') do taskkill /F /PID %%a >nul 2>&1
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8001 ^| findstr LISTENING') do taskkill /F /PID %%a >nul 2>&1
