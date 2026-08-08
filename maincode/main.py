@@ -72,7 +72,9 @@ except ImportError:
 # 0.1 ROBBERY / VANDALISM CORE DETECTION IMPORTS
 # ──────────────────────────────────────────────────────────────────────────────
 from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
-from x3d_violence_detector import X3DViolenceDetector
+from x3d_violence_detector import (
+    X3DViolenceDetector, SceneViolenceDetector, VIOLENCE_MODE,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. ULTRALYTICS GIT-BYPASS (offline / no-git environment)
@@ -417,6 +419,45 @@ violence_model, weapon_file_name = load_model_with_fallback(
 
 x3d_model_path = os.path.join(WEIGHTS_DIR, "x3d_xs_violence_best.pt")
 x3d_detector   = X3DViolenceDetector(model_path=x3d_model_path, device=TARGET_DEVICE)
+
+# Scene (whole-frame) violence detection -- see detection.violence.mode.
+#
+# The per-track detector only ever classifies a person whose track ID survives
+# MIN_BUFFER_FOR_INFERENCE frames; on the held-out set that gate silently
+# skipped 17.2% of clips. Scene mode classifies the frame itself, so detection
+# no longer depends on tracking succeeding. Measured clean held-out
+# (leakage excluded):
+#     per-track : 69.5 acc / 65.5 recall / 71.8 prec / 26.3 FPR
+#     scene     : 79.0 acc / 76.0 recall / 81.2 prec / 18.0 FPR
+#
+# It is also CHEAPER: one X3D forward per check_interval frames for the whole
+# frame, versus one per tracked person. Cost stops scaling with crowd size.
+def _pip_crop_from_box(frame, p_box, pad_frac: float = 0.25):
+    """Padded crop of one person, for the picture-in-picture panel.
+
+    Scene mode does not populate X3DViolenceDetector's per-track crop cache
+    (it never calls update()), so the PIP needs its own source. Deliberately
+    NOT _crop_person(): that mutates detector state (_active_crop_boxes) and
+    does the bystander-merge search, neither of which is wanted for a display
+    thumbnail.
+    """
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in p_box]
+    px, py = int((x2 - x1) * pad_frac), int((y2 - y1) * pad_frac)
+    x1, y1 = max(0, x1 - px), max(0, y1 - py)
+    x2, y2 = min(w, x2 + px), min(h, y2 + py)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return frame[y1:y2, x1:x2].copy()
+
+
+SCENE_MODE_ON = VIOLENCE_MODE in ("scene", "both")
+scene_detector = None
+if SCENE_MODE_ON:
+    scene_detector = SceneViolenceDetector(device=TARGET_DEVICE)
+    print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
+else:
+    print(f"🎬 Violence mode: {VIOLENCE_MODE} (per-track detection)")
 
 print(f"📦 [ENGINE LOADER] Using Pose Pipeline: {pose_file_name}")
 print(f"📦 [ENGINE LOADER] Using Weapon Pipeline: {weapon_file_name}")
@@ -1188,7 +1229,16 @@ while _running:
 
     tracked_weapons = _update_weapon_tracks(raw_weapons)
     live_vboxes = _vbox_tracker.update(raw_vboxes)
-    
+
+    # Scene verdict is computed BEFORE and OUTSIDE the pose block on purpose.
+    # Putting it inside would re-create the exact coupling this replaces --
+    # the frame must be classified whether or not YOLO found and held a
+    # person. The detector rate-limits itself to one real forward every
+    # X3D_CHECK_INTERVAL frames and returns its cached verdict in between.
+    scene_violent, scene_conf = (False, 0.0)
+    if SCENE_MODE_ON:
+        scene_violent, scene_conf = scene_detector.update(frame, frame_count)
+
     res_half_flag = (USE_CUDA and pose_file_name.endswith(".pt"))
     pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, half=res_half_flag)
 
@@ -1250,10 +1300,21 @@ while _running:
 
             prev_joints[tid] = joints[[9, 10]].copy()
 
-            is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
-            
-            _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
-            _draw_x3d_crop_box(frame, x3d_detector.get_crop_box(tid), is_violent_x3d, x3d_conf)   
+            # In scene mode the frame-level verdict IS the detection; pose is
+            # kept only to attribute it to a person (which box to draw, which
+            # track to name in the alert) and to drive the weapon/robbery/
+            # vandalism rules, which are unaffected. "both" still runs the
+            # per-track model so its overlay stays available for comparison,
+            # but the scene verdict is what decides.
+            if SCENE_MODE_ON:
+                if VIOLENCE_MODE == "both":
+                    x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
+                    _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
+                is_violent_x3d, x3d_conf = scene_violent, scene_conf
+            else:
+                is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
+                _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
+                _draw_x3d_crop_box(frame, x3d_detector.get_crop_box(tid), is_violent_x3d, x3d_conf)
 
             in_vbox = max((_vbox_overlap_ratio(p_box, vb) for vb in live_vboxes), default=0.0) >= VBOX_ASSAULT_THRESHOLD
             is_assault = is_violent_x3d or in_vbox
@@ -1262,7 +1323,13 @@ while _running:
             state = ts.update(is_assault, has_weapon, frame_count, override_assault_confirm=override_confirm)
 
             if active_pip_crop is None or state in ["ASSAULT", "ARMED"]:
+                # Scene mode never fills the per-track crop cache, so fall back
+                # to a plain padded crop of this person's box -- the PIP is an
+                # operator aid ("who is this alert about"), and it would
+                # otherwise go blank for every scene-mode alert.
                 live_crop_patch = x3d_detector.get_latest_live_crop(tid)
+                if live_crop_patch is None and SCENE_MODE_ON:
+                    live_crop_patch = _pip_crop_from_box(frame, p_box)
                 if live_crop_patch is not None:
                     active_pip_crop = live_crop_patch
                     if state == "ASSAULT":
@@ -1335,6 +1402,26 @@ while _running:
                 _vandal_alert_cooldown[tid] = frame_count
                 incident_id = str(uuid.uuid4())[:8]
                 triggered_alerts_this_frame.append({"id": incident_id, "conf": 0.84, "event": "VANDALISM"})
+
+    # ─── SCENE-MODE FALLBACK: alert with nobody tracked ───
+    # Deliberately OUTSIDE the pose block. This is the whole point of scene
+    # mode: on the held-out set 36 violent clips were scored "normal" purely
+    # because no track ID survived long enough, so the model never ran. The
+    # loop above attributes an alert to a person when there is one; this
+    # fires when the frame is violent and there is not.
+    #
+    # Attribution is genuinely unknown here, so the alert says so rather than
+    # guessing a track -- a reviewer opening the clip can see for themselves.
+    if SCENE_MODE_ON and scene_violent:
+        already_alerted = any(a["event"] in ("ASSAULT", "ARMED THREAT")
+                              for a in triggered_alerts_this_frame)
+        if (not already_alerted
+                and frame_count - scene_last_alert_frame > SCENE_COOLDOWN_ASSAULT):
+            scene_last_alert_frame = frame_count
+            incident_id = str(uuid.uuid4())[:8]
+            triggered_alerts_this_frame.append(
+                {"id": incident_id, "conf": scene_conf, "event": "ASSAULT"}
+            )
 
     now = time.perf_counter()
     if now - fps_timer >= 1.0:

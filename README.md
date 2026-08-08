@@ -159,9 +159,12 @@ Both installs pass `--extra-index-url https://download.pytorch.org/whl/cu121`, w
 Manually place trained model weights into the `weights/` directory (gitignored due to size):
 - `yolo11s-pose.pt` (or `.engine`) — YOLO11 pose detection
 - `weapon_signs.pt` (or `.engine`) — Weapon and sign detection
-- `x3d_xs_violence_best.pt` — Violence classification
+- `x3d_xs_violence_best.pt` — Per-track (person-crop) violence classification, used when `detection.violence.mode` is `"track"`
+- The path in `detection.violence.scene_model_path` (`config.json`) — whole-frame violence classification, used in `"scene"` mode (**the default**) and `"both"`. Currently `weights/x3d_xs_violence_scene_3way_nll.pt`.
 
 `main.py` prefers `.engine` over `.pt` when both are present. Generate the `.engine` files with `optimize_weights.py`. They are version-, GPU- and platform-locked, so regenerate them after any PyTorch/TensorRT/driver change — a stale `.engine` fails at load, and the `.pt` fallback is what keeps the app running.
+
+**Checkpoint metadata.** `train_x3d_full.py` writes a `<checkpoint>.pt.meta.json` sidecar next to every checkpoint it saves as "best" — input resolution, frame count, output convention (probabilities vs. logits), the manifest and split it was trained against, and its validation accuracy. `x3d_violence_detector.py` reads this at load time and **overrides a mismatched `config.json` with a loud warning** rather than silently using the wrong value — a checkpoint's own geometry is authoritative over the config. If you drop in a new `.pt` without its sidecar, the detector falls back to `config.json` and prints a note that it could not verify the checkpoint's input contract.
 
 ### Environment Files
 
@@ -224,15 +227,23 @@ Most tuning requires only editing the config file — no code changes needed. A 
 
 ## Model Evaluation & Retraining
 
+**`docs/progress_report_violence_detection.pdf`** is a standalone write-up of the violence-detection work: the defects found (a training-loss floor from a double-softmax bug, dataset leakage, the tracking-gate blind spot), the corrected model's honest held-out accuracy (95.0%, up from 78.4%), and the wide-camera person-scale limitation above with its measurements. Read that first for the full picture; this section covers the tooling.
+
 The X3D violence classifier's accuracy is tracked over time in `maincode/eval_history.csv` — every run of `test_x3d_true_heldout.py` (the true held-out accuracy eval, run through the actual live pipeline code path) appends a row with accuracy/recall/precision/false-positive-rate and the config snapshot used.
 
-- `maincode/test_x3d_true_heldout.py` — reconstructs the exact train/val split used during training (same seed) and evaluates only the clips the model never trained on, through the real deployed pipeline (not a clean offline loader). Dataset roots default to the local `To_Be_Trained2` checkout; override with `--rwf-root` / `--scvd-root`.
+- `maincode/test_x3d_true_heldout.py` — evaluates the model through the real deployed pipeline (not a clean offline loader), against a split it never trained on. Dataset roots default to the local `To_Be_Trained2` checkout; override with `--rwf-root` / `--scvd-root`. Two split sources:
+  - **`--manifest` / `--manifest-path`** (recommended) — reads `dataset_manifest.json`, built by `build_dataset_manifest.py`, which assigns each clip's split from a **SHA-256 content hash** rather than a shuffle. This makes train/val leakage from duplicate files structurally impossible (485 duplicates and a 93-clip leak were found and fixed this way). `--manifest-path 3way` uses the three-way manifest (`dataset_manifest_3way.json`), which holds back a `test` split that **neither training nor checkpoint selection ever reads** — pass `--split test` for the only number in this project that can honestly be called held-out accuracy; `--split val` (the default) is the same split training used to pick its best checkpoint and is optimistic by construction.
+  - No `--manifest` flag — legacy path, reconstructs the split by re-running training's seed-42 shuffle. Kept for comparing against pre-manifest history rows in `eval_history.csv`; do not use for new evaluations.
+  - `--scene` runs the whole-frame classifier (matching the deployed default); omit it to evaluate the per-track path.
+- `maincode/test_scene_live.py` — points the deployed whole-frame detector at a webcam, a video file/folder, or the OBS virtual camera, with an on-screen confidence HUD and a running alarm-rate counter. `--check-scale` measures how tall people are in the source relative to what the model was trained on (see the person-scale note below) and tells you whether the framing is usable before you trust anything else it reports.
 - `maincode/generate_eval_report.py` / `calibrate_threshold.py` — batch eval / threshold-sweep tooling.
 - `maincode/confidence_trace_plotter.py` — reads `logs/x3d_confidence_trace.csv` (written live by the detector) and plots raw vs. EMA confidence per track, for diagnosing instability (flapping, drift) in a real run.
 
-A known limitation worth reading the eval CSV columns for: a clip only reaches the X3D classifier if pose tracking holds a **single track ID** for `MIN_BUFFER_FOR_INFERENCE` consecutive frames. Clips where that never happens are scored "normal" without the violence model ever running, so headline accuracy blends classifier errors with person-detection errors. The `frames_with_pose`, `had_any_buffer` and `real_inference_count` columns separate the two.
+**Known limitations, both measured, not theoretical:**
+- *(`"track"` / `"both"` mode only)* a clip only reaches the X3D classifier if pose tracking holds a **single track ID** for `MIN_BUFFER_FOR_INFERENCE` consecutive frames; clips where that never happens are scored "normal" without the model ever running. This was 17.2% of the held-out set and is the reason `"scene"` (whole-frame, no tracking gate) is now the default. The eval CSV's `frames_with_pose`, `had_any_buffer` and `real_inference_count` columns separate classifier errors from this.
+- *(all modes)* the model is trained on footage where a person occupies 24–60% of frame height (median 37%). Below roughly 15% — a typical wide, uncropped street-CCTV framing — detection accuracy collapses, not gradually but close to a cliff (measured: 40/40 clips detected at 37% person-height, 0/40 at 9%). This is a real, unresolved limitation for wide-angle city cameras; see `docs/progress_report_violence_detection.pdf` for the full measurement and the tiled-inference approach under evaluation as a fix. `--check-scale` on `test_scene_live.py` measures this against any given source before deployment.
 
-Training itself happens outside this repo, against a separate training-data checkout — `train_x3d_full.py` supports `--unfreeze-blocks`, `--backbone-lr-mult`, `--weaponized-oversample`, and augmentation toggles for experimenting with fine-tuning depth vs. the frozen-backbone linear-probe baseline.
+Training itself happens outside this repo, against a separate training-data checkout — `train_x3d_full.py` supports `--manifest` / `--manifest-path`, `--frame-size` (input resolution; resolves at call time and is written to the checkpoint's `.meta.json`, so it can't silently drift from what inference expects), `--unfreeze-blocks`, `--backbone-lr-mult`, `--weaponized-oversample`, and augmentation toggles for experimenting with fine-tuning depth vs. the frozen-backbone linear-probe baseline.
 
 ## Building a Release
 

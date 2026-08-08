@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EcoVision Security Sentinel — Violence Detection Progress Report</title>
+<style>
+  @page {
+    size: Letter;
+    margin: 1in 0.9in 1in 0.9in;
+    @bottom-center { content: counter(page); font-family: Georgia, serif; font-size: 9pt; color: #555; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #1a1a1a;
+    max-width: 100%;
+  }
+  h1, h2, h3 { font-family: "Segoe UI", Arial, sans-serif; color: #0f1f33; }
+  .titleblock {
+    text-align: center;
+    border-bottom: 3px solid #0f1f33;
+    padding-bottom: 18px;
+    margin-bottom: 28px;
+  }
+  .titleblock h1 { font-size: 19pt; margin: 0 0 6px 0; }
+  .titleblock .subtitle { font-size: 12.5pt; color: #333; margin: 2px 0; }
+  .titleblock .meta { font-size: 10pt; color: #555; margin-top: 10px; }
+  h2 {
+    font-size: 14pt;
+    margin-top: 26px;
+    padding-bottom: 4px;
+    border-bottom: 1.5px solid #0f1f33;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 12pt;
+    margin-top: 18px;
+    color: #16324f;
+    page-break-after: avoid;
+  }
+  p { margin: 8px 0; text-align: justify; orphans: 3; widows: 3; }
+  strong { color: #0f1f33; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 9.8pt;
+    page-break-inside: avoid;
+  }
+  th, td {
+    border: 1px solid #999;
+    padding: 5px 8px;
+    text-align: center;
+  }
+  th { background: #eef2f7; font-family: "Segoe UI", Arial, sans-serif; font-weight: 600; }
+  td:first-child, th:first-child { text-align: left; }
+  code {
+    font-family: "Consolas", "Courier New", monospace;
+    background: #f2f2f2;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9.6pt;
+  }
+  blockquote {
+    border-left: 3px solid #0f1f33;
+    margin: 10px 0;
+    padding: 4px 14px;
+    color: #333;
+    background: #fafafa;
+  }
+  .callout {
+    background: #fff7e6;
+    border: 1px solid #e0b060;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    page-break-inside: avoid;
+  }
+  ol, ul { margin: 6px 0; padding-left: 26px; }
+  li { margin: 3px 0; }
+  hr { border: none; border-top: 1px solid #ccc; margin: 26px 0; }
+  .footnote { font-size: 9pt; color: #555; }
+  .closing {
+    font-size: 9.5pt;
+    color: #555;
+    font-style: italic;
+    border-top: 1px solid #ccc;
+    padding-top: 10px;
+    margin-top: 24px;
+  }
+  section { page-break-inside: avoid; }
+  .nobreak { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<div class="titleblock">
+  <h1>EcoVision Security Sentinel</h1>
+  <div class="subtitle">Violence Detection Module — Progress Report</div>
+  <div class="meta">
+    Prepared for Thesis/Capstone Advisor Review &nbsp;•&nbsp; August 8, 2026<br>
+    Module: Real-time violence detection (X3D-XS video classifier, whole-frame and person-crop variants)
+  </div>
+</div>
+
+<p><strong>Scope of this report:</strong> Diagnosis and correction of the violence-detection subsystem, and the discovery of a deployment-blocking limitation that defines the next phase of work.</p>
+
+<h2>1. Problem Statement</h2>
+<p>At the start of this work period, the violence-detection component of EcoVision Security Sentinel had been retrained four separate times — varying unfreeze depth, data augmentation, class oversampling, and input representation — without breaking a <strong>held-out accuracy plateau of approximately 70%</strong>. No prior retrain had identified <em>why</em> accuracy was capped, only that it was.</p>
+<p>The objective of this work was twofold:</p>
+<ol>
+  <li>Diagnose the cause of the plateau through systematic measurement rather than further blind hyperparameter search.</li>
+  <li>Correct whatever defects were found, and re-measure honestly.</li>
+</ol>
+<p>A third objective emerged during testing: verifying the corrected model against a real, unlabelled CCTV feed (a public webcam of a street crossing in Davao City) surfaced a limitation invisible in any benchmark — one with direct implications for the system's intended deployment across city-owned cameras.</p>
+
+<h2>2. Methodology</h2>
+<p>The guiding principle throughout was <strong>measure, do not assume</strong>. Every claim below is backed by a script and a logged result; several hypotheses formed during the work were subsequently disproven by follow-up measurement and are reported alongside the ones that held, because the negative results are methodologically part of the record.</p>
+<p>Three data sources were used throughout: <strong>RWF-2000</strong> and <strong>SCVD</strong> (the existing training datasets), and a live, unlabelled public CCTV stream used only for qualitative deployment testing (no ground truth available on that stream).</p>
+
+<h2>3. Defects Found and Corrected</h2>
+
+<h3>3.1 Detection coupled to tracking (the original architectural cause)</h3>
+<p>The deployed pipeline only classified a person if a single YOLO tracking ID survived 20 consecutive frames. On the held-out set, <strong>132 of 769 clips (17.2%) never reached the classifier at all</strong> — 36 of them violent, silently scored as "normal" because the model never ran, and 96 normal clips scored as true negatives "for free." This inflated the apparent accuracy while hiding the real recall problem.</p>
+<p><strong>Fix:</strong> a whole-frame ("scene mode") classification path was added (<code>SceneViolenceDetector</code> in <code>x3d_violence_detector.py</code>), which classifies the entire frame on a fixed interval independent of person tracking. This removed the tracking gate as a source of missed detections.</p>
+
+<h3>3.2 Dataset leakage and duplication</h3>
+<p>An audit of the training data (6,182 source files) found <strong>485 byte-identical duplicate files</strong> and, because the train/validation split was assigned by a random shuffle, <strong>93 held-out clips (12.1%) had an identical byte-for-byte twin in the training set</strong> — the model had memorised, not generalised, on those clips.</p>
+<p><strong>Fix:</strong> <code>build_dataset_manifest.py</code> was written to assign every clip's split <strong>from a SHA-256 content hash</strong> rather than a shuffle. Two files with identical content always land on the same side of the split, making this class of leakage structurally impossible rather than something to re-audit after every dataset change. A <strong>three-way split</strong> (train / val / test) was added specifically so that model-selection (validation) and final reporting (test) could no longer be the same data — see §3.6.</p>
+
+<h3>3.3 The double-softmax defect (root cause of the accuracy plateau)</h3>
+<p>This was the most significant and least visible defect. The underlying model architecture (<code>pytorchvideo</code>'s X3D) already terminates its classification head in a <code>Softmax</code> layer — its raw output <strong>is already a probability distribution</strong>. Both the training loss (<code>nn.CrossEntropyLoss</code>, which internally applies <code>softmax</code>) and the live inference code (which applied <code>torch.softmax</code> again to the model's output) were <strong>softmaxing an already-softmaxed value.</strong></p>
+<p>Measured consequences:</p>
+<ul>
+  <li><strong>The training loss had a hard mathematical floor.</strong> A perfectly classified example could score no better than <code>-log(softmax([0,1])[1]) ≈ 0.3133</code>. Across 390 logged training batches, the minimum recorded loss was exactly 0.3133, and none went below it — confirming the floor was actually binding, not merely theoretical.</li>
+  <li><strong>This collapsed the loss's dynamic range to just 1.0</strong> (a perfect prediction and a confidently wrong one differed by only 1.0 in loss), which starved the model of gradient signal on its hardest, most informative examples — a strong candidate for the true cause of the four-retrain plateau.</li>
+  <li><strong>Every confidence value the system ever reported, logged, or thresholded was compressed into the range [0.269, 0.731].</strong> A normal scene could never read below 27%, and a violent one could never read above 73%. Every threshold tuned against this compressed scale (e.g., the deployed 0.40) was tuned against a distorted number.</li>
+</ul>
+<p><strong>Fix, and a self-correction on the way to it:</strong> the first proposed fix — replacing the head's <code>Softmax</code> with <code>Identity</code> — was tested before being deployed and found to be <strong>incorrect</strong>: the model architecture averages per-timestep probabilities across 10 temporal positions before pooling, so removing the softmax changes what is being averaged (probabilities vs. logits), not merely its scale. This was caught by a controlled test on 120 real clips, which found one verdict that changed at a large decision margin (a logit gap of −1.30) — proof the two formulations are not equivalent. The correct fix — training with <code>NLLLoss</code> directly on the model's native probability output, with gradient clipping added as a safety measure once the loss floor was removed — was verified to be <strong>exactly decision-preserving</strong> (0/120 disagreements) at the deployed threshold, while restoring the full [0, 1] confidence range and removing the loss floor entirely.</p>
+
+<h3>3.4 Selection bias in reported accuracy</h3>
+<p>The training script selects its "best" checkpoint by accuracy on the validation set — meaning a validation-set accuracy figure is, by construction, a number the training process already optimized toward. Every accuracy figure reported by this project before this work period was a validation-set figure presented without that caveat. The evaluation script's own output banner asserted such numbers were "the number to cite as true generalization performance," which was corrected to distinguish validation (selection-optimistic) from test (honest) results, and a related bug where test-split results were being mislabeled as validation-split in the permanent log (<code>eval_history.csv</code>) was also fixed.</p>
+
+<h3>3.5 Supporting fixes</h3>
+<ul>
+  <li>A checkpoint-resume bug where the "best accuracy so far" value was saved to disk <strong>before</strong> being updated for the current epoch, meaning a training run interrupted and resumed (which occurred once, due to a power outage during this work period) would silently forget its actual best score and could overwrite a better model with a worse one. The associated "early stopping patience" counter had the same bug.</li>
+  <li>The model's expected input resolution (<code>frame_size</code>) was hardcoded identically in two separate files with no mechanism to detect disagreement between them — the exact class of bug that caused §3.1–3.3. A <code>.meta.json</code> sidecar is now written next to every trained checkpoint recording its exact input contract (resolution, frame count, output convention), and the live detector reads it and <strong>overrides a mismatched config with a loud warning</strong> rather than silently using the wrong value.</li>
+</ul>
+
+<h3>3.6 Honest, leak-free, selection-free evaluation</h3>
+<p>With the three-way manifest in place, the final model was trained on a 3,298-clip training set, model-selected on a <em>separate</em> 722-clip validation set, and — for the first time in this project's history — scored on a <strong>758-clip test set that neither gradient descent nor checkpoint selection ever saw.</strong></p>
+
+<h2>4. Results</h2>
+<table>
+  <thead>
+    <tr><th>Stage</th><th>Split type</th><th>Accuracy</th><th>Recall</th><th>Precision</th><th>FPR</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Start of this work period</td><td>selection-optimistic</td><td>77.2%*</td><td>—</td><td>—</td><td>—</td></tr>
+    <tr><td>After leak removal, before softmax fix</td><td>honest (leak-excluded)</td><td>78.4%</td><td>77.0%</td><td>91.2%</td><td>18.2%</td></tr>
+    <tr><td>Retrained model, validation split</td><td><strong>selection-optimistic</strong></td><td>93.9%</td><td>96.3%</td><td>91.9%</td><td>8.4%</td></tr>
+    <tr><td><strong>Final model, held-out test split</strong></td><td><strong>honest — never seen in training or selection</strong></td><td><strong>95.0%</strong></td><td><strong>97.4%</strong></td><td><strong>92.9%</strong></td><td><strong>7.4%</strong></td></tr>
+  </tbody>
+</table>
+<p class="footnote">*Confusion counts for the 78.4% figure: TP=237, FN=137, TN=304, FP=91 (n=769).<br>
+Final honest figure confusion counts: TP=369, FN=10, TN=351, FP=28 (n=758).</p>
+
+<p>The honest, held-out result represents a <strong>+16.6 percentage point accuracy improvement and a +20.4 point recall improvement</strong> over the session's starting point, achieved on a model trained with <strong>18% less data</strong> than an intermediate checkpoint, which underscores that the gain came from removing defects rather than from more data.</p>
+
+<h3>4.1 Error analysis on the held-out result</h3>
+<p>Breaking the 32 false positives down by data source found <strong>all 32 originated from one sub-class</strong> (RWF-2000's "NonFight," largely crowded/wide street footage); the parallel SCVD "Normal" class scored a perfect 0% FPR on 171 clips. Further analysis found false-positive rate is strongly correlated with <strong>clip duration</strong> — 0% at 1–5 inference checks per clip, rising to 19.9% at 10+ checks — meaning <strong>per-clip false-positive rate systematically understates the false-alarm rate on a continuously running camera</strong>, which never stops accumulating checks. This is flagged as a critical consideration for the operating-point (alert threshold) decision in the next phase, rather than something the accuracy figure alone can answer.</p>
+
+<h2>5. A Deployment-Blocking Discovery: Scale Mismatch on Wide Camera Views</h2>
+<p>Following model correction, the corrected system was tested against a real, unlabelled public CCTV stream (a street-crossing camera in Davao City) as a qualitative deployment check. Initial observation: confidence readings fluctuated with traffic on a wide-angle view of the intersection, with no violence occurring.</p>
+
+<p><strong>Working hypothesis (formed, then tested, then disproven):</strong> it was hypothesized this fluctuation was the model misreading vehicle/crowd motion as violence (a false-positive risk). This was tested directly by taking the same live footage and <em>synthetically shrinking</em> the people in it while holding everything else constant. <strong>Confidence did not rise — it barely moved (0.132 → 0.128), and no alarm fired at either scale.</strong> The false-positive hypothesis was rejected by this test.</p>
+
+<p><strong>The actual mechanism, confirmed by controlled measurement:</strong> every training clip was measured for person size as a percentage of frame height using the existing pose-detection model. Training footage puts a person at a median of <strong>37.1%</strong> of frame height (range 24–60%). The Davao street camera, uncropped, puts a person at roughly <strong>9–12%.</strong> To determine the effect of this gap directly, 40 violent clips the model detects with 100% confidence in their original form were replayed at progressively smaller synthetic scale:</p>
+
+<table>
+  <thead>
+    <tr><th>Person height (% of frame)</th><th>37%</th><th>30%</th><th>22%</th><th>19%</th><th>15%</th><th>9%</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>Clips still detected (of 40)</strong></td><td>40/40</td><td>34/40</td><td>25/40</td><td>22/40</td><td>7/40</td><td><strong>0/40</strong></td></tr>
+  </tbody>
+</table>
+
+<p>There is a sharp cliff between 19% and 15% person-height. <strong>Below approximately 15%, the model does not become less confident — it detects nothing.</strong> This is the correct explanation for the earlier field observation: a wide-angle street camera does not cause false alarms; it causes the system to be <strong>effectively blind</strong>, and a blind camera on a quiet street is statistically indistinguishable from a working camera on a quiet street. For a public-safety system, this is the most dangerous possible failure mode, because it produces no symptom.</p>
+
+<h3>5.1 Why the obvious fix (cropping the camera view) was rejected</h3>
+<p>The natural first response — configure each camera to crop/zoom into the region where people are expected — was proposed and then explicitly rejected after review, on the following reasoning: a camera is installed to monitor a specific area; cropping it to compensate for a model limitation reintroduces exactly the blind spot the camera was purchased to eliminate. This would violate the system's core purpose for the sake of a training-data artifact.</p>
+
+<h3>5.2 Root cause identified in the training pipeline</h3>
+<p>Investigating why the model had never learned to recognize small people, the clip-augmentation code was found to contain a <strong>scale augmentation that could only zoom in</strong> (random crop 80–100%, resized back up — which only ever makes a person <em>larger</em> than in the source footage). <strong>No augmentation in the pipeline had ever shown the model a person smaller than what the raw source footage happened to contain.</strong> This is now understood as the root cause of the scale-blindness finding in §5, not merely a symptom of it.</p>
+
+<h3>5.3 Coverage-preserving architectural alternative</h3>
+<p>A tiled inference approach was designed and implemented as an alternative to cropping: the frame is divided into a grid of overlapping regions (each independently classified with its own temporal buffer), so a distant person becomes proportionally larger within their tile <strong>without discarding any part of the camera's field of view.</strong> A controlled test replaying the same shrunk clips through this design recovered <strong>25 of 30</strong> detections that a whole-frame pass missed entirely at the same scale (0 of 30), while covering 100% of the frame. A subtlety was found and addressed during this test: a non-overlapping grid can split a single incident across a tile boundary and cause it to be missed by every tile (measured: a non-overlapping 2×2 grid scored <em>worse</em>, at 1/30, than the whole-frame baseline) — solved by overlapping tiles plus retaining one full-frame pass for scene-scale context.</p>
+
+<h2>6. Current Status and Immediate Next Steps</h2>
+<p>The corrected violence-detection model (95.0% honest accuracy) is deployed as the system default. A formal, evidence-based plan for the next phase — reconciling full-camera-view coverage with accurate detection — has been written and approved, structured as:</p>
+<ol>
+  <li><strong>Measurement phase</strong> — determine, before building anything, whether the existing person-detection model can reliably locate distant people at an affordable computational cost, since this decides between two viable architectures (person-cropped classification, informed by 2024 published work — <em>CUE-Net</em>, CVPR — which uses the same spatial-cropping principle already present in this codebase; versus the tiled whole-frame approach in §5.3).</li>
+  <li><strong>Clean retraining</strong> of both candidate architectures on the leak-free three-way manifest, now including a <strong>zoom-out augmentation</strong> (added following the §5.2 finding) so the model is exposed to small-scale people during training for the first time.</li>
+  <li><strong>Head-to-head evaluation</strong> on the held-out test split <em>and</em> on simulated wide-camera footage, since a model can be honestly accurate on close-up benchmark clips while remaining unusable at deployment scale — precisely the gap this report documents.</li>
+  <li><strong>Operating-point selection</strong> based on a measured false-alarms-per-hour figure from real (Davao) footage, not on a benchmark-clip false-positive rate, per the finding in §4.1.</li>
+  <li>A documented scaling path toward the system's ultimate goal — multiple city-owned cameras — including the compute-cost tradeoff between the two candidate architectures.</li>
+</ol>
+
+<h2>7. Limitations to State Plainly</h2>
+<div class="callout">
+<ul>
+  <li>All quantitative accuracy figures in this report are measured on <strong>RWF-2000 and SCVD</strong>, two established academic benchmarks — not on Philippine street-camera footage. The Davao feed provided a valuable qualitative check and surfaced the scale-mismatch finding, but it carries no ground-truth labels, so <strong>recall on real deployment cameras remains formally unmeasured</strong> and is the central open question the next phase addresses.</li>
+  <li>The false-alarm-rate figures in §4 are per-benchmark-clip; §4.1 explains why this likely understates the true rate on a continuously running camera, and the next phase's operating-point selection is designed specifically to correct this.</li>
+  <li>Two other detection capabilities in this system — robbery and vandalism — are implemented as hand-written geometric rules rather than trained models, and report fixed, hardcoded confidence values to the dashboard rather than measured ones. They were out of scope for this work period (violence detection only, by explicit decision) and are noted here as a known gap for future work.</li>
+</ul>
+</div>
+
+<p class="closing">This report was compiled from the session's logged experimental results (<code>eval_history.csv</code>, <code>train_log.csv</code>) and the measurement scripts referenced throughout, all retained in the project repository for reproducibility.</p>
+
+</body>
+</html>

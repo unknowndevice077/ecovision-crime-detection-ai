@@ -19,13 +19,14 @@ HOW TO USE
 import argparse
 import random
 import csv
+import sys
 from pathlib import Path
 from collections import defaultdict
 
 import cv2
 from ultralytics import YOLO
 
-from x3d_violence_detector import X3DViolenceDetector
+from x3d_violence_detector import X3DViolenceDetector, SceneViolenceDetector
 
 POSE_IMGSZ = 416
 POSE_MODEL_PATH = "yolo11s-pose.pt"
@@ -188,33 +189,113 @@ def evaluate_clip(video_path: Path, pose_model, x3d_detector, device: str,
     }
 
 
-def run_test(roots: list, device: str, notes: str = "", allow_flush: bool = True):
-    print("Recreating EXACT train/val split from train_x3d_full.py (seed=42)...")
-    all_clips = gather_all_clips_EXACT_TRAINING_LOGIC(roots)
+def evaluate_clip_scene(video_path: Path, scene_detector) -> dict:
+    """Whole-frame evaluation -- no pose model, no tracking, no buffer gate.
 
-    split_idx = int(len(all_clips) * 0.85)
-    train_clips = all_clips[:split_idx]
-    val_clips = all_clips[split_idx:]   # <-- THESE are the ones the model never trained on
+    Every clip gets scored here by construction, which is the entire point:
+    the per-track path leaves 132 of 769 clips unscored because no track ID
+    survives 20 frames, and 96 of those are normal clips that then bank a
+    free TN. Removing the gate makes the FPR honest.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    scene_detector.reset_scene()
 
-    print(f"Total clips: {len(all_clips)}")
-    print(f"Train (excluded from this test): {len(train_clips)}")
-    print(f"TRUE HELD-OUT validation set (testing these): {len(val_clips)}")
+    frame_count = 0
+    any_violence = False
+    max_conf = 0.0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_count += 1
+        is_violent, conf = scene_detector.update(frame, frame_count)
+        max_conf = max(max_conf, conf)
+        if is_violent:
+            any_violence = True
+    cap.release()
+
+    info = scene_detector.get_scene_debug_info()
+    return {
+        "detected": any_violence,
+        "max_confidence": max_conf,
+        "frame_count": frame_count,
+        "frames_with_pose": "n/a",
+        "pose_exceptions": 0,
+        "had_any_buffer": info["buffer_fill"] > 0,
+        "forced_flush": False,
+        "pose_detection_rate": "n/a",
+        "real_inference_count": info["inference_count"],
+    }
+
+
+def run_test(roots: list, device: str, notes: str = "", allow_flush: bool = True,
+             scene_mode: bool = False, out_csv: str = OUTPUT_CSV,
+             weights: str = None, use_manifest: bool = False,
+             manifest_path: str = None, split: str = "val"):
+    if use_manifest or manifest_path:
+        # One source of truth, shared with training. The seed-42 path below
+        # re-derives the split independently and leaks 93 clips (12.1% of the
+        # held-out set) that are byte-identical to training clips; the
+        # manifest assigns splits from the content hash so that cannot happen.
+        sys.path.insert(0, str(Path(DEFAULT_RWF_ROOT).parents[1]))
+        from dataset_manifest_loader import get_split, describe
+        print("Using dataset manifest (content-hash split, deduplicated):")
+        print(describe(manifest_path))
+        val_clips = get_split(split, manifest_path)
+        print(f"\nHELD-OUT set ({split}): {len(val_clips)} clips")
+        if split == "val":
+            # Worth saying every run, because the number looks like a held-out
+            # score and is not one: train_x3d_full.py saves the best checkpoint
+            # by val_acc, so val is the model-SELECTION set. Scoring here
+            # reports a figure training already picked the weights to maximise.
+            print("WARNING: 'val' is the split training used to choose the best "
+                  "checkpoint. This number is selection-optimistic. Use the 3-way "
+                  "manifest's 'test' split for an honest one:")
+            print("         --manifest-path 3way --split test")
+        print("NOTE: not comparable with pre-manifest rows in eval_history.csv "
+              "-- different split membership.")
+    else:
+        print("Recreating EXACT train/val split from train_x3d_full.py (seed=42)...")
+        all_clips = gather_all_clips_EXACT_TRAINING_LOGIC(roots)
+
+        split_idx = int(len(all_clips) * 0.85)
+        train_clips = all_clips[:split_idx]
+        val_clips = all_clips[split_idx:]   # <-- THESE are the ones the model never trained on
+
+        print(f"Total clips: {len(all_clips)}")
+        print(f"Train (excluded from this test): {len(train_clips)}")
+        print(f"TRUE HELD-OUT validation set (testing these): {len(val_clips)}")
 
     val_fight = sum(1 for _, l in val_clips if l == 1)
     val_normal = sum(1 for _, l in val_clips if l == 0)
     print(f"  -> {val_fight} violent, {val_normal} normal")
 
-    print(f"\nLoading pose model on {device}...")
-    pose_model = YOLO(POSE_MODEL_PATH)
-    print("Loading X3D-XS detector...")
-    x3d_detector = X3DViolenceDetector(device=device)
+    # None -> whatever config.json's detection.violence.model_path points at.
+    model_kw = {"model_path": weights} if weights else {}
+    if weights:
+        print(f"\nWeights override: {weights}")
+
+    if scene_mode:
+        # No pose stage at all -- that is the whole point, and it also makes
+        # this run several times faster than the per-track path.
+        print("SCENE MODE: whole-frame classification, pose model not loaded.")
+        pose_model = None
+        x3d_detector = SceneViolenceDetector(device=device, **model_kw)
+    else:
+        print(f"Loading pose model on {device}...")
+        pose_model = YOLO(POSE_MODEL_PATH)
+        print("Loading X3D-XS detector...")
+        x3d_detector = X3DViolenceDetector(device=device, **model_kw)
 
     results = []
     confusion = defaultdict(int)
 
     for i, (video_path, ground_truth_violent) in enumerate(val_clips):
-        result = evaluate_clip(video_path, pose_model, x3d_detector, device,
-                               allow_flush=allow_flush)
+        if scene_mode:
+            result = evaluate_clip_scene(video_path, x3d_detector)
+        else:
+            result = evaluate_clip(video_path, pose_model, x3d_detector, device,
+                                   allow_flush=allow_flush)
         predicted_violent = result["detected"]
 
         if ground_truth_violent and predicted_violent:
@@ -229,6 +310,12 @@ def run_test(roots: list, device: str, notes: str = "", allow_flush: bool = True
 
         results.append({
             "file": video_path.name,
+            # Full path as well, because basenames are NOT unique: RWF-2000
+            # reuses 30 filenames across Fight/ and NonFight/ with different
+            # content. Anything that joins results back to the dataset by
+            # "file" alone silently mixes those up -- which is exactly what
+            # audit_leakage_impact.py and compare_modes.py were doing.
+            "path": str(video_path),
             "ground_truth": "violent" if ground_truth_violent else "normal",
             "predicted": "violent" if predicted_violent else "normal",
             "outcome": outcome,
@@ -248,15 +335,26 @@ def run_test(roots: list, device: str, notes: str = "", allow_flush: bool = True
               f"pose_seen={result.get('had_any_buffer')} "
               f"forced={result.get('forced_flush')}")
 
-    with open(OUTPUT_CSV, "w", newline="") as f:
+    with open(out_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
         writer.writeheader()
         writer.writerows(results)
+    print(f"\nper-clip results -> {out_csv}")
 
     tp, fp, tn, fn = confusion["TP"], confusion["FP"], confusion["TN"], confusion["FN"]
     total = tp + fp + tn + fn
+    # The banner has to depend on which split ran. It previously read
+    # "TRUE HELD-OUT ... never trained on" and "the number to cite"
+    # unconditionally, including when scoring the split that chose the
+    # checkpoint -- so the honest and the optimistic case printed the same
+    # confident claim, and only the latter was wrong.
+    selection_set = (split == "val")
     print("\n" + "=" * 78)
-    print(f"TRUE HELD-OUT RESULTS ({total} clips the model NEVER trained on)")
+    if selection_set:
+        print(f"VALIDATION RESULTS ({total} clips) -- SELECTION-OPTIMISTIC, NOT HELD OUT")
+    else:
+        print(f"TRUE HELD-OUT RESULTS ({total} clips, split={split!r}, "
+              f"never read during training)")
     print("=" * 78)
     print(f"TP={tp}  FN={fn}  TN={tn}  FP={fp}")
     if total > 0:
@@ -267,11 +365,19 @@ def run_test(roots: list, device: str, notes: str = "", allow_flush: bool = True
         print(f"Precision: {tp/(tp+fp)*100:.1f}%")
     if fp + tn > 0:
         print(f"False Positive Rate: {fp/(fp+tn)*100:.1f}%")
-    print(f"\nThis is the number to cite as your model's true generalization")
-    print(f"performance through the live deployed pipeline.")
+    if selection_set:
+        print(f"\nDO NOT cite this as generalization performance. Training chose its")
+        print(f"best checkpoint by accuracy on these exact clips, so the model was")
+        print(f"selected to do well here. For an honest figure, train against the")
+        print(f"3-way manifest and score the test split:")
+        print(f"    --manifest-path 3way --split test")
+    else:
+        print(f"\nThis is the number to cite: split={split!r} is read by neither")
+        print(f"gradient updates nor checkpoint selection, and it is measured")
+        print(f"through the live deployed pipeline.")
 
     from eval_history import log_run
-    log_run("test_x3d_true_heldout", split="val", tp=tp, fp=fp, tn=tn, fn=fn, notes=notes)
+    log_run("test_x3d_true_heldout", split=split, tp=tp, fp=fp, tn=tn, fn=fn, notes=notes)
 
 
 if __name__ == "__main__":
@@ -285,10 +391,68 @@ if __name__ == "__main__":
                              "scores if a track reaches MIN_BUFFER_FOR_INFERENCE frames -- "
                              "i.e. measure the pipeline main.py actually runs. Results are "
                              "NOT comparable with the flush-enabled rows in eval_history.csv.")
+    parser.add_argument("--scene", action="store_true",
+                        help="Whole-frame mode: classify the full frame sequence with no "
+                             "pose model, no tracking and no MIN_BUFFER_FOR_INFERENCE gate, "
+                             "so all 769 clips get scored. This matches how the baseline "
+                             "weights were actually TRAINED (train_x3d_full.py resizes the "
+                             "whole frame unless --crop-boxes-path is given).")
+    parser.add_argument("--manifest", action="store_true",
+                        help="Use dataset_manifest.json (deduplicated, content-hash split, "
+                             "shared with training) instead of re-deriving the seed-42 "
+                             "shuffle. The old path leaks 93 clips into the held-out set; "
+                             "this one cannot. Results are NOT comparable with pre-manifest "
+                             "rows in eval_history.csv.")
+    parser.add_argument("--manifest-path", type=str, default=None,
+                        help="Which manifest to read. Omit for dataset_manifest.json; "
+                             "pass '3way' for dataset_manifest_3way.json, or a path. "
+                             "Implies --manifest.")
+    parser.add_argument("--split", type=str, default="val",
+                        choices=["train", "val", "test"],
+                        help="Which split to score. 'val' is the set training used to "
+                             "pick the best checkpoint, so scoring it is optimistic; "
+                             "'test' (3-way manifest only) is never read during training "
+                             "and is the only honest option.")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Override detection.violence.confidence_threshold for this run "
+                             "only (config.json is untouched). The clean threshold sweep put "
+                             "the scene-mode optimum near 0.50, vs 0.40 tuned for per-track.")
+    parser.add_argument("--consecutive", type=int, default=None,
+                        help="Override consecutive_required for this run only. On a 30-frame "
+                             "clip at check_interval=15 there are just two inference points, "
+                             "so the default of 2 demands a perfect record.")
+    parser.add_argument("--weights", type=str, default=None,
+                        help="Path to an X3D .pt to evaluate. Defaults to config.json's "
+                             "detection.violence.model_path. Use this to compare the "
+                             "whole-frame-trained baseline against the crop-trained model.")
+    parser.add_argument("--out-csv", type=str, default=OUTPUT_CSV,
+                        help="Where to write per-clip results. Override it when comparing "
+                             "modes so a scene run does not clobber the per-track CSV.")
     args = parser.parse_args()
     roots = [r for r in [args.rwf_root, args.scvd_root] if r is not None]
     if not roots:
         raise SystemExit("Provide at least one of --rwf-root or --scvd-root")
+    if args.no_flush and args.scene:
+        raise SystemExit("--no-flush is meaningless with --scene: scene mode has no "
+                         "per-track buffer gate and no end-of-clip flush.")
     if args.no_flush:
         print("--no-flush: end-of-clip forced inference DISABLED (deployed-gate mode)")
-    run_test(roots, args.device, notes=args.notes, allow_flush=not args.no_flush)
+
+    # Patch the module globals rather than config.json so a tuning sweep can
+    # never leave the deployed config in an experimental state. _smooth_and_confirm
+    # and _run_inference read these at call time, so this takes effect.
+    import x3d_violence_detector as _xvd
+    if args.threshold is not None:
+        print(f"threshold override: {_xvd.VIOLENCE_CONFIDENCE_THRESHOLD} -> {args.threshold}")
+        _xvd.VIOLENCE_CONFIDENCE_THRESHOLD = args.threshold
+    if args.consecutive is not None:
+        print(f"consecutive_required override: "
+              f"{_xvd.VIOLENCE_CONSECUTIVE_REQUIRED} -> {args.consecutive}")
+        _xvd.VIOLENCE_CONSECUTIVE_REQUIRED = args.consecutive
+    if args.split != "val" and not (args.manifest or args.manifest_path):
+        raise SystemExit("--split only applies in manifest mode; add --manifest "
+                         "(or --manifest-path 3way).")
+    run_test(roots, args.device, notes=args.notes, allow_flush=not args.no_flush,
+             scene_mode=args.scene, out_csv=args.out_csv, weights=args.weights,
+             use_manifest=args.manifest, manifest_path=args.manifest_path,
+             split=args.split)
