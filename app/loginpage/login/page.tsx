@@ -43,7 +43,7 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6" style={{ background: 'var(--bg)' }}>
-      <div className="w-full max-w-[340px]">
+      <div className="w-full max-w-[340px] animate-rise-in">
 
         {/* Identity block -- kept plain. This is a restricted system sign-in,
             not a product landing page. */}
@@ -98,7 +98,7 @@ export default function LoginPage() {
 
             {error && (
               <div
-                className="flex items-start gap-2 px-2.5 py-2 border"
+                className="flex items-start gap-2 px-2.5 py-2 border animate-rise-in"
                 style={{ background: 'rgba(229,52,47,0.10)', borderColor: 'var(--critical)' }}
                 role="alert"
               >
@@ -109,7 +109,7 @@ export default function LoginPage() {
 
             <button
               disabled={isSubmitting}
-              className="w-full py-2.5 text-[11px] font-bold uppercase tracking-[0.15em] text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="w-full py-2.5 text-[11px] font-bold uppercase tracking-[0.15em] text-white transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100"
               style={{ background: 'var(--accent)' }}
             >
               {isSubmitting ? "Signing in…" : "Sign In"}

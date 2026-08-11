@@ -60,6 +60,21 @@ _DEFAULT_VIOLENCE_CFG = {
     # actually matched to scene inference; x3d_xs_violence_best.pt is the
     # crop-trained model and scores 5.3pp lower under scene inference.
     "scene_model_path": "weights/x3d_xs_violence_best_baseline_backup.pt",
+
+    # --- tiled mode (city-scale full-view cameras, see TiledSceneViolenceDetector) ---
+    # Grid density and check cadence are a measured cost/recall tradeoff, not
+    # arbitrary. On a GTX 1660 SUPER, clean (GPU-idle) full-pipeline measurement:
+    #   grid=4 (17 tiles), interval=15 -> 57.80 ms/frame, 0.58x real-time --
+    #       cannot sustain even one live camera.
+    #   grid=3 (10 tiles), interval=15 -> 34.34 ms/frame, 0.97x real-time,
+    #       29/30 recall (vs 30/30 at grid=4) on the same shrunk-to-9%-person-
+    #       height clips -- essentially free in recall, still short on cost.
+    #   grid=3, interval=20             -> 28.48 ms/frame, 1.17x real-time,
+    #       29/30 recall -- clears the budget with margin. These are the
+    #       defaults below. Re-measure before changing GPU/hardware.
+    "tile_grid": 3,
+    "tile_overlap": 0.25,
+    "tile_check_interval": 20,
 }
 
 
@@ -100,6 +115,10 @@ SCENE_CONFIDENCE_THRESHOLD = _VIOLENCE_CFG["scene_confidence_threshold"]
 SCENE_CONSECUTIVE_REQUIRED = _VIOLENCE_CFG["scene_consecutive_required"]
 SCENE_MODEL_PATH = os.path.normpath(
     os.path.join(DETECTOR_PROJECT_ROOT, _VIOLENCE_CFG["scene_model_path"]))
+
+TILE_GRID = _VIOLENCE_CFG["tile_grid"]
+TILE_OVERLAP = _VIOLENCE_CFG["tile_overlap"]
+TILE_CHECK_INTERVAL = _VIOLENCE_CFG["tile_check_interval"]
 
 # --- EMA smoothing on raw confidence, per track ---
 EMA_ALPHA = _VIOLENCE_CFG["ema_alpha"]          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
@@ -415,7 +434,12 @@ class X3DViolenceDetector:
 
         return self._cached_result[tid]
 
-    def _run_inference(self, frames_deque: deque, tid: int = None) -> tuple:
+    def _prepare_clip_array(self, frames_deque: deque) -> np.ndarray:
+        """Sample + normalize one buffer into a (C, T, H, W) float32 array,
+        everything _run_inference did before the model call. Factored out so
+        _run_inference_batch can stack many clips into ONE tensor instead of
+        making N separate model() calls -- see that method for why this
+        matters (measured 2.7x speedup for a 17-tile batch)."""
         all_frames = list(frames_deque)
         if len(all_frames) < self.clip_frames:
             all_frames = all_frames + [all_frames[-1]] * (self.clip_frames - len(all_frames))
@@ -424,8 +448,11 @@ class X3DViolenceDetector:
 
         frames = np.stack(sampled, axis=0).astype(np.float32) / 255.0
         frames = (frames - 0.45) / 0.225
-        tensor = torch.from_numpy(frames).permute(3, 0, 1, 2).float().unsqueeze(0)
-        tensor = tensor.to(self.device)
+        return frames.transpose(3, 0, 1, 2)   # (T,H,W,C) -> (C,T,H,W)
+
+    def _run_inference(self, frames_deque: deque, tid: int = None) -> tuple:
+        tensor = torch.from_numpy(self._prepare_clip_array(frames_deque))
+        tensor = tensor.float().unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             # The head already ends in nn.Softmax, so `outputs` IS a probability
@@ -450,6 +477,44 @@ class X3DViolenceDetector:
             self._real_inference_count[tid] = self._real_inference_count.get(tid, 0) + 1
 
         return is_violent, violence_prob
+
+    def _run_inference_batch(self, deques: list, tid: int = None) -> list:
+        """Same computation as calling _run_inference() once per deque, as ONE
+        GPU call instead of len(deques) sequential ones.
+
+        Exists for TiledSceneViolenceDetector: measured on this GPU, 17
+        sequential X3D-XS calls cost 622ms; one batched call with the same 17
+        clips costs 230ms (2.7x). At check_interval=15 that periodic burst was
+        the dominant per-frame cost (49.9ms/frame average, ~15x whole-frame's
+        3.3ms) and left tiled mode UNABLE to sustain one real-time 30fps
+        camera (0.67x budget) -- Python/kernel-launch dispatch overhead paid
+        17 times, not spatial resolution or model size, was the bottleneck.
+        Batching brings projected capacity to ~1.5x real-time.
+
+        Returns a list of (is_violent, raw_conf), same order as `deques`.
+        Empty deques are skipped (caller must handle the gap; TiledScene...
+        skips tiles with no frames yet, matching prior per-tile behaviour).
+        """
+        idx_map = [i for i, d in enumerate(deques) if len(d) > 0]
+        if not idx_map:
+            return [(False, 0.0)] * len(deques)
+
+        arrays = [self._prepare_clip_array(deques[i]) for i in idx_map]
+        batch = torch.from_numpy(np.stack(arrays, axis=0)).float().to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(batch)   # (N, 2) probabilities -- see _run_inference
+            probs = outputs[:, 1].tolist()
+
+        if tid is not None:
+            self._real_inference_count[tid] = (
+                self._real_inference_count.get(tid, 0) + len(idx_map))
+
+        out = [(False, 0.0)] * len(deques)
+        for pos, orig_i in enumerate(idx_map):
+            p = probs[pos]
+            out[orig_i] = (p >= VIOLENCE_CONFIDENCE_THRESHOLD, p)
+        return out
 
     def get_crop_box(self, tid: int) -> tuple:
         return self._active_crop_boxes.get(tid, None)
@@ -636,23 +701,44 @@ class TiledSceneViolenceDetector(SceneViolenceDetector):
     let a busy tile's confidence leak into a quiet one and make the temporal
     logic meaningless -- the smoothing exists to track one region over time.
 
-    Cost is N*N inferences per check: 9 x 26ms = 234ms against a 500ms budget
-    at check_interval=15 on 30fps. Fits, with room left.
+    Cost is a real, measured constraint, not the naive "N*N inferences fit
+    under a 500ms check-window" estimate this docstring used to state --
+    that budget was wrong (the live pipeline calls update() every FRAME,
+    33.33ms at 30fps, not once per check window). Clean (GPU-idle) full-
+    pipeline measurement on a GTX 1660 SUPER, with batched tile inference:
+        grid=4 (17 tiles), interval=15 -> 57.80 ms/frame, 0.58x real-time --
+            cannot sustain even one live camera.
+        grid=3 (10 tiles), interval=20 -> 28.48 ms/frame, 1.17x real-time,
+            29/30 recall (vs 30/30 at grid=4) on clips shrunk to 9% person-
+            height -- clears the budget with margin for one camera, at a
+            cost of one clip out of 30. This is why grid=3/interval=20 are
+            the config defaults (tile_grid / tile_check_interval).
+    Re-measure (phase4_tile_grid_tradeoff.py) before changing GPU/hardware
+    or before assuming this scales to a second concurrent camera.
     """
 
-    def __init__(self, grid: int = 4, overlap: float = 0.25,
+    def __init__(self, grid: int = None, overlap: float = None,
                  include_full_frame: bool = True, model_path: str = None,
                  device: str = None, threshold: float = None,
-                 consecutive: int = None,
+                 consecutive: int = None, check_interval: int = None,
                  log_path: str = SCENE_DIAGNOSTIC_LOG_PATH):
         super().__init__(model_path=model_path, device=device, threshold=threshold,
                          consecutive=consecutive, log_path=log_path)
+        grid = TILE_GRID if grid is None else grid
+        overlap = TILE_OVERLAP if overlap is None else overlap
         if grid < 1:
             raise ValueError("grid must be >= 1")
         if not 0.0 <= overlap < 1.0:
             raise ValueError("overlap must be in [0, 1)")
         self.grid = grid
         self.overlap = overlap
+        # Tiled mode gets its OWN check cadence rather than sharing
+        # X3D_CHECK_INTERVAL with scene/track modes -- its per-check cost is
+        # ~17x a single scene inference (many small tiles vs one frame), so
+        # the interval that keeps scene mode responsive is not necessarily
+        # the one that keeps tiled mode inside the real-time budget. See the
+        # class docstring for the measurement behind the default of 20.
+        self._check_interval = TILE_CHECK_INTERVAL if check_interval is None else check_interval
 
         # Overlapping tiles, because a hard grid CUTS INCIDENTS IN HALF. Measured:
         # on clips shrunk so a person is ~9% of frame height, a non-overlapping
@@ -679,7 +765,7 @@ class TiledSceneViolenceDetector(SceneViolenceDetector):
                 "confirmed": False, "raw": 0.0}
             for i in range(len(self._boxes))
         }
-        self._tile_last_check = -X3D_CHECK_INTERVAL
+        self._tile_last_check = -self._check_interval
         self._any_confirmed = False
         self._worst_tile = None
 
@@ -707,7 +793,7 @@ class TiledSceneViolenceDetector(SceneViolenceDetector):
         for st in self._tiles.values():
             st.update({"ema": None, "hits": 0, "confirmed": False, "raw": 0.0})
             st["buf"].clear()
-        self._tile_last_check = -X3D_CHECK_INTERVAL
+        self._tile_last_check = -self._check_interval
         self._any_confirmed = False
         self._worst_tile = None
 
@@ -725,17 +811,28 @@ class TiledSceneViolenceDetector(SceneViolenceDetector):
                 self._tiles[idx]["buf"].append(
                     cv2.resize(tile, (self.frame_size, self.frame_size)))
 
-        if (frame_count - self._tile_last_check) < X3D_CHECK_INTERVAL:
+        if (frame_count - self._tile_last_check) < self._check_interval:
             return self._any_confirmed, max(
                 (st["raw"] for st in self._tiles.values()), default=0.0)
 
         self._tile_last_check = frame_count
         any_conf, best_raw, best_idx = False, 0.0, None
 
-        for idx, st in self._tiles.items():
+        # ONE batched GPU call for every tile instead of len(tiles) sequential
+        # ones. Measured: 17 sequential X3D-XS calls cost 622ms; one batch of
+        # 17 costs 230ms (2.7x) -- Python/kernel-launch dispatch overhead paid
+        # once instead of 17 times. That periodic burst was the dominant cost
+        # in tiled mode's per-frame average (49.9ms vs whole-frame's 3.3ms)
+        # and left it unable to sustain even one real-time 30fps camera
+        # (0.67x budget); batched, projected capacity is ~1.5x.
+        order = list(self._tiles.keys())
+        results = self._run_inference_batch(
+            [self._tiles[i]["buf"] for i in order], tid=self.SCENE_TID)
+
+        for idx, (_, raw) in zip(order, results):
+            st = self._tiles[idx]
             if not st["buf"]:
                 continue
-            _, raw = self._run_inference(st["buf"], tid=self.SCENE_TID)
             confirmed, ema, hits = _smooth_and_confirm(
                 prev_ema=st["ema"], prev_hits=st["hits"],
                 was_confirmed=st["confirmed"], raw_conf=raw,

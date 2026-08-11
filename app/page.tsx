@@ -629,7 +629,7 @@ const fetchCameras = async (userObj: any) => {
           )}
 
           {activeTab !== 'dashboard' && (
-            <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar p-3">
+            <div key={activeTab} className="flex-1 min-w-0 overflow-y-auto custom-scrollbar p-3 animate-fade-in">
               {activeTab === 'crime-reports' && (
                 <CrimeReportsView
                   onUpdate={fetchStats}
@@ -673,7 +673,7 @@ const fetchCameras = async (userObj: any) => {
                   {cameras.map(cam => (
                     <div
                       key={cam.id}
-                      className="border p-3"
+                      className="border p-3 hover-lift"
                       style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
                     >
                       <div className="flex justify-between items-start mb-2.5">
@@ -726,7 +726,7 @@ const fetchCameras = async (userObj: any) => {
 
       {/* ═══ FULLSCREEN VIDEO WALL ═══════════════════════════════════════ */}
       {isFullscreenGrid && (
-        <div className="fixed inset-0 z-[100] flex flex-col" style={{ background: '#06070A' }}>
+        <div className="fixed inset-0 z-[100] flex flex-col animate-fade-in" style={{ background: '#06070A' }}>
           <div
             className="h-9 shrink-0 flex items-center justify-between px-2.5 border-b"
             style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
@@ -787,8 +787,8 @@ const fetchCameras = async (userObj: any) => {
 
       {/* ═══ REGISTER CAMERA ═════════════════════════════════════════════ */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-6">
-          <div className="w-full max-w-sm border" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
+        <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-6 animate-fade-in">
+          <div className="w-full max-w-sm border animate-scale-in" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
             <div
               className="h-9 flex items-center justify-between px-2.5 border-b"
               style={{ borderColor: 'var(--line)' }}
@@ -828,7 +828,7 @@ const fetchCameras = async (userObj: any) => {
                   const u = (document.getElementById('cam-url') as HTMLInputElement).value;
                   if (n && u) handleUpsertNode(n, u);
                 }}
-                className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+                className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.98]"
                 style={{ background: 'var(--accent)' }}
               >
                 Register
@@ -869,7 +869,7 @@ function CameraTile({ cam, aiUrl, alerted, onClick, large }: any) {
   return (
     <Wrapper
       onClick={onClick}
-      className="relative bg-black overflow-hidden group text-left w-full h-full border transition-colors"
+      className={`relative bg-black overflow-hidden group text-left w-full h-full border transition-colors${onClick ? ' hover-lift cursor-pointer' : ''}`}
       style={{ borderColor: alerted ? 'var(--critical)' : 'var(--line)' }}
     >
       <img
@@ -932,7 +932,7 @@ function NavItem({ icon, label, badge, badgeTone = 'neutral', active, onClick }:
   return (
     <button
       onClick={onClick}
-      className="w-full flex items-center justify-between gap-2 pl-3 pr-2.5 py-2.5 transition-colors relative"
+      className="w-full flex items-center justify-between gap-2 pl-3 pr-2.5 py-2.5 transition-all relative active:scale-[0.99]"
       style={{
         background: active ? 'rgba(45,111,247,0.10)' : 'transparent',
         color: active ? '#fff' : 'var(--text-2)',
@@ -940,7 +940,12 @@ function NavItem({ icon, label, badge, badgeTone = 'neutral', active, onClick }:
       onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--panel-2)'; }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
     >
-      {active && <span className="absolute left-0 inset-y-0 w-[3px]" style={{ background: 'var(--accent)' }} />}
+      {active && (
+        <span
+          className="absolute left-0 inset-y-0 w-[3px] animate-scale-in"
+          style={{ background: 'var(--accent)', transformOrigin: 'center' }}
+        />
+      )}
       <span className="flex items-center gap-2.5 min-w-0">
         <span className="shrink-0" style={{ color: active ? 'var(--accent)' : 'var(--text-3)' }}>{icon}</span>
         <span className="text-[12.5px] font-semibold tracking-wide truncate">{label}</span>
@@ -966,7 +971,7 @@ function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
   const toneColor =
     tone === 'critical' ? 'var(--critical)' : tone === 'warn' ? 'var(--warn)' : 'var(--ok)';
   return (
-    <div className="border p-3" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+    <div className="border p-3 hover-lift" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
       <div className="flex items-start justify-between mb-2">
         <span className="label">{label}</span>
         <span style={{ color: 'var(--text-3)' }}>{icon}</span>
@@ -988,7 +993,7 @@ function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
 function IncidentRow({ alert, onConfirm, onDismiss }: any) {
   return (
     <article
-      className="border-b relative"
+      className="border-b relative animate-rise-in"
       style={{ borderColor: 'var(--line)' }}
     >
       {/* Severity spine */}
@@ -1027,14 +1032,14 @@ function IncidentRow({ alert, onConfirm, onDismiss }: any) {
         <div className="grid grid-cols-2 gap-1.5">
           <button
             onClick={() => onConfirm(alert.id)}
-            className="py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
+            className="py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97]"
             style={{ background: 'var(--critical)' }}
           >
             Confirm
           </button>
           <button
             onClick={() => onDismiss(alert.id)}
-            className="py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-colors hover:bg-white/5"
+            className="py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-all hover:bg-white/5 active:scale-[0.97]"
             style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
           >
             Dismiss

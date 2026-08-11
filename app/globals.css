@@ -86,6 +86,39 @@ body {
   .pulse-alert { animation: none; }
 }
 
+/* One-shot entrance transitions -- triggered by a real state change (tab
+   switch, new incident row, modal open, hover/press feedback), never
+   looping or idle. This is deliberately a different category from
+   sentinel-pulse above: it exists to make state CHANGES readable, not to
+   decorate a static screen, so it stays inside the "no idle animation"
+   rule at the top of this file. */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in     { animation: fade-in 0.18s ease-out both; }
+.animate-rise-in      { animation: rise-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-scale-in     { animation: scale-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in, .animate-rise-in, .animate-scale-in { animation: none; }
+}
+
+/* Small hover/press feedback for clickable panels (camera tiles, cards) --
+   pairs with the transition-colors already used everywhere else in the app. */
+.hover-lift { transition: transform 0.15s ease; }
+.hover-lift:hover  { transform: translateY(-1px); }
+.hover-lift:active { transform: translateY(0) scale(0.99); }
+
 /* Burned-in video overlay text -- mimics real CCTV OSD, kept legible over
    arbitrary bright/dark footage via a hard shadow rather than a panel. */
 .osd {

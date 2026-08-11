@@ -73,7 +73,7 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
 from x3d_violence_detector import (
-    X3DViolenceDetector, SceneViolenceDetector, VIOLENCE_MODE,
+    X3DViolenceDetector, SceneViolenceDetector, TiledSceneViolenceDetector, VIOLENCE_MODE,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -451,10 +451,23 @@ def _pip_crop_from_box(frame, p_box, pad_frac: float = 0.25):
     return frame[y1:y2, x1:x2].copy()
 
 
-SCENE_MODE_ON = VIOLENCE_MODE in ("scene", "both")
+SCENE_MODE_ON = VIOLENCE_MODE in ("scene", "tiled", "both")
 scene_detector = None
 if SCENE_MODE_ON:
-    scene_detector = SceneViolenceDetector(device=TARGET_DEVICE)
+    if VIOLENCE_MODE == "tiled":
+        # Full camera coverage via an overlapping tile grid, for wide city
+        # cameras where a person is too small for a single whole-frame pass
+        # to see (measured: 0/30 detected at 9% person-height in scene mode
+        # vs 30/30 tiled, on the scale-augmented weights -- see
+        # docs/progress_report_violence_detection.md §6). Grid/interval come
+        # from config.json (tile_grid/tile_overlap/tile_check_interval),
+        # which default to the measured real-time-viable point (grid=3,
+        # interval=20 -> 1.17x real-time on a GTX 1660 SUPER); a naive 4x4
+        # grid at the original 15-frame interval measured 0.58x -- unable to
+        # sustain even one live camera.
+        scene_detector = TiledSceneViolenceDetector(device=TARGET_DEVICE)
+    else:
+        scene_detector = SceneViolenceDetector(device=TARGET_DEVICE)
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
 else:
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (per-track detection)")
