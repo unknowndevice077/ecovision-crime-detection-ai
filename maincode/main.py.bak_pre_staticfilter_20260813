@@ -195,25 +195,6 @@ SCENE_COOLDOWN_ASSAULT = sys_config["alert"].get("cooldown_frames", 120)
 WEAPON_IOU_MATCH  = 0.25
 WEAPON_MAX_UNSEEN = 30
 
-# ── static scene-object rejection (see _is_static_scene_object) ───────────
-# The deployed weapon model reports fixed scene features as weapons: a utility
-# pole at the tire shop scores Gun 0.93 on frame after frame. Measured removal
-# on real footage: streetview1 97.4%, tireshop 81.0%, barbershop 78.1%.
-# Switchable, because every mode in this system stays revertible by config.
-_STATIC_CFG = sys_config["detection"].get("static_weapon_filter", {})
-STATIC_WEAPON_FILTER   = _STATIC_CFG.get("enabled", True)
-# Window in observations, not seconds: the weapon pass runs on its own cadence,
-# so counting frames here would mean something different at every frame rate.
-STATIC_WEAPON_WINDOW   = _STATIC_CFG.get("window_observations", 45)
-# Minimum sightings before the rule may fire. Without it a weapon would be
-# suppressed on first appearance, having "not moved yet".
-STATIC_WEAPON_MIN_OBS  = _STATIC_CFG.get("min_observations", 15)
-# Pixels of centre travel below which the object is considered fixed. Chosen
-# above encoder jitter on a static camera (measured stdev on real footage was
-# ~0.0004-0.04 of frame width, i.e. under 25px at 1280 wide for the worst case)
-# and well below what a carried object covers in a couple of seconds.
-STATIC_WEAPON_MOVE_PX  = _STATIC_CFG.get("move_threshold_px", 28)
-
 SKELETON = [
     (5,6),(5,11),(6,12),(11,12),
     (5,7),(7,9),(6,8),(8,10),
@@ -613,14 +594,12 @@ def _update_weapon_tracks(raw_weapons: list) -> list:
                 best_iou = iou; best_wid = wid
 
         if best_wid is not None:
-            t = _weapon_track_store[best_wid]
-            t.update({"box": w_box, "conf": raw_conf, "center": w["center"], "unseen": 0})
-            t["pos_hist"].append(w["center"])
+            _weapon_track_store[best_wid].update({
+                "box": w_box, "conf": raw_conf, "center": w["center"], "unseen": 0,
+            })
         else:
             _weapon_track_store[_weapon_track_counter] = {
                 "name": cls_name, "box": w_box, "conf": raw_conf, "center": w["center"], "unseen": 0,
-                # Position history drives the static-object rejection below.
-                "pos_hist": deque([w["center"]], maxlen=STATIC_WEAPON_WINDOW),
             }
             _weapon_track_counter += 1
 
@@ -629,55 +608,7 @@ def _update_weapon_tracks(raw_weapons: list) -> list:
         del _weapon_track_store[wid]
         _weapon_grip_sticky.pop(wid, None)   # clear stale grip-assignment memory too
 
-    return [{**t, "wid": wid} for wid, t in _weapon_track_store.items()
-            if not _is_static_scene_object(t)]
-
-
-def _is_static_scene_object(track: dict) -> bool:
-    """True if this weapon track has never moved -- i.e. it is scene furniture.
-
-    MEASURED, not assumed. Sampling the deployed detector across whole clips,
-    box centres barely move:
-
-        camera        class  n   centre stdev (fraction of frame)
-        tireshop      Gun    68  (0.0209, 0.0111)
-        newcam2       Knife  55  (0.0386, 0.0000)
-        streetview1   Knife  16  (0.0004, 0.0003)
-
-    Inspecting the tireshop frames directly: the detector locks onto a utility
-    pole -- a box 48% of frame width by 100% of frame height -- and reports it
-    as a Gun at 0.93 confidence, frame after frame. Its "6,438 detections/hour"
-    was one stuck detection re-counted, not thousands of distinct errors.
-
-    A carried weapon moves; a pole, sign or hanging tyre does not. Replaying
-    this rule over real footage removed 97.4% / 81.0% / 78.1% of detections on
-    streetview1 / tireshop / barbershop.
-
-    THE COST, stated rather than hidden: a genuinely motionless weapon is
-    suppressed -- a knife left on a table, or someone standing very still
-    holding a gun for longer than the window. Two things bound that risk: the
-    window is only a few seconds, and the moment the object moves it is
-    released (the spread check uses a rolling window, so it does not stay
-    suppressed once it starts moving). For a streetlight watching a public
-    street, an object that never moves for seconds on end is far more likely to
-    be part of the scene than a threat -- but this is a trade, not a free win.
-
-    Note newcam2 (a market) only dropped 23.6%: its knife detections DO move,
-    consistent with vendors genuinely handling knives. The filter leaves those
-    alone, which is the correct behaviour -- and a reminder that a real knife in
-    a market is a detection problem this rule cannot and should not solve.
-    """
-    if not STATIC_WEAPON_FILTER:
-        return False
-    hist = track.get("pos_hist")
-    # Too few observations to judge. Suppressing here would reject every weapon
-    # the instant it first appears, which is exactly backwards.
-    if not hist or len(hist) < STATIC_WEAPON_MIN_OBS:
-        return False
-    xs = [p[0] for p in hist]
-    ys = [p[1] for p in hist]
-    spread = max(max(xs) - min(xs), max(ys) - min(ys))
-    return spread < STATIC_WEAPON_MOVE_PX
+    return [{**t, "wid": wid} for wid, t in _weapon_track_store.items()]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 8. WEAPON DETECTION THREAD WORKER

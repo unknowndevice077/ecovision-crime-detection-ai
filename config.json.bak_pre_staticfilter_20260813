@@ -49,12 +49,6 @@
       "tile_grid": 3,
       "tile_overlap": 0.25,
       "tile_check_interval": 20
-    },
-    "static_weapon_filter": {
-      "enabled": true,
-      "window_observations": 45,
-      "min_observations": 15,
-      "move_threshold_px": 28
     }
   },
   "alert": {
