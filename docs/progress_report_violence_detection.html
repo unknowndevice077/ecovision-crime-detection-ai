@@ -106,7 +106,7 @@
 </div>
 
 <h2>Abstract</h2>
-<p>EcoVision Security Sentinel is a real-time video-analytics system for public CCTV, combining a <strong>YOLO-family detector</strong> (person localization, pose keypoints, weapon recognition — a per-frame spatial task) with an <strong>X3D-family video classifier</strong> (violence recognition over a temporal window — a spatiotemporal task). This report documents a full diagnostic and correction pass on the violence-detection subsystem: five distinct defects were found and fixed, raising honest (held-out, never-seen-in-training) test accuracy from 78.4% to 95.0%. A subsequent deployment check against a real, wide-angle city camera surfaced a second, unrelated problem invisible to any benchmark: the model is <strong>blind, not merely less confident,</strong> below roughly 15% of frame height, because training footage never showed it a person that small. An architectural fix (tiled scene inference) and a retrain with scale augmentation were designed, measured, and shipped, recovering city-scale recall from 0/30 to 30/30 on synthetically shrunk clips. Validating the fixed system against <strong>unlabelled, real, continuously-running footage</strong> (35+ minutes of a Davao intersection, plus five additional diverse street-camera clips) surfaced a <strong>third problem, still open</strong>: false-alarm rate on real footage (4–14 alerts/hour depending on scene) remains well above what a human operator could act on, despite being a measured improvement over the pre-fix baseline (36.0/hour). This is presented honestly as unresolved, together with the specific, measured next steps that would close it — not papered over.</p>
+<p>EcoVision Security Sentinel is a real-time video-analytics system for public CCTV, combining a <strong>YOLO-family detector</strong> (person localization, pose keypoints, weapon recognition — a per-frame spatial task) with an <strong>X3D-family video classifier</strong> (violence recognition over a temporal window — a spatiotemporal task). This report documents a full diagnostic and correction pass on the violence-detection subsystem across four phases. First, five distinct defects were found and fixed, raising honest (held-out, never-seen-in-training) test accuracy from 78.4% to 95.0%. Second, a deployment check against a real, wide-angle city camera surfaced a problem invisible to any benchmark: the model was <strong>blind, not merely less confident,</strong> below roughly 15% of frame height, because training footage never showed it a person that small — fixed via tiled scene inference and scale-augmented retraining, recovering city-scale recall from 0/30 to 30/30 on synthetically shrunk clips. Third, validating against <strong>real, continuously-running footage</strong> surfaced a false-alarm-rate problem (4–14 alerts/hour) that neither of the first two fixes addressed, traced to the model never having been trained on ordinary, real street footage — only curated, balanced benchmark clips. Fourth, closing that gap directly: real CCTV footage (CCTV-Fights) and the project's own captured Philippine street footage were used to fine-tune the model. The first attempt, deployed in the existing tiled architecture, failed badly (an 11x increase in false alarms) — reported here in full, not hidden, because diagnosing <em>why</em> led to the actual fix: the same fine-tuned weights in scene mode (not tiled) measured <strong>0.00 false alarms/hour on 5 of 6 real validation clips</strong>, while retaining 92.5% recall at the camera's real-world scale. This configuration is now deployed. It is presented as the strongest evidenced result to date, not a claim that the problem is fully solved — one of the six validation clips got worse, not better, and is reported honestly as a known residual case.</p>
 <hr />
 <h2>1. Problem Statement</h2>
 <p>At the start of this work period, the violence-detection component of EcoVision Security Sentinel had been retrained four separate times — varying unfreeze depth, data augmentation, class oversampling, and input representation — without breaking a <strong>held-out accuracy plateau of approximately 70%</strong>. No prior retrain had identified <em>why</em> accuracy was capped, only that it was.</p>
@@ -579,24 +579,123 @@
 <li><strong>Continued opportunistic live-footage capture</strong> — the same six Davao/Philippine public CCTV YouTube streams used for §12 continue to be sampled periodically. This can only ever produce real <strong>negative</strong> examples (no violence is expected to occur on camera during ordinary capture windows) — a structural limitation worth stating plainly: real-domain <em>positive</em> (violent) examples can only come from an annotated dataset like CCTV-Fights, not from passive live capture.</li>
 </ol>
 <hr />
-<h2>14. Current Deployment Decision</h2>
-<p>As of this report, the system is configured to run <strong>new (scale-augmented) weights in tiled mode</strong> (<code>config.json</code>: <code>"mode": "tiled"</code>, <code>scene_model_path</code> pointing at the scale-augmented checkpoint) — the configuration validated in §12.1 as a net improvement over the original baseline on real footage, and the only configuration with proven city-scale recall (§10). This is presented as the current best-evidenced choice, <strong>not as a finished, production-ready result:</strong> §12.4's false-alarm-rate finding applies fully to this exact configuration. The previous configuration (old weights, scene mode) remains available by a one-line edit to <code>config.json</code> and is fully reversible.</p>
-<hr />
-<h2>15. Remaining Work</h2>
-<ol>
-<li><strong>Close the domain gap (§12.4, §13)</strong> — this is now the critical path, not an optional follow-on. CCTV-Fights (1,000 real, annotated clips) is now downloaded and verified (§13); still needed: (a) accumulating enough real-domain negative footage from live capture, (b) an actual retrain/fine-tune on the combined pool, not merely threshold tuning on the existing model.</li>
-<li>Investigate whether <strong>person-crop mode</strong> produces fewer false alarms on empty/quiet scenes specifically — set aside earlier under confounded measurement conditions (§9, T1/T2), worth a clean, isolated rerun now that the false-alarm problem is the dominant open issue.</li>
-<li>Complete official NTU ROSE Lab registration for the authoritative CCTV-Fights source (§13), for redistribution/citation legitimacy beyond the Kaggle mirror.</li>
-<li><strong>Phase 5</strong> — document the final cameras-per-GPU scaling path with the now-clean, resolved tiled-mode figures (§9), and where edge devices would fit for cameras beyond a single GPU's capacity.</li>
-<li>Consider a milder scale-augmentation ablation (between the original zoom-in-only pipeline and the current wide range) as a way to recover some of §10's accuracy regression without giving back the city-scale capability gain — untested, and a larger retrain effort than anything above.</li>
-</ol>
-<p>The person-cropped retrain set aside by the §9 decision remains a secondary, lower-priority item for city-wide cameras specifically — useful for close-framed cameras, not the city-wide critical path.</p>
-<hr />
-<h2>16. Limitations to State Plainly</h2>
+<h2>14. Phase 4: Closing the Domain Gap — a Real Failure, Then a Real Fix</h2>
+<p>§12.4 identified the root cause of the false-alarm problem plainly: every model in this project had only ever been trained on curated benchmark clips (RWF-2000/SCVD), never on real, ordinary, continuously-running street footage. §13 described acquiring the data to fix that. This section reports what happened when that data was actually used — including a genuine, measured failure along the way, reported in full rather than only reporting the outcome that worked.</p>
+<h3>14.1 Building a real-domain training set</h3>
+<p>CCTV-Fights has no separate "safe" video — every one of its 1,000 clips contains at least one annotated real fight (<code>ground-truth.json</code>, ActivityNet-style temporal segments). Both training classes were therefore derived from the same 280 genuine-CCTV-source videos: a 5-second window centered on each annotated Fight segment became a positive clip, and the gaps before/between/after those segments — real, ordinary CCTV activity surrounding a real incident, not a curated negative — became negative clips. The same 5-second windowing was applied to the project's own captured Davao/PH live footage (sampled every 30 seconds to avoid over-representing near-duplicate frames of the same static scene), all labeled negative since no violence occurred in it. This produced <strong>1,281 new clips</strong> (606 positive / 467 negative from CCTV-Fights, 208 negative from live capture), folded into an extended manifest alongside the existing RWF-2000/SCVD data via the same content-hash split logic as §3.6/§5.2 — verified leak-free (0 contents in both splits) exactly as before.</p>
+<h3>14.2 The fine-tune, and an honest negative result</h3>
+<p>The scale-augmented checkpoint (§10) was fine-tuned on this extended manifest — not retrained from scratch — for up to 10 epochs with early stopping (<code>--unfreeze-blocks 2</code>, matching the original run). Training completed at epoch 9 (patience exhausted), best validation accuracy 88.6%.</p>
+<p>The first real-footage check of this new checkpoint, in the deployed tiled configuration, was a genuine failure: <strong>360.00 alarms/hour on the exact footage that measured 32.57/hour before fine-tuning — an 11x increase, not an improvement.</strong> This is reported in full because it is methodologically important, not despite being a bad result: a checkpoint that looked like the fix, deployed in the architecture already in production, made the system dramatically worse.</p>
+<h3>14.3 Diagnosis: model vs. architecture</h3>
+<p>Rather than discard the fine-tune outright, two further checks separated whether the checkpoint itself was broken or whether it was a bad pairing with tiled mode specifically:</p>
 <ul>
-<li>All benchmark accuracy figures in this report (§6, §10) are measured on <strong>RWF-2000 and SCVD</strong> — not on Philippine street-camera footage. This is the direct, identified cause of §12's false-alarm-rate finding, not a separate unrelated caveat.</li>
-<li><strong>False-alarm rate on real, continuously-running footage (4–14/hour) is not yet at a usable operating point</strong> for an unattended public-safety alerting system, despite being a measured net improvement over the pre-fix baseline. This is the single most important open problem in the project as of this report.</li>
-<li>Real-camera <strong>recall</strong> (does it actually catch a real incident on a real deployment camera) remains formally unmeasured, because none of the real footage captured so far contains genuine violence — a structural limitation of passive live capture (§13) that only an annotated real-domain dataset (CCTV-Fights) or a live incident can resolve.</li>
+<li><strong>Honest held-out clip-level accuracy</strong> (the extended manifest's untouched test split, 942 clips, evaluated the same one-shot-per-clip way <code>val_acc</code> is computed during training): <strong>90.0% accuracy, 87.5% recall, 92.2% precision, 7.4% FPR.</strong> This flatly contradicts a broken model — 7.4% FPR is comparable to the <em>original</em> pre-scale-augmentation checkpoint's benchmark FPR (§6), not a degraded one.</li>
+<li><strong>Scene mode vs. tiled mode, same checkpoint, same footage</strong>: tiled mode reproduced the 360.00/hour failure exactly (210 alarms, both runs) — internally consistent, not a fluke. <strong>Scene mode, same weights, same footage: 0 alarms. 0.00/hour.</strong></li>
+</ul>
+<p>The mechanism this points to: tiled mode runs 10 near-independent classifiers (one per tile) "OR"-combined every check, deliberately tuned toward a low bar per §12.2's finding that raising it makes tiled mode's false-alarm rate <em>worse</em>. A checkpoint with even a moderate, ordinary per-clip false-positive rate gets that rate multiplied by 10 independent chances to trigger, every 20 frames, for 35 minutes — compounding a manageable per-clip rate into a catastrophic real-world one. Scene mode, with exactly one classifier, does not have this multiplicative structure.</p>
+<h3>14.4 Confirming scene mode didn't trade away recall</h3>
+<p>Scene mode was the architecture abandoned in §9 specifically because it could not see people at city-camera scale (0/30 recall, pre-scale-augmentation). Since this checkpoint was <em>fine-tuned from</em> the scale-augmented base rather than trained from scratch, whether it retained that capability was the deciding question, not assumed:</p>
+<table>
+<thead>
+<tr>
+<th>Person height (scale)</th>
+<th>37.1% (1.0x)</th>
+<th>22.3% (0.6x)</th>
+<th>14.8% (0.4x)</th>
+<th>11.1% (0.3x)</th>
+<th>9.3% (0.25x)</th>
+<th>7.4% (0.2x)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Detected (of 40 confidently-violent test clips)</td>
+<td>38/40</td>
+<td>38/40</td>
+<td>35/40</td>
+<td>36/40</td>
+<td><strong>37/40</strong></td>
+<td>34/40</td>
+</tr>
+</tbody>
+</table>
+<p>At 9.3% person height — matching the Davao camera's measured real-world scale (§7) — recall is <strong>37/40 (92.5%)</strong>, comparable to the scale-augmented base checkpoint's own scene-mode figure (28/30, §10). Scale robustness was not lost.</p>
+<h3>14.5 Full real-footage validation, both directions checked</h3>
+<table>
+<thead>
+<tr>
+<th>Footage</th>
+<th>Old weights, tiled (prior deployment)</th>
+<th>New weights, tiled</th>
+<th><strong>New weights, scene (now deployed)</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>davao_capture (35 min, primary)</td>
+<td>32.57/hr</td>
+<td>360.00/hr</td>
+<td><strong>0.00/hr</strong></td>
+</tr>
+<tr>
+<td>barbershop</td>
+<td>4.00/hr</td>
+<td>—</td>
+<td>0.00/hr</td>
+</tr>
+<tr>
+<td>fiesta (crowded festival)</td>
+<td>13.81/hr</td>
+<td>—</td>
+<td>0.00/hr</td>
+</tr>
+<tr>
+<td>streetview1</td>
+<td>8.00/hr</td>
+<td>—</td>
+<td>0.00/hr</td>
+</tr>
+<tr>
+<td>tireshop</td>
+<td>4.00/hr</td>
+<td>—</td>
+<td><strong>8.00/hr</strong></td>
+</tr>
+<tr>
+<td>traffic</td>
+<td>4.00/hr</td>
+<td>—</td>
+<td>0.00/hr</td>
+</tr>
+</tbody>
+</table>
+<p>Five of six clips dropped to zero, including fiesta — the busiest, most crowded scene in the whole validation set, previously the worst performer at 13.81/hour. <strong>One clip, tireshop, got worse (4.00 → 8.00/hour), not better</strong>, and this is reported without smoothing it over: it is the exact clip where an earlier frame-level check (see §12's false-alarm diagnosis work) found a person reclining on an outdoor bed — visually close to "person on the ground," a real feature of genuine assault footage, and a genuinely hard case rather than a measurement artifact. This is named plainly as a known residual failure mode, not hidden behind the otherwise strong aggregate result.</p>
+<hr />
+<h2>15. Current Deployment Decision</h2>
+<p>The system is now configured to run <strong>the negatives-fine-tuned checkpoint in scene mode</strong> (<code>config.json</code>: <code>"mode": "scene"</code>, <code>scene_model_path": "weights/x3d_xs_violence_scene_3way_nll_scaleaug_negatives.pt"</code>), deployed and smoke-tested live as of this report. This supersedes the tiled-mode configuration reported in earlier drafts of this document, which is now known — not merely suspected — to fail catastrophically with these particular weights (§14.2). The decision is evidence-based on both axes that matter (§ Context: both missed violence and false alarms carry real cost):</p>
+<ul>
+<li><strong>False-alarm rate</strong>: 0.00/hour on 5 of 6 real validation clips (down from a 4.00–32.57/hour range), one residual case at 8.00/hour with a known, plausible cause.</li>
+<li><strong>Recall</strong>: 92.5% at the camera's actual real-world scale, essentially unchanged from the scale-augmented base checkpoint.</li>
+</ul>
+<p>This is presented as the strongest evidenced configuration to date, <strong>not as a claim that the false-alarm problem is fully solved</strong>: it is validated against six specific pieces of real footage, not a statistically large or fully diverse sample, and the tireshop result shows it is not failure-proof. The previous configuration (old weights, tiled) remains available by editing two lines in <code>config.json</code> and is fully reversible, per the project's standing requirement that every mode stay switchable.</p>
+<hr />
+<h2>16. Remaining Work</h2>
+<ol>
+<li><strong>Broaden real-footage validation</strong> of the new scene-mode configuration beyond the six clips in §14.5 — more hours, more locations, more times of day — before treating 0.00/hour as representative rather than an encouraging early result.</li>
+<li><strong>Investigate the tireshop residual case</strong> (§14.5) specifically — whether more training examples of ambiguous-but-harmless poses (reclining, sitting, bending) closes it, or whether it reflects a harder, more general limitation of frame-level classification without pose context.</li>
+<li>Complete official NTU ROSE Lab registration for the authoritative CCTV-Fights source (§13), for redistribution/citation legitimacy beyond the Kaggle mirror.</li>
+<li>Investigate whether <strong>person-crop mode</strong> offers any further benefit now that scene mode's false-alarm problem is substantially addressed — lower priority than before §14, since the original motivating problem is largely resolved.</li>
+<li><strong>Phase 5</strong> — document the final cameras-per-GPU scaling path. Scene mode's cost profile (§9: ~1.92ms/frame, ~17 cameras/GPU) is far better than tiled mode's, which changes the scaling story favorably now that scene mode is the deployed candidate.</li>
+<li>Consider a milder scale-augmentation ablation, as before (§10), though now a lower priority given §14.4 found no evidence of a recall cost in the current checkpoint.</li>
+</ol>
+<p>The tiled architecture (§9) remains fully implemented and switchable, and its measurement infrastructure (batched tile inference, the grid/interval tuning) is not wasted work — it was the correct answer to the original scale-blindness problem (§7) and remains available if a future checkpoint doesn't share this one's scene-mode compatibility.</p>
+<hr />
+<h2>17. Limitations to State Plainly</h2>
+<ul>
+<li>All benchmark accuracy figures in §6/§10 are measured on <strong>RWF-2000 and SCVD</strong>; §14's fine-tune data (CCTV-Fights + live capture) is the first real-domain training signal in this project, and it measurably changed real-footage behavior (§14.5) — direct evidence that the domain-gap diagnosis in §12.4 was correct, not merely plausible.</li>
+<li><strong>The tiled architecture and this fine-tuned checkpoint are a bad pairing</strong> (§14.2/14.3) — a specific, measured, non-obvious interaction, not a general statement that tiled mode is worse than scene mode. A future checkpoint retrained with tiled mode's compounding structure in mind (e.g., fine-tuned with per-tile false-positive rate as an explicit objective) might not share this failure mode.</li>
+<li><strong>Real-footage validation (§14.5) covers six clips, roughly 1.7 hours total</strong> — a real improvement in rigor over a single file, but still small next to a deployment that would run continuously, indefinitely, across many cameras. The 0.00/hour results are encouraging, not proof of a solved problem.</li>
+<li>Real-camera <strong>recall on genuine violence</strong> remains formally unmeasured on any of the captured Philippine footage, because none of it contains real violence — §14.4's recall figure comes from replaying benchmark clips at real-world scale, the same proxy methodology used throughout this project, not from a real incident.</li>
 <li>Two other detection capabilities in this system — robbery and vandalism — are implemented as hand-written geometric rules rather than trained models, and report fixed, hardcoded confidence values to the dashboard rather than measured ones. They remain out of scope for this work period (violence detection only, by explicit decision) and are noted here as a known gap for future work.</li>
 </ul>
 <hr />

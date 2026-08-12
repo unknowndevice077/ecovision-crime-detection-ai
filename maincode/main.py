@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import logging
 
@@ -857,10 +858,51 @@ def _draw_x3d_confidence(frame, p_box, debug_info: dict):
     cv2.putText(frame, label, (x1, y2 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 14. CAMERA INIT (DYNAMIC HARDWARE DETECTION INDEX)
+# 14. CAMERA INIT (LOCAL INDEX *OR* NETWORK URL)
 # ──────────────────────────────────────────────────────────────────────────────
-camera_idx = sys_config["camera"].get("index", 5)
+# A camera source is either a local device index (int) or a stream URL (str).
+# Both go through the same open/reconnect path so the rest of the pipeline --
+# pose, X3D, clip capture, the MJPEG relay -- never has to know the difference.
+#
+# The URL case is what makes this deployable beyond one lab machine: real
+# barangay CCTV is IP-based, and an RTSP URL is the one interface essentially
+# every vendor exposes (Hikvision, Dahua, Tapo, Uniview, ONVIF-generic). HTTP
+# MJPEG and a plain file path work too, since FFmpeg treats them alike.
 res_w, res_h = map(int, sys_config["camera"]["default_resolution"].lower().split('x'))
+
+_URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "udp://", "tcp://")
+
+
+def _normalise_source(raw):
+    """Coerces a config/env/API value into either an int index or a URL string.
+
+    A digit string means a local index -- config files and JSON bodies both
+    tend to stringify numbers, and opening index "0" as a *filename* fails in
+    a way that looks like a dead camera rather than a type mistake."""
+    if isinstance(raw, int):
+        return raw
+    s = str(raw).strip()
+    if s.isdigit():
+        return int(s)
+    return s
+
+
+def _is_network_source(src):
+    return isinstance(src, str) and src.lower().startswith(_URL_SCHEMES)
+
+
+# Precedence: env override > explicit camera.source > legacy camera.index.
+# The env override exists so one machine can be pointed at a different camera
+# for a demo without editing (and accidentally committing) config.json.
+_configured_source = (
+    os.environ.get("CAMERA_SOURCE", "").strip()
+    or sys_config["camera"].get("source")
+    or sys_config["camera"].get("index", 5)
+)
+camera_source = _normalise_source(_configured_source)
+# Kept as a separate name because the 0-9 scanner and the Monitor view's index
+# picker are only meaningful for local devices.
+camera_idx = camera_source if isinstance(camera_source, int) else None
 
 # On Windows the default backend selection can land on OBSENSOR, whose UVC
 # channel probe RAISES a C++ exception ("Camera index out of range") out of
@@ -869,19 +911,153 @@ res_w, res_h = map(int, sys_config["camera"]["default_resolution"].lower().split
 # is the correct backend for webcams and OBS Virtual Camera anyway, so we ask
 # for it explicitly and only fall back to auto-select if DSHOW can't open.
 _CAP_BACKENDS = [cv2.CAP_DSHOW, cv2.CAP_ANY] if sys.platform == "win32" else [cv2.CAP_ANY]
+# DirectShow cannot open a URL at all, so string sources go to FFmpeg -- and
+# to FFmpeg ONLY. There is deliberately no CAP_ANY fallback here: CAP_ANY
+# ignores the timeout params below, so a dead camera that failed FFmpeg's 5s
+# open would then block the caller for OpenCV's hard-coded 30s default on the
+# retry. Measured: 41.7s per attempt with the fallback, 5s without. FFmpeg is
+# the only backend that speaks RTSP anyway, so the fallback bought nothing.
+_NET_BACKENDS = [cv2.CAP_FFMPEG]
+
+# FFmpeg reads this at open() time, from the environment. UDP silently shreds
+# frames on congested or wifi links, and a torn frame is worse than a late one
+# when the next stage is a motion classifier -- so force TCP.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
+# Timeouts must go through OpenCV's own capture params, NOT through the FFmpeg
+# option string: OpenCV installs its own interrupt callback whose default is a
+# hard 30s, which overrides anything ffmpeg's `stimeout` would do. Measured --
+# with the env-var form alone, opening a dead camera blocked the calling thread
+# for the full 30s. On the reconnect path that means the detector stops
+# processing an entire half-minute of footage every retry.
+_NET_TIMEOUT_MS = 5000
+_NET_CAP_PARAMS = [
+    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, _NET_TIMEOUT_MS,
+    cv2.CAP_PROP_READ_TIMEOUT_MSEC, _NET_TIMEOUT_MS,
+]
 
 
-def _open_capture(idx):
-    """Opens camera `idx`, trying each backend in turn. Returns an opened
-    VideoCapture or None. Never raises -- OpenCV backend probes can throw."""
-    for backend in _CAP_BACKENDS:
+class _NetworkStreamReader:
+    """Drains a network capture on its own thread, keeping only the newest frame.
+
+    An IP camera is a PUSH source: it sends at its own frame rate whether or not
+    anyone is consuming. The detector's per-frame work (pose + X3D + weapon pass)
+    is slower than 30fps at 720p on a 1660 SUPER, so unread frames pile up in the
+    socket, the camera's write queue fills, and reads eventually stall past the
+    timeout. Measured against a real RTSP server: without this thread the core
+    entered a permanent read-fail/reconnect loop within seconds and never
+    processed a single frame. CAP_PROP_BUFFERSIZE does not help -- the FFmpeg
+    backend ignores it.
+
+    Discarding the backlog is the right trade for a security system, not a
+    compromise: an alert about something that happened forty seconds ago is not
+    an alert. Better to analyse live footage and skip frames than to fall
+    steadily further behind the incident.
+
+    Exposes the same read/isOpened/release surface as a VideoCapture so the main
+    loop cannot tell the difference.
+    """
+
+    _FAIL_LIMIT = 30      # consecutive bad reads before declaring the stream dead
+    _READ_TIMEOUT = 2.0   # seconds to wait for a fresh frame before reporting failure
+
+    def __init__(self, cap):
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._frame = None
+        self._alive = True
+        self._new_frame = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        fails = 0
+        while not self._stop.is_set():
+            try:
+                ok, frame = self._cap.read()
+            except Exception:
+                ok, frame = False, None
+            if ok and frame is not None:
+                fails = 0
+                with self._lock:
+                    self._frame = frame
+                self._new_frame.set()
+            else:
+                # Isolated dropped frames are normal on a live stream; a
+                # sustained run means the stream is genuinely gone, and the
+                # main loop's reconnect should take over.
+                fails += 1
+                if fails >= self._FAIL_LIMIT:
+                    with self._lock:
+                        self._alive = False
+                    self._new_frame.set()   # wake a waiting reader to fail fast
+                    break
+                time.sleep(0.01)
+
+    def read(self):
+        """Returns the newest frame, or (False, None) if none arrived in time.
+
+        Never returns the same frame twice: handing a duplicate to a temporal
+        model would put motionless repeats into the X3D clip buffer and quietly
+        corrupt the very signal it classifies on."""
+        if not self._new_frame.wait(self._READ_TIMEOUT):
+            return False, None
+        with self._lock:
+            if not self._alive:
+                return False, None
+            frame = self._frame
+            self._frame = None
+            self._new_frame.clear()
+        return (True, frame) if frame is not None else (False, None)
+
+    def isOpened(self):
+        with self._lock:
+            return self._alive and self._cap.isOpened()
+
+    def release(self):
+        self._stop.set()
+        self._thread.join(timeout=2.0)
         try:
-            c = cv2.VideoCapture(idx, backend)
+            self._cap.release()
+        except Exception:
+            pass
+
+
+def _open_capture(src):
+    """Opens a local index or a stream URL. Returns an opened capture (or a
+    _NetworkStreamReader wrapping one) or None. Never raises -- OpenCV backend
+    probes can throw, not just fail."""
+    src = _normalise_source(src)
+    # Any string source -- URL or file path -- is FFmpeg's job; DirectShow
+    # only understands device indices and would waste a failed probe first.
+    remote = isinstance(src, str)
+    for backend in (_NET_BACKENDS if remote else _CAP_BACKENDS):
+        try:
+            # Only the FFmpeg backend implements the timeout params; handing
+            # them to the CAP_ANY fallback raises "unsupported parameter"
+            # instead of falling back, which would turn the safety net into
+            # the failure.
+            if remote and backend == cv2.CAP_FFMPEG:
+                c = cv2.VideoCapture(src, backend, _NET_CAP_PARAMS)
+            else:
+                c = cv2.VideoCapture(src, backend)
             if c.isOpened():
-                c.set(cv2.CAP_PROP_FRAME_WIDTH,  res_w)
-                c.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+                if not remote:
+                    # Only meaningful for UVC devices. On an RTSP stream the
+                    # resolution is whatever the camera encodes; asking for a
+                    # different one is at best ignored and at worst makes the
+                    # backend renegotiate into a broken state.
+                    c.set(cv2.CAP_PROP_FRAME_WIDTH,  res_w)
+                    c.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+                # Honoured by some backends, ignored by FFmpeg -- which is why
+                # live sources also get the drain thread.
                 c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                return c
+                # Only LIVE streams get the drain thread. A file is not a push
+                # source: it waits for the reader, so draining it would just
+                # race to the end discarding most of the footage -- the
+                # opposite of what replaying a clip for testing is for.
+                return _NetworkStreamReader(c) if _is_network_source(src) else c
             c.release()
         except Exception:
             pass
@@ -902,39 +1078,75 @@ def _probe_for_working_camera():
     return None, None
 
 
-cap = _open_capture(camera_idx)
+def _describe_source(src=None):
+    """Human-readable source label with any RTSP password stripped.
+
+    The source string is printed at startup, returned by /available_cameras and
+    shown in the dashboard, so `rtsp://admin:hunter2@host/stream1` must not
+    travel with its credentials intact."""
+    src = camera_source if src is None else src
+    if not isinstance(src, str):
+        return f"local index {src}"
+    return re.sub(r"://[^/@]*@", "://***@", src)
+
+
+cap = _open_capture(camera_source)
 if cap is None:
-    print(f"⚠️  [CAMERA] Configured index {camera_idx} could not be opened. Probing 0-9...")
-    found_idx, found_cap = _probe_for_working_camera()
-    if found_cap is not None:
-        print(f"✅ [CAMERA] Using index {found_idx} instead "
-              f"(update config.json or pick it in the Monitor view to make this permanent).")
-        camera_idx, cap = found_idx, found_cap
-    else:
-        # Keep running headless: the HTTP server, /available_cameras and
-        # /set_camera_index all still work, so the operator can plug a camera
-        # in and select it from the UI without restarting the AI core.
-        print("❌ [CAMERA] No working camera found on indices 0-9. "
-              "Running with no feed -- select a camera from the Monitor view once one is connected.")
+    if _is_network_source(camera_source):
+        # Deliberately do NOT fall back to probing local webcams here. Silently
+        # switching a barangay's street camera to whatever USB device is plugged
+        # into the server would show a plausible-looking feed of the wrong place
+        # -- far worse than an obviously dead one. Retry the URL instead; the
+        # main loop's reconnect handles cameras that come back.
+        print(f"❌ [CAMERA] Could not open stream {_describe_source()}. "
+              f"Will keep retrying -- check the URL, credentials and that the "
+              f"camera is reachable from this host.")
         cap = cv2.VideoCapture()
+    else:
+        print(f"⚠️  [CAMERA] Configured index {camera_source} could not be opened. Probing 0-9...")
+        found_idx, found_cap = _probe_for_working_camera()
+        if found_cap is not None:
+            print(f"✅ [CAMERA] Using index {found_idx} instead "
+                  f"(update config.json or pick it in the Monitor view to make this permanent).")
+            camera_idx = camera_source = found_idx
+            cap = found_cap
+        else:
+            # Keep running headless: the HTTP server, /available_cameras and
+            # /set_camera_index all still work, so the operator can plug a camera
+            # in and select it from the UI without restarting the AI core.
+            print("❌ [CAMERA] No working camera found on indices 0-9. "
+                  "Running with no feed -- select a camera from the Monitor view once one is connected.")
+            cap = cv2.VideoCapture()
+else:
+    print(f"📷 [CAMERA] Source: {_describe_source()}")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 14.1 CAMERA RECONNECT HELPER
 # ──────────────────────────────────────────────────────────────────────────────
 def _reopen_camera():
-    """Attempts to fully reinitialize the capture device after a drop."""
+    """Attempts to fully reinitialize the capture device after a drop.
+
+    Network cameras make this the normal case rather than the exceptional one:
+    switch reboots, PoE renegotiation and wifi dropouts all end the RTSP
+    session, and the camera comes back a few seconds later expecting a fresh
+    connection."""
     global cap
     try:
         cap.release()
     except Exception:
         pass
-    new_cap = _open_capture(camera_idx)
+    new_cap = _open_capture(camera_source)
     cap = new_cap if new_cap is not None else cv2.VideoCapture()
     return cap.isOpened()
 
 
 class CameraIndexRequest(BaseModel):
     index: int
+
+
+class CameraSourceRequest(BaseModel):
+    """Accepts either a local index ("0") or a stream URL ("rtsp://...")."""
+    source: str
 
 
 # Scanning 0-9 opens and releases real capture devices, which takes ~2s and
@@ -985,19 +1197,54 @@ def get_available_cameras(refresh: bool = False):
             _camera_scan_cache["result"] = _scan_cameras()
             _camera_scan_cache["at"] = now
         available = _camera_scan_cache["result"]
-    return {"available_cameras": available, "current_index": camera_idx}
+    return {
+        "available_cameras": available,
+        "current_index": camera_idx,
+        # Network sources have no index, so the picker needs the source itself
+        # to show what is actually being watched. Credentials are stripped.
+        "current_source": _describe_source(),
+        "is_network": _is_network_source(camera_source),
+        "connected": cap.isOpened(),
+    }
 
 
-@stream_app.post("/set_camera_index")
-def set_camera_index(payload: CameraIndexRequest):
-    """Lets the Monitor view's camera-index picker swap the live capture
-    device (e.g. OBS Virtual Camera vs. a webcam) without restarting the
-    whole AI process. Persists back to the WRITABLE config.json (not the
-    shipped/possibly-read-only one) so the choice survives the next
-    launch too."""
-    global camera_idx
-    camera_idx = payload.index
+def _persist_camera_source():
+    """Writes the active source back to the WRITABLE config.json (not the
+    shipped/possibly-read-only one) so the choice survives the next launch.
+
+    Both keys are written every time: leaving a stale `source` behind would
+    silently win over a newly-picked `index` on the next boot, because source
+    takes precedence."""
+    try:
+        if isinstance(camera_source, int):
+            sys_config["camera"]["index"] = camera_source
+            sys_config["camera"]["source"] = ""
+        else:
+            sys_config["camera"]["source"] = camera_source
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(sys_config, f, indent=2)
+    except Exception as e:
+        print(f"⚠️  [CAMERA] Failed to persist camera source to config.json: {e}")
+
+
+def _switch_source(new_source):
+    """Shared body of both switch endpoints: reopen, invalidate the scan
+    cache, persist. Returns the response dict."""
+    global camera_source, camera_idx
+    previous = camera_source
+    camera_source = _normalise_source(new_source)
+    camera_idx = camera_source if isinstance(camera_source, int) else None
     ok = _reopen_camera()
+
+    if not ok and _is_network_source(camera_source):
+        # A typo'd or unreachable URL should not cost the operator the feed
+        # they already had. Roll back and report the failure instead.
+        camera_source = previous
+        camera_idx = camera_source if isinstance(camera_source, int) else None
+        _reopen_camera()
+        return {"status": "failed", "source": _describe_source(new_source),
+                "detail": "could not open stream -- reverted to previous source",
+                "current_source": _describe_source()}
 
     # Which index is "currently open" is part of the scan result, so a swap
     # invalidates it -- otherwise the picker would show stale availability
@@ -1005,14 +1252,30 @@ def set_camera_index(payload: CameraIndexRequest):
     with _camera_scan_lock:
         _camera_scan_cache["result"] = None
 
-    try:
-        sys_config["camera"]["index"] = camera_idx
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(sys_config, f, indent=2)
-    except Exception as e:
-        print(f"⚠️  [CAMERA] Failed to persist index to config.json: {e}")
+    _persist_camera_source()
+    return {"status": "reopened" if ok else "failed",
+            "index": camera_idx, "source": _describe_source(),
+            "is_network": _is_network_source(camera_source)}
 
-    return {"status": "reopened" if ok else "failed", "index": camera_idx}
+
+@stream_app.post("/set_camera_index")
+def set_camera_index(payload: CameraIndexRequest):
+    """Lets the Monitor view's camera-index picker swap the live capture
+    device (e.g. OBS Virtual Camera vs. a webcam) without restarting the
+    whole AI process."""
+    return _switch_source(payload.index)
+
+
+@stream_app.post("/set_camera_source")
+def set_camera_source(payload: CameraSourceRequest):
+    """Points the detector at an arbitrary source: a local index ("0"), or a
+    network stream ("rtsp://user:pass@10.0.0.12:554/stream1", an HTTP MJPEG
+    URL, or a file path for replay).
+
+    This is what lets the system adopt a barangay's existing IP cameras
+    instead of requiring the hardware we tested with -- RTSP is the common
+    denominator across effectively every CCTV vendor."""
+    return _switch_source(payload.source)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 15.1 RAW-FRAME RING BUFFER + EVENT CLIP CAPTURE
@@ -1446,6 +1709,17 @@ while _running:
     if active_pip_crop is not None and fw > 220 and fh > 220:
         startX, startY = fw - 180, 40
         endX, endY = startX + 160, startY + 160
+        # active_pip_crop is a padded crop at the SOURCE person's natural
+        # (near-always non-square) aspect ratio -- _pip_crop_from_box()
+        # deliberately doesn't resize it (it's also fed raw into
+        # get_latest_live_crop() call sites). The destination box here is
+        # a fixed 160x160 though, so paste unconditionally resizes right
+        # before assignment. Was a silent crash (ValueError: could not
+        # broadcast) the very first time a real, non-square person box hit
+        # this path with a live camera -- caught in tiled-mode testing but
+        # not specific to it; scene mode's fallback crop has the same shape.
+        if active_pip_crop.shape[:2] != (endY - startY, endX - startX):
+            active_pip_crop = cv2.resize(active_pip_crop, (endX - startX, endY - startY))
         frame[startY:endY, startX:endX] = active_pip_crop
         cv2.rectangle(frame, (startX - 1, startY - 1), (endX + 1, endY + 1), pip_border_color, 2)
         cv2.rectangle(frame, (startX - 1, startY - 18), (startX + 105, startY - 1), (0, 0, 0), -1)

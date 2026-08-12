@@ -243,32 +243,49 @@ def init_db():
 
     cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'DEVTEAM'")
     if cursor.fetchone()[0] == 0:
-        bootstrap_password = secrets.token_urlsafe(12)
+        # Static if DEVTEAM_BOOTSTRAP_USERNAME/PASSWORD are set in the
+        # environment (.env, not committed, not in .env.example -- each
+        # deployer sets their own) -- a fixed team login instead of a fresh
+        # random one every time the DB is recreated. Falls back to the old
+        # random-per-boot behavior when they're unset, so a checkout with no
+        # .env configured still boots into a usable, safe default.
+        bootstrap_username = os.environ.get("DEVTEAM_BOOTSTRAP_USERNAME")
+        bootstrap_password = os.environ.get("DEVTEAM_BOOTSTRAP_PASSWORD")
+        static = bool(bootstrap_username and bootstrap_password)
+        if not static:
+            bootstrap_username = "devteam"
+            bootstrap_password = secrets.token_urlsafe(12)
         cursor.execute(
             "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id) "
             "VALUES (?, ?, 'DEVTEAM', NULL, 'DevTeam HQ', NULL)",
-            ("devteam", hash_password(bootstrap_password)),
+            (bootstrap_username, hash_password(bootstrap_password)),
         )
         conn.commit()
         print("=" * 60)
-        print("🔑 [BOOTSTRAP] First-run DEVTEAM account created:")
-        print(f"    username: devteam")
-        print(f"    password: {bootstrap_password}")
-        print("    Save this now -- it will not be shown again.")
+        print(f"🔑 [BOOTSTRAP] First-run DEVTEAM account created ({'static, from .env' if static else 'random'}):")
+        print(f"    username: {bootstrap_username}")
+        if not static:
+            print(f"    password: {bootstrap_password}")
+            print("    Save this now -- it will not be shown again.")
         print("=" * 60)
-        # Also write to a file next to the writable data dir, since a
-        # packaged installer build has no visible console for the person
-        # to read this from (see Phase 3: first-run credential surfacing).
-        try:
-            cred_path = os.path.join(WRITABLE_DIR, "devteam_credentials.txt")
-            with open(cred_path, "w") as f:
-                f.write("EcoVision Sentinel — first-run DEVTEAM account\n")
-                f.write("Generated once; this file is not regenerated after first boot.\n\n")
-                f.write("username: devteam\n")
-                f.write(f"password: {bootstrap_password}\n")
-            print(f"🔑 [BOOTSTRAP] Also written to: {cred_path}")
-        except Exception as e:
-            print(f"⚠️  [BOOTSTRAP] Could not write credentials file: {e}")
+        # Only write the plaintext password to disk for the random case --
+        # a static password already lives in the deployer's own .env, so a
+        # second plaintext copy on disk would just be one more place it can
+        # leak from.
+        if not static:
+            # Also write to a file next to the writable data dir, since a
+            # packaged installer build has no visible console for the person
+            # to read this from (see Phase 3: first-run credential surfacing).
+            try:
+                cred_path = os.path.join(WRITABLE_DIR, "devteam_credentials.txt")
+                with open(cred_path, "w") as f:
+                    f.write("EcoVision Sentinel — first-run DEVTEAM account\n")
+                    f.write("Generated once; this file is not regenerated after first boot.\n\n")
+                    f.write("username: devteam\n")
+                    f.write(f"password: {bootstrap_password}\n")
+                print(f"🔑 [BOOTSTRAP] Also written to: {cred_path}")
+            except Exception as e:
+                print(f"⚠️  [BOOTSTRAP] Could not write credentials file: {e}")
 
     cursor.execute("SELECT COUNT(*) FROM barangays")
     if cursor.fetchone()[0] == 0:
@@ -729,6 +746,121 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
     conn.commit()
     conn.close()
     return {"status": "deleted"}
+
+
+# --- PTZ CAMERA CONTROL (ONVIF) ---
+#
+# Gated behind manage_cameras, the same permission that governs adding and
+# removing cameras: physically aiming a public-safety camera is at least as
+# consequential as renaming one, and pointing a camera away from an incident
+# is a real abuse vector.
+#
+# Capabilities are read from the device (ptz_control queries ONVIF rather
+# than assuming), so the dashboard can disable controls the hardware does
+# not have instead of showing buttons that do nothing.
+
+class PTZMoveSchema(BaseModel):
+    pan: float = 0.0
+    tilt: float = 0.0
+    zoom: float = 0.0
+    duration: Optional[float] = 0.6   # auto-stop; see ptz_control.move()
+
+
+class PTZPresetSchema(BaseModel):
+    name: str
+
+
+@app.get("/api/ptz/capabilities")
+async def ptz_capabilities(authorization: Optional[str] = Header(None)):
+    """Never raises on an unreachable/unconfigured camera -- the dashboard
+    calls this on load, and 'no camera attached' is a normal state."""
+    require_auth(authorization)
+    from ptz_control import get_controller
+    return get_controller().get_capabilities()
+
+
+@app.post("/api/ptz/move")
+async def ptz_move(data: PTZMoveSchema, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        require_permission(cursor, payload, "manage_cameras")
+    finally:
+        conn.close()
+    from ptz_control import get_controller, PTZNotConfigured
+    try:
+        return get_controller().move(data.pan, data.tilt, data.zoom, data.duration)
+    except PTZNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+
+
+@app.post("/api/ptz/stop")
+async def ptz_stop(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        require_permission(cursor, payload, "manage_cameras")
+    finally:
+        conn.close()
+    from ptz_control import get_controller, PTZNotConfigured
+    try:
+        return get_controller().stop()
+    except PTZNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+
+
+@app.get("/api/ptz/presets")
+async def ptz_list_presets(authorization: Optional[str] = Header(None)):
+    require_auth(authorization)
+    from ptz_control import get_controller, PTZNotConfigured
+    try:
+        return {"presets": get_controller().list_presets()}
+    except PTZNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+
+
+@app.post("/api/ptz/presets/{token}/goto")
+async def ptz_goto_preset(token: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        require_permission(cursor, payload, "manage_cameras")
+    finally:
+        conn.close()
+    from ptz_control import get_controller, PTZNotConfigured
+    try:
+        return get_controller().goto_preset(token)
+    except PTZNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+
+
+@app.post("/api/ptz/presets")
+async def ptz_save_preset(data: PTZPresetSchema, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        require_permission(cursor, payload, "manage_cameras")
+    finally:
+        conn.close()
+    from ptz_control import get_controller, PTZNotConfigured
+    try:
+        return get_controller().save_preset(data.name)
+    except PTZNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"camera error: {e}")
 
 
 # --- HIERARCHICAL INCIDENT FETCH ---

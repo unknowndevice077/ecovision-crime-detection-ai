@@ -1,15 +1,43 @@
 # EcoVision Security Sentinel — Violence Detection Module
 ## Research Progress Report
 
-**Prepared:** August 8, 2026 · **Updated:** August 12, 2026
+**Prepared:** August 8, 2026 · **Updated:** August 12, 2026, 15:40
 **Module:** Real-time violence detection (YOLO person/pose + weapon detection, X3D-XS video classifier)
-**Scope of this report:** Architecture and methods used, datasets used, diagnosis and correction of the violence-detection subsystem, discovery and partial resolution of a deployment-blocking scale limitation, and honest real-world validation results with open problems clearly stated.
+**Scope of this report:** Architecture and methods used, datasets used, diagnosis and correction of the violence-detection subsystem, discovery and partial resolution of a deployment-blocking scale limitation, a lighting/time-of-day domain gap and a train/test split defect, camera integration for arbitrary RTSP/ONVIF hardware, and honest per-source real-world validation results with open problems clearly stated.
 
 ---
 
 ## Abstract
 
-EcoVision Security Sentinel is a real-time video-analytics system for public CCTV, combining a **YOLO-family detector** (person localization, pose keypoints, weapon recognition — a per-frame spatial task) with an **X3D-family video classifier** (violence recognition over a temporal window — a spatiotemporal task). This report documents a full diagnostic and correction pass on the violence-detection subsystem: five distinct defects were found and fixed, raising honest (held-out, never-seen-in-training) test accuracy from 78.4% to 95.0%. A subsequent deployment check against a real, wide-angle city camera surfaced a second, unrelated problem invisible to any benchmark: the model is **blind, not merely less confident,** below roughly 15% of frame height, because training footage never showed it a person that small. An architectural fix (tiled scene inference) and a retrain with scale augmentation were designed, measured, and shipped, recovering city-scale recall from 0/30 to 30/30 on synthetically shrunk clips. Validating the fixed system against **unlabelled, real, continuously-running footage** (35+ minutes of a Davao intersection, plus five additional diverse street-camera clips) surfaced a **third problem, still open**: false-alarm rate on real footage (4–14 alerts/hour depending on scene) remains well above what a human operator could act on, despite being a measured improvement over the pre-fix baseline (36.0/hour). This is presented honestly as unresolved, together with the specific, measured next steps that would close it — not papered over.
+EcoVision Security Sentinel is a real-time video-analytics system for public CCTV, combining a **YOLO-family detector** (person localization, pose keypoints, weapon recognition — a per-frame spatial task) with an **X3D-family video classifier** (violence recognition over a temporal window — a spatiotemporal task). This report documents a full diagnostic and correction pass on the violence-detection subsystem across four phases. First, five distinct defects were found and fixed, raising honest (held-out, never-seen-in-training) test accuracy from 78.4% to 95.0%. Second, a deployment check against a real, wide-angle city camera surfaced a problem invisible to any benchmark: the model was **blind, not merely less confident,** below roughly 15% of frame height, because training footage never showed it a person that small — fixed via tiled scene inference and scale-augmented retraining, recovering city-scale recall from 0/30 to 30/30 on synthetically shrunk clips. Third, validating against **real, continuously-running footage** surfaced a false-alarm-rate problem (4–14 alerts/hour) that neither of the first two fixes addressed, traced to the model never having been trained on ordinary, real street footage — only curated, balanced benchmark clips. Fourth, closing that gap directly: real CCTV footage (CCTV-Fights) and the project's own captured Philippine street footage were used to fine-tune the model. The first attempt, deployed in the existing tiled architecture, failed badly (an 11x increase in false alarms) — reported here in full, not hidden, because diagnosing *why* led to the actual fix: the same fine-tuned weights in scene mode (not tiled) measured **0.00 false alarms/hour on 5 of 6 real validation clips**, while retaining 92.5% recall at the camera's real-world scale. This configuration is now deployed. It is presented as the strongest evidenced result to date, not a claim that the problem is fully solved — one of the six validation clips got worse, not better, and is reported honestly as a known residual case. **Fifth**, extending validation along axes that had been held constant by accident rather than design overturned part of that result: all six clips above were night footage, and the same deployed configuration produces **75.20 false alarms/hour on daytime capture** (0.00 to 334.00/hour depending on camera) — the scale failure of the second phase repeating along a lighting axis. A parallel audit of the train/test split found **270 of 280 source videos had segments on both sides**, fixed with a group-aware split; re-evaluating on the clean split and **breaking results down by data source rather than aggregating** gives the most honest figure this project has produced: 91.9% overall but **67.0% accuracy and a 44.3% false-positive rate on the only real-CCTV source**, with the aggregate carried by benchmark data. A prediction stated earlier in this work — that the contamination was substantially inflating real-CCTV recall — is recorded here as **wrong**, since recall was essentially unchanged at 83.3%; the corrected conclusion is that false positives, not missed detections, are the binding constraint. Finally, the system was made source-agnostic (RTSP/ONVIF and any IP camera), verified against a real RTSP server, which surfaced two failure modes invisible to webcam testing.
+
+---
+
+## 0. Deployment Target (scope, clarified 2026-08-12)
+
+The system is intended for a **solar/energy-efficient smart streetlight pole**,
+detecting violence, vandalism and robbery on the street below. Indoor coverage
+is an optional additional feature, not core scope.
+
+This is recorded as its own section because it determines which of the failures
+in this report are central and which are peripheral, and the ordering is not the
+intuitive one:
+
+- **A streetlight pole is an elevated mount.** People below it appear *small* in
+  frame. §7 measures this model detecting **0 of 40** clips at ~9% person height
+  that it scores 1.000 on at close range. Scale is therefore not an edge case for
+  this deployment — it is the deployment geometry, and the single most important
+  axis in this document.
+- **A streetlight's defining condition is night.** Night false-alarm rates
+  (§14.5, 0.00–8.00/hour) matter more than the daylight rates (§14.6, up to
+  334/hour) — though the camera runs continuously, so daylight cannot be ignored.
+- **Vandalism and robbery are in scope**, and both are currently implemented as
+  hand-written geometric rules reporting *hardcoded* confidence values to the
+  dashboard (§18). For a system whose stated purpose includes them, that gap is
+  more serious than this violence-focused report has so far treated it.
+- Indoor scenes (restaurant interiors, shop counters) are explicitly **not** the
+  target. Negative training data drawn from them would tune the model for the
+  wrong camera, so captured indoor footage is held separately.
 
 ---
 
@@ -324,36 +352,196 @@ The most likely root cause is the same one identified in §3/§7: every number i
 
 Two efforts are underway to close the domain gap identified in §12.4, rather than continuing to tune around it:
 
-1. **CCTV-Fights (Kaggle mirror)** — a 13GB, ground-truth-annotated dataset of genuine CCTV-sourced fight and non-fight footage (NTU ROSE Lab). Download completed and was verified on this machine (redirected to D:, §11): `ground-truth.json` parses cleanly (ActivityNet-style format — `duration`, `subset`, `frame_rate`, and per-clip `annotations` giving the exact `[start_sec, end_sec]` temporal segment of each fight, not just a clip-level label), with **1,000 annotated entries** exactly matching the file counts on disk (`CCTV_DATA`: 140 training / 70 testing / 70 validation = 280 genuine-CCTV clips; `NON_CCTV_DATA`: 360 / 180 / 180 = 720 non-CCTV clips). This is now a training-usable, non-benchmark, real-CCTV data source available to this project — not yet used in a retrain (§15).
+1. **CCTV-Fights (Kaggle mirror)** — a 13GB, ground-truth-annotated dataset of genuine CCTV-sourced fight and non-fight footage (NTU ROSE Lab). Download completed and was verified on this machine (redirected to D:, §11): `ground-truth.json` parses cleanly (ActivityNet-style format — `duration`, `subset`, `frame_rate`, and per-clip `annotations` giving the exact `[start_sec, end_sec]` temporal segment of each fight, not just a clip-level label), with **1,000 annotated entries** exactly matching the file counts on disk (`CCTV_DATA`: 140 training / 70 testing / 70 validation = 280 genuine-CCTV clips; `NON_CCTV_DATA`: 360 / 180 / 180 = 720 non-CCTV clips). This is now a training-usable, non-benchmark, real-CCTV data source available to this project — not yet used in a retrain (§16).
 2. **Official NTU ROSE Lab registration** — the Kaggle mirror is unofficial; the authoritative source requires account registration and a Release Agreement at the ROSE Lab's own site. This is **not started**, and realistically is not a same-day task — noted here as necessary future work, not a gap in this report.
 3. **Continued opportunistic live-footage capture** — the same six Davao/Philippine public CCTV YouTube streams used for §12 continue to be sampled periodically. This can only ever produce real **negative** examples (no violence is expected to occur on camera during ordinary capture windows) — a structural limitation worth stating plainly: real-domain *positive* (violent) examples can only come from an annotated dataset like CCTV-Fights, not from passive live capture.
 
 ---
 
-## 14. Current Deployment Decision
+## 14. Phase 4: Closing the Domain Gap — a Real Failure, Then a Real Fix
 
-As of this report, the system is configured to run **new (scale-augmented) weights in tiled mode** (`config.json`: `"mode": "tiled"`, `scene_model_path` pointing at the scale-augmented checkpoint) — the configuration validated in §12.1 as a net improvement over the original baseline on real footage, and the only configuration with proven city-scale recall (§10). This is presented as the current best-evidenced choice, **not as a finished, production-ready result:** §12.4's false-alarm-rate finding applies fully to this exact configuration. The previous configuration (old weights, scene mode) remains available by a one-line edit to `config.json` and is fully reversible.
+§12.4 identified the root cause of the false-alarm problem plainly: every model in this project had only ever been trained on curated benchmark clips (RWF-2000/SCVD), never on real, ordinary, continuously-running street footage. §13 described acquiring the data to fix that. This section reports what happened when that data was actually used — including a genuine, measured failure along the way, reported in full rather than only reporting the outcome that worked.
+
+### 14.1 Building a real-domain training set
+
+CCTV-Fights has no separate "safe" video — every one of its 1,000 clips contains at least one annotated real fight (`ground-truth.json`, ActivityNet-style temporal segments). Both training classes were therefore derived from the same 280 genuine-CCTV-source videos: a 5-second window centered on each annotated Fight segment became a positive clip, and the gaps before/between/after those segments — real, ordinary CCTV activity surrounding a real incident, not a curated negative — became negative clips. The same 5-second windowing was applied to the project's own captured Davao/PH live footage (sampled every 30 seconds to avoid over-representing near-duplicate frames of the same static scene), all labeled negative since no violence occurred in it. This produced **1,281 new clips** (606 positive / 467 negative from CCTV-Fights, 208 negative from live capture), folded into an extended manifest alongside the existing RWF-2000/SCVD data via the same content-hash split logic as §3.6/§5.2 — verified leak-free (0 contents in both splits) exactly as before.
+
+### 14.2 The fine-tune, and an honest negative result
+
+The scale-augmented checkpoint (§10) was fine-tuned on this extended manifest — not retrained from scratch — for up to 10 epochs with early stopping (`--unfreeze-blocks 2`, matching the original run). Training completed at epoch 9 (patience exhausted), best validation accuracy 88.6%.
+
+The first real-footage check of this new checkpoint, in the deployed tiled configuration, was a genuine failure: **360.00 alarms/hour on the exact footage that measured 32.57/hour before fine-tuning — an 11x increase, not an improvement.** This is reported in full because it is methodologically important, not despite being a bad result: a checkpoint that looked like the fix, deployed in the architecture already in production, made the system dramatically worse.
+
+### 14.3 Diagnosis: model vs. architecture
+
+Rather than discard the fine-tune outright, two further checks separated whether the checkpoint itself was broken or whether it was a bad pairing with tiled mode specifically:
+
+- **Honest held-out clip-level accuracy** (the extended manifest's untouched test split, 942 clips, evaluated the same one-shot-per-clip way `val_acc` is computed during training): **90.0% accuracy, 87.5% recall, 92.2% precision, 7.4% FPR.** This flatly contradicts a broken model — 7.4% FPR is comparable to the *original* pre-scale-augmentation checkpoint's benchmark FPR (§6), not a degraded one.
+- **Scene mode vs. tiled mode, same checkpoint, same footage**: tiled mode reproduced the 360.00/hour failure exactly (210 alarms, both runs) — internally consistent, not a fluke. **Scene mode, same weights, same footage: 0 alarms. 0.00/hour.**
+
+The mechanism this points to: tiled mode runs 10 near-independent classifiers (one per tile) "OR"-combined every check, deliberately tuned toward a low bar per §12.2's finding that raising it makes tiled mode's false-alarm rate *worse*. A checkpoint with even a moderate, ordinary per-clip false-positive rate gets that rate multiplied by 10 independent chances to trigger, every 20 frames, for 35 minutes — compounding a manageable per-clip rate into a catastrophic real-world one. Scene mode, with exactly one classifier, does not have this multiplicative structure.
+
+### 14.4 Confirming scene mode didn't trade away recall
+
+Scene mode was the architecture abandoned in §9 specifically because it could not see people at city-camera scale (0/30 recall, pre-scale-augmentation). Since this checkpoint was *fine-tuned from* the scale-augmented base rather than trained from scratch, whether it retained that capability was the deciding question, not assumed:
+
+| Person height (scale) | 37.1% (1.0x) | 22.3% (0.6x) | 14.8% (0.4x) | 11.1% (0.3x) | 9.3% (0.25x) | 7.4% (0.2x) |
+|---|---|---|---|---|---|---|
+| Detected (of 40 confidently-violent test clips) | 38/40 | 38/40 | 35/40 | 36/40 | **37/40** | 34/40 |
+
+At 9.3% person height — matching the Davao camera's measured real-world scale (§7) — recall is **37/40 (92.5%)**, comparable to the scale-augmented base checkpoint's own scene-mode figure (28/30, §10). Scale robustness was not lost.
+
+### 14.5 Full real-footage validation, both directions checked
+
+| Footage | Old weights, tiled (prior deployment) | New weights, tiled | **New weights, scene (now deployed)** |
+|---|---|---|---|
+| davao_capture (35 min, primary) | 32.57/hr | 360.00/hr | **0.00/hr** |
+| barbershop | 4.00/hr | — | 0.00/hr |
+| fiesta (crowded festival) | 13.81/hr | — | 0.00/hr |
+| streetview1 | 8.00/hr | — | 0.00/hr |
+| tireshop | 4.00/hr | — | **8.00/hr** |
+| traffic | 4.00/hr | — | 0.00/hr |
+
+Five of six clips dropped to zero, including fiesta — the busiest, most crowded scene in the whole validation set, previously the worst performer at 13.81/hour. **One clip, tireshop, got worse (4.00 → 8.00/hour), not better**, and this is reported without smoothing it over.
+
+Frames were pulled at both residual alarm timestamps to identify the actual trigger rather than assume one:
+
+- **t=11.2 min (confidence 0.868)** — a motorcycle crosses the frame at speed, producing rapid lateral motion and motion blur. Nothing resembling an altercation is present.
+- **t=14.4 min (confidence 0.610)** — three people stand clustered close together in the street with visible limb movement. This is genuinely ambiguous footage; a human reviewer glancing at a single frame could reasonably look twice.
+
+These are two *different* failure modes, and only the second is the "hard ambiguous case" category. The first — fast vehicle motion misread as violence — is a more ordinary and more fixable error, and suggests the fine-tune's negative pool (drawn from relatively quiet street scenes and CCTV-Fights gap segments) may under-represent fast vehicle traffic specifically.
+
+*Correction to an earlier draft of this report:* this residual was previously attributed to a reclining person appearing "person-on-the-ground"-like. That explanation came from a frame in the **pre-fine-tune** model's run, not from either of the two alarms actually produced by the deployed checkpoint, and is not supported by the evidence above. It is corrected here rather than left standing.
+
+### 14.6 A third axis of domain gap: time of day
+
+Every validation clip in §14.5 was recorded at night, between roughly 21:00 and 02:00 — as was every live-capture negative used in the fine-tune. The 0.00/hour results were therefore measured on the *only* lighting condition the model had ever been shown as "normal." Nothing in the methodology guaranteed those results would hold in daylight, so 150 minutes of midday capture were taken from five of the same streams and re-run at the deployed operating point.
+
+| Daytime footage (30 min each) | False alarms/hour |
+|---|---|
+| barbershop | **334.00** |
+| traffic | 34.00 |
+| streetview1 | 8.00 |
+| davao_primary | 0.00 |
+| tireshop | 0.00 |
+| **aggregate (150 min)** | **75.20** |
+
+The same barbershop camera measured **0.00/hour at night and 334.00/hour in daylight**. That is not a marginal degradation; it is the scale problem of §7 repeating along a different axis. The model was taught "night-time Philippine street = normal" and daylight is simply out of distribution — brighter, higher-contrast, busier, with hard shadows and far more pedestrian and vehicle motion per minute.
+
+Two points are worth drawing out for methodology rather than just results. First, the spread across cameras (0.00 to 334.00) is far wider than the aggregate suggests, so **the aggregate is close to meaningless on its own** — a single mean over cameras would have hidden both the catastrophic case and the two clean ones. Second, this was only found because the validation set was deliberately extended along an axis that had been held constant by accident, not by design. Three domain-gap axes have now each independently broken a model that looked finished: **scale** (§7), **scene realism** (§12.4), and **lighting/time-of-day** (here). The reasonable inference is not that this list is now complete.
+
+The fix follows the same pattern as §14.1: 720 daytime negative clips were extracted at a 20-second stride from eight 30-minute midday captures (the original five plus three newly added streams), for inclusion in the combined retrain.
+
+### 14.7 A methodological defect in the split itself
+
+While preparing that retrain, the split rule was re-audited. §5.2's content-hash split guarantees that two *byte-identical* files land on the same side — but CCTV-Fights clips are produced by cutting long source videos into many short segments, and two segments of the same fight are not byte-identical. A diagnostic (`diag_cctvfights_split_leakage.py`) confirmed the consequence: **270 of 280 source videos had segments in both train and test.** The model could reach test-set accuracy partly by recognising scenes it had already been trained on.
+
+The fix is a **group-aware split** (`build_dataset_manifest_grouped.py`): every clip is assigned a group key derived from its origin — source video for CCTV-Fights segments, physical camera for live captures — and the split is drawn over groups, never over clips. Manifest generation now runs **two** leakage checks, byte-level and group-level, and both report zero on the manifests used below.
+
+### 14.8 The honest per-source numbers, and a prediction that was wrong
+
+Re-training on the group-clean split (best 87.4% validation accuracy) and evaluating the untouched test split **broken down by data source**, rather than as a single aggregate:
+
+| Test source | n | Accuracy | Recall | **FPR** |
+|---|---|---|---|---|
+| **CCTV-Fights (real CCTV)** | 103 | **67.0%** | 83.3% | **44.3%** |
+| RWF-2000 (benchmark) | 362 | 93.1% | 92.9% | 6.7% |
+| SCVD (benchmark) | 415 | 97.1% | 95.5% | 0.6% |
+| **OVERALL** | **880** | 91.9% | 93.4% | 9.5% |
+
+The 91.9% aggregate is **benchmark-carried**: 777 of 880 test clips are RWF/SCVD, so the one source that resembles the deployment target contributes under 12% of the number that would normally be reported as "the result." Reporting only the aggregate would not be false, but it would be misleading, which is the reason for the breakdown.
+
+On real CCTV the failure is lopsided and specific: recall is 83.3%, but **FPR is 44.3%** — the model finds violence when it is there, and also finds it when it is not. This is the same defect the live false-alarm rates in §14.5 and §14.6 measure from the other direction, and it identifies precisely what the remaining work has to reduce.
+
+*A prediction of mine that the data did not support.* Before this evaluation I stated that the split contamination in §14.7 was likely inflating real-CCTV recall substantially — from a true figure of roughly 50–55% up to the observed 84.4%. On the group-clean split, real-CCTV recall came in at **83.3%**: essentially unchanged. The contamination was real, and fixing it was correct for the integrity of every number in this report, but it was **not** materially inflating the result, and the stated magnitude was wrong. Recorded here rather than quietly dropped, because the corrected conclusion changes what to work on next: recall on real CCTV was never the problem, and effort belongs on the false-positive rate.
 
 ---
 
-## 15. Remaining Work
+## 15. Camera Integration: Working With Cameras That Already Exist
 
-1. **Close the domain gap (§12.4, §13)** — this is now the critical path, not an optional follow-on. CCTV-Fights (1,000 real, annotated clips) is now downloaded and verified (§13); still needed: (a) accumulating enough real-domain negative footage from live capture, (b) an actual retrain/fine-tune on the combined pool, not merely threshold tuning on the existing model.
-2. Investigate whether **person-crop mode** produces fewer false alarms on empty/quiet scenes specifically — set aside earlier under confounded measurement conditions (§9, T1/T2), worth a clean, isolated rerun now that the false-alarm problem is the dominant open issue.
+A detection model that only runs on the specific hardware it was developed against is not deployable to a barangay that already owns cameras. This section documents making the system source-agnostic, and — equally important — the two failure modes that only appeared once it was tested against a real IP camera rather than assumed to work.
+
+### 15.1 The gap, stated precisely
+
+The `cameras` table already stored an `rtsp_url` column, and the dashboard could already save one. It was reasonable to assume from this that RTSP was supported. It was not. The detection core (`maincode/main.py`) resolved its video source as `config.json → camera.index`, an **integer**, opened it with `cv2.VideoCapture(idx, CAP_DSHOW)` — a Windows webcam-only backend that cannot parse a URL at all — and exposed a single `POST /set_camera_index` endpoint whose request schema (`index: int`) rejected a URL outright. The stored `rtsp_url` was never read by anything that opened a capture.
+
+So the system could *record* an RTSP address and never *watch* it. This is worth stating plainly because it is a class of gap that is easy to miss: a feature can be present in the database schema, the API and the UI, and still be absent from the code path that matters.
+
+### 15.2 What was implemented
+
+A camera source is now either a local device index or a stream URL, resolved with the precedence `CAMERA_SOURCE` (environment) → `config.json: camera.source` → `camera.index` (legacy). Both kinds flow through one open/reconnect path, so the pose stage, X3D classifier, clip capture and MJPEG relay never learn which they are looking at.
+
+| Concern | Decision | Why |
+|---|---|---|
+| Backend | FFmpeg for all string sources; DirectShow only for integer indices | DirectShow cannot open a URL; FFmpeg is what speaks RTSP |
+| Transport | `rtsp_transport;tcp` forced | UDP drops frames under congestion, and a torn frame is worse than a late one when the next stage classifies *motion* |
+| Resolution | Not forced on network sources | The camera encodes what it encodes; renegotiating can break the stream |
+| Timeouts | `CAP_PROP_OPEN_TIMEOUT_MSEC` / `READ_TIMEOUT_MSEC` = 5s | See §15.3 |
+| Bad URL | Roll back to the previous source, report the error | An operator mistyping a URL should not lose the feed they had |
+| Dead network camera | Retry the URL; **never** fall back to probing local webcams | Silently switching a street camera to whatever USB device is in the server would show a plausible feed of the wrong place — worse than an obviously dead one |
+| Credentials | Stripped by regex from every printed, logged and API-returned form of the URL | `rtsp://admin:pass@host/stream1` otherwise travels to the browser and into logs |
+
+Protocol coverage follows from using FFmpeg: RTSP (`rtsp://`, `rtsps://`), HTTP MJPEG, RTMP, and plain file paths for offline replay. RTSP is the interface effectively every CCTV vendor exposes — Hikvision, Dahua, Tapo, Uniview, and any ONVIF-conformant device — so no vendor-specific integration work is required per camera.
+
+### 15.3 Two failures that only a real camera revealed
+
+Both were found by testing against an actual RTSP server (`mediamtx` serving a 720p H.264 stream over a real handshake), not by reasoning about the code. Both would have reached deployment otherwise.
+
+**(a) The timeout that wasn't applied.** The conventional way to set an RTSP timeout is the `OPENCV_FFMPEG_CAPTURE_OPTIONS` environment string (`stimeout;5000000`). Measured against an unreachable address, opening still blocked for the full **30 seconds**: OpenCV installs its own interrupt callback whose hard-coded default overrides FFmpeg's own socket timeout, and it is configurable only through capture *parameters*, not the option string. Worse, the initial fix made it *worse* — 41.7s — because the `CAP_ANY` fallback backend silently ignores those parameters, so a failed 5s FFmpeg attempt was followed by an unbounded 30s retry. Removing the fallback (FFmpeg is the only backend that speaks RTSP, so it protected nothing) brought a dead camera to a bounded **5.0s**. On the reconnect path the original behaviour meant halting detection for half a minute per retry.
+
+**(b) The stall that a webcam cannot reproduce.** With the capture working, the detector connected, ran for a few seconds, then entered a permanent read-fail/reconnect loop and never processed a frame. The server's own log named the cause: `write queue is full`. A USB webcam is a *pull* source — `read()` hands back the current frame. An IP camera is a *push* source: it transmits at its own frame rate regardless of whether anyone is consuming. The per-frame pipeline (pose + X3D + weapon pass) is slower than 30fps at 720p on a GTX 1660 SUPER, so unread frames accumulated in the socket until reads stalled past the timeout. `CAP_PROP_BUFFERSIZE = 1` does not help; the FFmpeg backend ignores it.
+
+The fix is a drain thread (`_NetworkStreamReader`) that reads continuously and retains only the newest frame, exposing the same `read`/`isOpened`/`release` surface so the main loop is unchanged. Discarding the backlog is the correct trade rather than a compromise: **an alert about something that happened forty seconds ago is not an alert.** The reader also never returns the same frame twice — feeding duplicates to a temporal model would insert motionless repeats into the X3D clip buffer and corrupt the exact signal it classifies on. Applied only to live network sources; a file replay is a pull source and draining it would race to the end discarding most of the footage.
+
+### 15.4 Verification
+
+A 14-check suite (`test_rtsp_source.py`) covers source normalisation, credential redaction, the file path, a real RTSP handshake, and bounded failure on an unreachable address — **14/14 passing**, with the RTSP case reading 30 frames at 1280×720 from a live server. Beyond the unit level, the complete detector was booted against that stream and ran the full pipeline: models loaded, source correctly reported as `rtsp://127.0.0.1:8554/cam1`, frames processed, an alert posted to the backend (HTTP 200) and an event clip written. Server-side `write queue is full` events dropped from continuous to **zero** after the drain thread.
+
+### 15.5 What is still not solved
+
+The system now integrates *any* camera; it does not yet integrate *many*. `main.py` processes **one source at a time**, and the dashboard's "All Feeds" grid currently points every tile at the same `/video_feed`. Multi-camera concurrency is the Phase 5 scaling question (§9's ~17 cameras/GPU is a throughput estimate, not a shipped capability), and it is a separate piece of work from source flexibility. The distinction matters for an honest claim: *this system can be pointed at an existing barangay CCTV camera* is now true and tested; *this system can monitor a barangay's whole camera network* is not yet.
+
+---
+
+## 16. Current Deployment Decision
+
+The system is now configured to run **the negatives-fine-tuned checkpoint in scene mode** (`config.json`: `"mode": "scene"`, `scene_model_path": "weights/x3d_xs_violence_scene_3way_nll_scaleaug_negatives.pt"`), deployed and smoke-tested live as of this report. This supersedes the tiled-mode configuration reported in earlier drafts of this document, which is now known — not merely suspected — to fail catastrophically with these particular weights (§14.2). The decision is evidence-based on both axes that matter (§ Context: both missed violence and false alarms carry real cost):
+
+- **False-alarm rate**: 0.00/hour on 5 of 6 real validation clips (down from a 4.00–32.57/hour range), one residual case at 8.00/hour with a known, plausible cause.
+- **Recall**: 92.5% at the camera's actual real-world scale, essentially unchanged from the scale-augmented base checkpoint.
+
+**This deployment decision is now known to be conditional on time of day, and should be read together with §14.6.** Every figure above was measured on night footage. The same configuration on 150 minutes of *daytime* capture produces **75.20 false alarms/hour in aggregate**, ranging from 0.00/hour on two cameras to 334.00/hour on one. The configuration therefore remains the best evidenced one available and stays deployed, but it is **not** currently fit for unattended daytime operation, and the corrective retrain (§14.6, §14.8) is the open work.
+
+This is presented as the strongest evidenced configuration to date, **not as a claim that the false-alarm problem is fully solved**: it is validated against six specific pieces of real footage, not a statistically large or fully diverse sample, and the tireshop result shows it is not failure-proof. The previous configuration (old weights, tiled) remains available by editing two lines in `config.json` and is fully reversible, per the project's standing requirement that every mode stay switchable.
+
+---
+
+## 17. Remaining Work
+
+1. **Broaden real-footage validation** of the new scene-mode configuration beyond the six clips in §14.5 — more hours, more locations, more times of day — before treating 0.00/hour as representative rather than an encouraging early result.
+2. **Address the two residual failure modes identified in §14.5** — (a) fast vehicle motion misread as violence, which suggests adding fast-traffic footage to the negative pool, a straightforward and testable fix; and (b) close-proximity group standing, the genuinely ambiguous case, which may need pose context rather than more data.
 3. Complete official NTU ROSE Lab registration for the authoritative CCTV-Fights source (§13), for redistribution/citation legitimacy beyond the Kaggle mirror.
-4. **Phase 5** — document the final cameras-per-GPU scaling path with the now-clean, resolved tiled-mode figures (§9), and where edge devices would fit for cameras beyond a single GPU's capacity.
-5. Consider a milder scale-augmentation ablation (between the original zoom-in-only pipeline and the current wide range) as a way to recover some of §10's accuracy regression without giving back the city-scale capability gain — untested, and a larger retrain effort than anything above.
+4. Investigate whether **person-crop mode** offers any further benefit now that scene mode's false-alarm problem is substantially addressed — lower priority than before §14, since the original motivating problem is largely resolved.
+5. **Phase 5** — document the final cameras-per-GPU scaling path. Scene mode's cost profile (§9: ~1.92ms/frame, ~17 cameras/GPU) is far better than tiled mode's, which changes the scaling story favorably now that scene mode is the deployed candidate.
+6. Consider a milder scale-augmentation ablation, as before (§10), though now a lower priority given §14.4 found no evidence of a recall cost in the current checkpoint.
+7. **Drive down the 44.3% real-CCTV false-positive rate (§14.8)** — the single highest-priority item, and now known to be the binding constraint rather than recall. The combined retrain (group-clean split + 720 daytime negatives + the non-CCTV violence pool) is the current attempt; it must be evaluated per-source, not in aggregate, and re-validated on daytime footage rather than only on the night clips that produced §14.5's zeros.
+8. **Validate along the untested domain axes before claiming deployability** — at minimum wet-weather footage and a second camera height, given that all three axes tested so far have each broken the model (§18).
+9. **Multi-camera concurrency (§15.5)** — source flexibility is done and tested; running more than one camera per process is not, and it is what separates "works on a camera" from "monitors a barangay."
 
-The person-cropped retrain set aside by the §9 decision remains a secondary, lower-priority item for city-wide cameras specifically — useful for close-framed cameras, not the city-wide critical path.
+The tiled architecture (§9) remains fully implemented and switchable, and its measurement infrastructure (batched tile inference, the grid/interval tuning) is not wasted work — it was the correct answer to the original scale-blindness problem (§7) and remains available if a future checkpoint doesn't share this one's scene-mode compatibility.
 
 ---
 
-## 16. Limitations to State Plainly
+## 18. Limitations to State Plainly
 
-- All benchmark accuracy figures in this report (§6, §10) are measured on **RWF-2000 and SCVD** — not on Philippine street-camera footage. This is the direct, identified cause of §12's false-alarm-rate finding, not a separate unrelated caveat.
-- **False-alarm rate on real, continuously-running footage (4–14/hour) is not yet at a usable operating point** for an unattended public-safety alerting system, despite being a measured net improvement over the pre-fix baseline. This is the single most important open problem in the project as of this report.
-- Real-camera **recall** (does it actually catch a real incident on a real deployment camera) remains formally unmeasured, because none of the real footage captured so far contains genuine violence — a structural limitation of passive live capture (§13) that only an annotated real-domain dataset (CCTV-Fights) or a live incident can resolve.
+- All benchmark accuracy figures in §6/§10 are measured on **RWF-2000 and SCVD**; §14's fine-tune data (CCTV-Fights + live capture) is the first real-domain training signal in this project, and it measurably changed real-footage behavior (§14.5) — direct evidence that the domain-gap diagnosis in §12.4 was correct, not merely plausible.
+- **The tiled architecture and this fine-tuned checkpoint are a bad pairing** (§14.2/14.3) — a specific, measured, non-obvious interaction, not a general statement that tiled mode is worse than scene mode. A future checkpoint retrained with tiled mode's compounding structure in mind (e.g., fine-tuned with per-tile false-positive rate as an explicit objective) might not share this failure mode.
+- **Real-footage validation (§14.5) covers six clips, roughly 1.7 hours total** — a real improvement in rigor over a single file, but still small next to a deployment that would run continuously, indefinitely, across many cameras. The 0.00/hour results are encouraging, not proof of a solved problem.
+- Real-camera **recall on genuine violence** remains formally unmeasured on any of the captured Philippine footage, because none of it contains real violence — §14.4's recall figure comes from replaying benchmark clips at real-world scale, the same proxy methodology used throughout this project, not from a real incident.
 - Two other detection capabilities in this system — robbery and vandalism — are implemented as hand-written geometric rules rather than trained models, and report fixed, hardcoded confidence values to the dashboard rather than measured ones. They remain out of scope for this work period (violence detection only, by explicit decision) and are noted here as a known gap for future work.
+- **Every headline accuracy figure in this report is an aggregate over data sources that behave very differently.** §14.8 measures 91.9% overall and 67.0% on the only real-CCTV source, from the same evaluation run. Wherever a single number appears without a source breakdown, it should be assumed to be benchmark-weighted.
+- **Three separate domain-gap axes have each broken a model that looked finished** — scale (§7), scene realism (§12.4) and lighting/time-of-day (§14.6). Each was invisible until validation was deliberately extended along it. There is no basis for assuming the third is the last; weather, camera height, lens distortion and crowd density are all untested and all plausible.
+- The system's live negative footage carries an **unverified label**: no violence is assumed to have occurred during ordinary capture windows because none was observed, but the clips were not exhaustively reviewed frame by frame. A missed real incident inside a "negative" clip would be training the model to ignore exactly what it exists to detect.
 
 ---
 

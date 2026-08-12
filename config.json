@@ -41,11 +41,11 @@
       "ema_alpha": 0.35,
       "release_hysteresis_margin": 0.07,
       "bystander_merge_radius_mult": 1.3,
-      "mode": "tiled",
+      "mode": "scene",
       "scene_confidence_threshold": 0.5,
       "scene_consecutive_required": 1,
-      "scene_model_path": "weights/x3d_xs_violence_scene_3way_nll_scaleaug.pt",
-      "_mode_options": "track | scene | tiled | both -- tiled = full camera coverage via an overlapping tile grid, for wide city cameras where a person is too small for whole-frame scene mode to see (see docs/progress_report_violence_detection.md §6). Uses scene_model_path/scene_confidence_threshold/scene_consecutive_required, same as scene mode.",
+      "scene_model_path": "weights/x3d_xs_violence_scene_3way_nll_scaleaug_negatives.pt",
+      "_mode_options": "track | scene | tiled | both -- tiled = full camera coverage via an overlapping tile grid, for wide city cameras where a person is too small for whole-frame scene mode to see (see docs/progress_report_violence_detection.md \u00c2\u00a76). Uses scene_model_path/scene_confidence_threshold/scene_consecutive_required, same as scene mode.",
       "tile_grid": 3,
       "tile_overlap": 0.25,
       "tile_check_interval": 20
@@ -59,6 +59,7 @@
   },
   "camera": {
     "index": 0,
+    "source": "",
     "default_resolution": "1280x720",
     "fps": 30,
     "buffer_size": 50

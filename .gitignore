@@ -76,7 +76,7 @@ x3d_debug_out/
 x3d_debug_out_all/
 static/
 devteamcredentials.txt
-
+requests/
 # Images (added)
 *.jpg
 *.jpeg

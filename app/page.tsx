@@ -6,11 +6,12 @@ import { useRouter } from 'next/navigation';
 import { useRuntimeConfig } from './hooks/useRuntimeConfig';
 import { useLiveChannel } from './context/WebSocketContext';
 import { usePermissions } from './hooks/usePermissions';
+import PTZControls from './components/PTZControls';
 import {
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin,
   Maximize2, X, Sun, User, LogOut,
   BatteryMedium, Thermometer, Zap, Plus, Film, Users, Terminal,
-  Camera as CameraIcon, Check, Loader2, Grid2X2
+  Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi
 } from 'lucide-react';
 
 // Every tab view was previously eagerly imported at module top -- all six
@@ -90,6 +91,11 @@ export default function EcoVisionSentinel() {
   const [telemetry, setTelemetry] = useState({ battery: 88, solarV: 14.4, tempCPU: 42, tempESP: 38, tempNeural: 51, load: 12.4 });
   const [camIndexInput, setCamIndexInput] = useState("5");
   const [availableCameras, setAvailableCameras] = useState<number[]>([]);
+  // Credential-stripped description of whatever the AI core is currently
+  // watching -- a local index or an RTSP/HTTP stream.
+  const [currentSourceLabel, setCurrentSourceLabel] = useState<string>('');
+  const [sourceIsNetwork, setSourceIsNetwork] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const [applyState, setApplyState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const router = useRouter();
 
@@ -139,7 +145,13 @@ export default function EcoVisionSentinel() {
         const data = await res.json();
         if (cancelled) return;
         setAvailableCameras(data.available_cameras);
-        setCamIndexInput(data.current_index.toString());
+        setCurrentSourceLabel(data.current_source ?? '');
+        setSourceIsNetwork(!!data.is_network);
+        // For a network camera the input is left blank and the (credential-
+        // stripped) URL shown as placeholder instead -- echoing the server's
+        // redacted string back into an editable field would mean applying it
+        // again submits "rtsp://***@host/stream1" as a literal URL.
+        setCamIndexInput(data.is_network ? '' : String(data.current_index ?? ''));
         setAiCoreOnline(true);
       } catch {
         // Expected while the core is still warming up -- not worth a
@@ -155,20 +167,31 @@ export default function EcoVisionSentinel() {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [aiUrl, configLoaded]);
 
-  const handleApplyCameraIndex = async () => {
-    const idx = parseInt(camIndexInput, 10);
-    if (Number.isNaN(idx) || idx < 0) return;
+  /* Applies whatever the operator typed: a local device index ("0") or a
+   * network stream URL ("rtsp://user:pass@10.0.0.12:554/stream1"). The core
+   * decides which is which -- the dashboard should not have to know, and a
+   * barangay adopting its existing IP cameras types a URL here rather than
+   * needing the exact webcam hardware this was developed against. */
+  const handleApplyCameraSource = async () => {
+    const raw = camIndexInput.trim();
+    if (!raw) return;
     setApplyState('saving');
     try {
-      const res = await fetch(`${aiUrl}/set_camera_index`, {
+      const res = await fetch(`${aiUrl}/set_camera_source`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ index: idx })
+        body: JSON.stringify({ source: raw })
       });
       const data = await res.json();
       setApplyState(data.status === "reopened" ? 'saved' : 'error');
+      if (data.status !== "reopened" && data.detail) {
+        // The core rolls back to the previous source on a bad URL, so the
+        // operator keeps their feed; say why the new one did not take.
+        setSourceError(data.detail);
+        setTimeout(() => setSourceError(null), 6000);
+      }
     } catch (e) {
-      console.error("Camera index swap failed:", e);
+      console.error("Camera source swap failed:", e);
       setApplyState('error');
     }
     setTimeout(() => setApplyState('idle'), 2000);
@@ -196,6 +219,14 @@ const fetchCameras = async (userObj: any) => {
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
+      // currentUser can hydrate (e.g. from a persisted session) a tick
+      // before the token itself lands in localStorage -- without this
+      // guard that window sends "Authorization: Bearer null" and the
+      // backend correctly 401s it (verify_token can't parse "null" as a
+      // signed token). useLiveChannel's own 60s fallback poll retries
+      // this naturally, so skipping quietly here is enough -- no need to
+      // surface a transient race as a user-visible error.
+      if (!token) return;
 
       const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -216,6 +247,9 @@ const fetchCameras = async (userObj: any) => {
       const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
+      // See matching comment in fetchStats -- same currentUser-before-token
+      // hydration race, same safe skip-and-let-the-next-poll-retry fix.
+      if (!token) return;
 
       const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -504,39 +538,49 @@ const fetchCameras = async (userObj: any) => {
                     <span className="label" style={{ color: 'var(--text)' }}>
                       {selectedCam ? `Single View — ${selectedCam.name}` : `Video Wall — ${cameras.length} Feed${cameras.length === 1 ? '' : 's'}`}
                     </span>
-                    {selectedCam && (
-                      <button
-                        onClick={() => setSelectedCam(null)}
-                        className="label px-1.5 py-0.5 border transition-colors hover:bg-white/5"
-                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
-                      >
-                        ← All Feeds
-                      </button>
-                    )}
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {/* Camera source selector */}
-                    <div className="flex items-center gap-1.5 h-6 px-1.5 border" style={{ borderColor: 'var(--line)' }}>
-                      <CameraIcon size={11} style={{ color: 'var(--text-3)' }} />
+                    {selectedCam && (
+                      <button
+                        onClick={() => setSelectedCam(null)}
+                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97] hover-lift"
+                        style={{ background: 'var(--accent)' }}
+                      >
+                        <ArrowLeft size={12} />
+                        All Feeds
+                      </button>
+                    )}
+                    {/* Camera source selector: local index OR network stream URL */}
+                    <div className="relative flex items-center gap-1.5 h-6 px-1.5 border" style={{ borderColor: 'var(--line)' }}>
+                      {sourceIsNetwork
+                        ? <Wifi size={11} style={{ color: 'var(--ok)' }} />
+                        : <CameraIcon size={11} style={{ color: 'var(--text-3)' }} />}
                       <span className="label" style={{ fontSize: '8px' }}>SRC</span>
                       <input
-                        type="number"
-                        min={0}
+                        type="text"
                         value={camIndexInput}
                         onChange={(e) => setCamIndexInput(e.target.value)}
-                        title="Camera device index"
-                        className="data w-8 bg-transparent border-none text-[10px] text-white outline-none text-center"
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleApplyCameraSource(); }}
+                        placeholder={sourceIsNetwork ? currentSourceLabel : '0'}
+                        title={
+                          'Camera source: a local device index (e.g. 0) or a network stream URL' +
+                          ' (rtsp://user:pass@10.0.0.12:554/stream1). Any ONVIF/RTSP camera works.' +
+                          (currentSourceLabel ? `\nCurrently: ${currentSourceLabel}` : '')
+                        }
+                        className="data bg-transparent border-none text-[10px] text-white outline-none"
+                        style={{ width: sourceIsNetwork ? 168 : 32,
+                                 textAlign: sourceIsNetwork ? 'left' : 'center' }}
                       />
-                      {availableCameras.length > 0 && (
+                      {!sourceIsNetwork && availableCameras.length > 0 && (
                         <span className="data text-[9px]" style={{ color: 'var(--text-3)' }}>
                           [{availableCameras.join(',')}]
                         </span>
                       )}
                       <button
-                        onClick={handleApplyCameraIndex}
+                        onClick={handleApplyCameraSource}
                         disabled={applyState === 'saving'}
-                        title="Apply camera index"
+                        title="Apply camera source"
                         className="h-4 w-4 flex items-center justify-center transition-colors disabled:opacity-40"
                         style={{ color: 'var(--accent)' }}
                       >
@@ -544,6 +588,14 @@ const fetchCameras = async (userObj: any) => {
                       </button>
                       {applyState === 'saved' && <span className="data text-[9px]" style={{ color: 'var(--ok)' }}>OK</span>}
                       {applyState === 'error' && <span className="data text-[9px]" style={{ color: 'var(--critical)' }}>ERR</span>}
+                      {sourceError && (
+                        <span
+                          className="data absolute top-7 right-0 whitespace-nowrap px-1.5 py-0.5 border text-[9px] z-20"
+                          style={{ borderColor: 'var(--critical)', color: 'var(--critical)', background: 'var(--panel)' }}
+                        >
+                          {sourceError}
+                        </span>
+                      )}
                     </div>
 
                     <button
@@ -749,10 +801,11 @@ const fetchCameras = async (userObj: any) => {
               {selectedCam && (
                 <button
                   onClick={() => setSelectedCam(null)}
-                  className="label px-2 py-1 border transition-colors hover:bg-white/5"
-                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                  className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97] hover-lift"
+                  style={{ background: 'var(--accent)' }}
                 >
-                  ← All Feeds
+                  <ArrowLeft size={13} />
+                  All Feeds
                 </button>
               )}
               <button
@@ -765,9 +818,19 @@ const fetchCameras = async (userObj: any) => {
               </button>
             </div>
           </div>
-          <div className="flex-1 min-h-0 p-1.5">
+          <div className="flex-1 min-h-0 p-1.5 flex flex-col gap-1.5">
             {selectedCam ? (
-              <CameraTile cam={selectedCam} aiUrl={aiUrl} alerted={isSirenActive} large />
+              <>
+                <div className="flex-1 min-h-0">
+                  <CameraTile cam={selectedCam} aiUrl={aiUrl} alerted={isSirenActive} large />
+                </div>
+                {/* Only on a single selected camera: aiming a camera is a
+                    per-camera action, and a control pad over a multi-feed
+                    wall would be ambiguous about which camera it drives. */}
+                <div className="shrink-0 flex items-center justify-center py-1">
+                  <PTZControls apiUrl={apiUrl} />
+                </div>
+              </>
             ) : (
               <div className={`grid gap-1.5 h-full ${gridColsFor(cameras.length)}`}>
                 {cameras.map(cam => (
