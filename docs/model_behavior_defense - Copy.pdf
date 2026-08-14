@@ -1,0 +1,891 @@
+<title>Three Detectors, Measured</title>
+<style>
+/* ==========================================================================
+   Inherits app/globals.css's Command Console tokens rather than inventing a
+   second identity: same institutional blue, same status semantics, same rule
+   that color means something or is absent. A light theme is added because a
+   defense room is bright and this gets projected -- the dark set is still the
+   product's own.
+   ========================================================================== */
+:root {
+  --ground:   #F7F8FA;
+  --panel:    #FFFFFF;
+  --panel-2:  #F0F2F6;
+  --line:     #DFE3EB;
+  --line-2:   #C6CCD8;
+  --ink:      #141820;
+  --ink-2:    #4C5567;
+  --ink-3:    #7C8798;
+  --accent:   #1F5FE0;
+  --ok:       #157F39;
+  --warn:     #A66300;
+  --critical: #C22B26;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --grid:     #E6E9EF;
+  --shadow:   0 1px 2px rgba(20,24,32,0.06);
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:   #0A0C10;
+    --panel:    #111419;
+    --panel-2:  #161A21;
+    --line:     #232936;
+    --line-2:   #2E3644;
+    --ink:      #DDE3EC;
+    --ink-2:    #8892A4;
+    --ink-3:    #5C6474;
+    --accent:   #2D6FF7;
+    --ok:       #1FA34A;
+    --warn:     #E08A00;
+    --critical: #E5342F;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --grid:     #1C212B;
+    --shadow:   none;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:   #0A0C10;
+  --panel:    #111419;
+  --panel-2:  #161A21;
+  --line:     #232936;
+  --line-2:   #2E3644;
+  --ink:      #DDE3EC;
+  --ink-2:    #8892A4;
+  --ink-3:    #5C6474;
+  --accent:   #2D6FF7;
+  --ok:       #1FA34A;
+  --warn:     #E08A00;
+  --critical: #E5342F;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --grid:     #1C212B;
+  --shadow:   none;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: var(--sans); font-size: 16px; line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1080px; margin: 0 auto; padding: 56px 28px 96px; }
+.col { max-width: 68ch; }
+
+h1 { font-size: clamp(30px, 4.4vw, 42px); line-height: 1.12; margin: 0 0 14px;
+     letter-spacing: -0.025em; text-wrap: balance; font-weight: 700; }
+h2 { font-size: 23px; margin: 0 0 6px; letter-spacing: -0.015em; text-wrap: balance; }
+h3 { font-size: 15px; margin: 0 0 8px; letter-spacing: -0.005em; }
+p  { margin: 0 0 15px; }
+a  { color: var(--accent); }
+strong { font-weight: 650; }
+code, .mono { font-family: var(--mono); font-size: 0.9em; }
+
+.eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+           text-transform: uppercase; color: var(--ink-3); margin: 0 0 10px; }
+.lede { font-size: 18px; line-height: 1.6; color: var(--ink-2); }
+.meta { font-size: 12.5px; color: var(--ink-3); font-family: var(--mono); }
+
+header { border-bottom: 1px solid var(--line); padding-bottom: 34px; margin-bottom: 44px; }
+
+section { padding-top: 44px; margin-top: 44px; border-top: 1px solid var(--line); }
+section:first-of-type { border-top: none; margin-top: 0; }
+.sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+.sec-head .n { font-family: var(--mono); font-size: 12px; color: var(--ink-3); flex: none; }
+
+/* status pill -- form as well as number, per the console rules */
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+        font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+        padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 999px; background: currentColor; }
+.pill.ship { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.pill.off  { color: var(--critical); background: color-mix(in srgb, var(--critical) 13%, transparent); }
+
+.grid { display: grid; gap: 12px; margin: 22px 0; }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+        padding: 15px 16px; box-shadow: var(--shadow); }
+.tile .k { font-size: 10px; font-weight: 700; letter-spacing: 0.12em;
+           text-transform: uppercase; color: var(--ink-3); margin-bottom: 7px; }
+.tile .v { font-size: 27px; font-weight: 680; letter-spacing: -0.02em; line-height: 1.1; }
+.tile .v.good { color: var(--ok); } .tile .v.bad { color: var(--critical); }
+.tile .v.warn { color: var(--warn); }
+.tile .s { font-size: 12px; color: var(--ink-2); margin-top: 5px; line-height: 1.45; }
+
+figure { margin: 26px 0; background: var(--panel); border: 1px solid var(--line);
+         border-radius: 10px; padding: 18px 18px 14px; box-shadow: var(--shadow); }
+figure .cap { font-size: 12.5px; color: var(--ink-2); line-height: 1.55; margin-top: 12px;
+              padding-top: 12px; border-top: 1px solid var(--line); }
+figure .cap b { color: var(--ink); font-weight: 650; }
+.fig-title { font-size: 14px; font-weight: 650; margin-bottom: 2px; }
+.fig-sub { font-size: 12px; color: var(--ink-3); margin-bottom: 14px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+.chart { width: 100%; overflow-x: auto; }
+/* Scroll rather than shrink. Letting a data-dense chart scale down to phone
+   width collapses 11px axis labels into unreadable smears; a horizontal
+   scroll inside the figure keeps them at size and keeps the page body from
+   scrolling sideways. */
+svg { display: block; height: auto; min-width: 600px; max-width: 100%; }
+.axis  { stroke: var(--line-2); stroke-width: 1; }
+.gridl { stroke: var(--grid); stroke-width: 1; }
+.tick  { fill: var(--ink-3); font-size: 11px; font-family: var(--mono); }
+.dlabel{ fill: var(--ink); font-size: 11px; font-family: var(--mono); font-weight: 600; }
+.alabel{ fill: var(--ink-3); font-size: 11px; }
+
+.note { border-left: 2px solid var(--line-2); padding: 2px 0 2px 15px; margin: 20px 0;
+        font-size: 14.5px; color: var(--ink-2); }
+.note.flag { border-left-color: var(--warn); }
+.note.stop { border-left-color: var(--critical); }
+.note b { color: var(--ink); }
+
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+.tbl-wrap { overflow-x: auto; margin: 20px 0; border: 1px solid var(--line);
+            border-radius: 9px; background: var(--panel); }
+th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+     text-transform: uppercase; color: var(--ink-3); padding: 11px 14px;
+     border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: none; }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+tr.hi td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+tr.hi td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+details { margin: 18px 0; border: 1px solid var(--line); border-radius: 9px;
+          background: var(--panel); }
+summary { cursor: pointer; padding: 11px 15px; font-size: 12.5px; color: var(--ink-2);
+          font-weight: 600; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+summary::before { content: "▸ "; color: var(--ink-3); }
+details[open] summary::before { content: "▾ "; }
+details[open] summary { border-bottom: 1px solid var(--line); }
+details .body { padding: 4px 15px 14px; }
+details table { font-size: 12.5px; }
+details .tbl-wrap { border: none; margin: 8px 0 0; border-radius: 0; }
+
+.tip { position: fixed; pointer-events: none; opacity: 0; transition: opacity 0.1s;
+       background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 7px;
+       padding: 7px 10px; font-size: 12px; font-family: var(--mono); color: var(--ink);
+       box-shadow: 0 4px 14px rgba(0,0,0,0.22); z-index: 50; white-space: pre; line-height: 1.5; }
+.tip.on { opacity: 1; }
+.hot { cursor: crosshair; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line);
+         font-size: 12.5px; color: var(--ink-3); }
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">Defense reference · EcoVision Sentinel</p>
+  <h1>Three detectors, measured</h1>
+  <div class="col">
+    <p class="lede">What each model actually does, how it behaves on real footage,
+    and exactly where each one stops working. Every figure here comes from a
+    script in the repository — where a number rests on something thin, it says
+    so on the same line.</p>
+  </div>
+  <p class="meta">GTX 1660 SUPER · 2026-08-14 · violence, robbery deployed · vandalism disabled</p>
+</header>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">01</span><h2>The one-page answer</h2></div>
+  <div class="col">
+    <p>Three detectors were built. Two ship. The third is switched off in
+    <code>config.json</code> with its measurements recorded beside it, because
+    both routes to it were tried and both failed — and a detector that alarms on
+    seven of eight quiet clips is worse than no detector at all.</p>
+  </div>
+
+  <div class="grid g3">
+    <div class="tile">
+      <div class="k">Violence <span class="pill ship">Deployed</span></div>
+      <div class="v good">95.0%</div>
+      <div class="s">38 of 40 events on continuous footage. 17 alarms/hour across three cameras.</div>
+    </div>
+    <div class="tile">
+      <div class="k">Robbery <span class="pill ship">Deployed</span></div>
+      <div class="v warn">65.3%</div>
+      <div class="s">of clips in eight unseen scenes, at 86.5% precision and 5.6% false-positive rate.</div>
+    </div>
+    <div class="tile">
+      <div class="k">Vandalism <span class="pill off">Disabled</span></div>
+      <div class="v bad">0%</div>
+      <div class="s">The shipped rule has never fired once — 0 of 40 real clips.</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="note stop"><b>The one thing to say before anyone asks.</b>
+    Recall on the actual deployment cameras is <b>unmeasured for every class</b>,
+    because no labelled incident has ever been recorded on them. Everything below
+    is measured on benchmark footage, held-out source videos, or spliced
+    reconstructions. That gap is a property of the problem — you cannot label
+    violence that has not happened on your pole — not an oversight.</div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">02</span><h2>How the violence detector behaves</h2></div>
+  <div class="col">
+    <p>The model is an <strong>X3D-XS 3D convolutional network</strong> — about 3
+    million parameters — that reads a 13-frame clip of the <em>whole frame</em>
+    and returns a probability. It does not look at people individually. It has no
+    concept of a punch. It learned that a certain kind of rapid, clustered,
+    full-body motion looks different from a street where nothing is happening.</p>
+
+    <p>That distinction matters for the defense, because it predicts the failure
+    mode exactly: <strong>anything that makes the whole frame move quickly looks
+    like violence to it.</strong> A camera that pans does this. A camera on a
+    flyover with traffic does this. That is not a bug to be tuned away — it is
+    what the representation is.</p>
+
+    <h3>The confirmation logic is what makes it usable</h3>
+    <p>A raw classifier firing on every clip would be unusable. Between the model
+    and an alert sits a smoothing and confirmation stage: an exponential moving
+    average, then a requirement that the smoothed score stay above threshold for
+    <em>N consecutive</em> inference passes before an alert is emitted.</p>
+
+    <p>For most of this project that parameter was set to 1 in deployment while
+    every published false-alarm figure had been measured at 2 — so the real
+    system was roughly 53% noisier than the numbers said. Finding that mismatch
+    produced the single largest improvement in the project, and it cost nothing:</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">Raising the confirmation requirement is free until it isn't</div>
+    <div class="fig-sub">40 held-out violent clips spliced into real Davao night footage, 25 s of ordinary activity either side, replayed through the shipped state machine</div>
+    <div class="chart" id="c-cons"></div>
+    <div class="cap"><b>Three is the last free step; four is the first that costs.</b>
+    Going from 1 to 3 removed 65% of false alarms and lost none of the 40 events.
+    Going to 4 saves 8 more alarms per hour and starts missing real ones. The two
+    measures are drawn as separate panels on purpose — they have different units,
+    and putting them on one pair of axes would be a chart that lies.</div>
+  </figure>
+
+  <div class="col">
+    <h3>The number that decides whether anyone keeps it switched on</h3>
+    <p>A system-wide false-alarm average would be actively misleading here. The
+    spread between the best and worst camera is more than <strong>45×</strong>:</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">False alarms per hour, by camera</div>
+    <div class="fig-sub">Threshold 0.50, confirmation 3, 20 minutes measured per camera</div>
+    <div class="chart" id="c-cam"></div>
+    <div class="cap"><b>The flyover is the worst case and also the most trustworthy
+    figure.</b> It is the only one of the three whose venue does not also appear
+    in training. The two quiet cameras each have a different camera at the same
+    venue in the training set — no camera is in both roles, verified frame by
+    frame, but venue-level leakage and "we added market negatives and market
+    cameras improved" predict the same ranking and <b>cannot be separated with
+    this data</b>. Quote the 45, not the 17, when you want to be safe.</div>
+  </figure>
+
+  <div class="col">
+    <h3>Where it goes blind — and why that is the dangerous failure</h3>
+    <p>Replaying 40 clips the model detects at full confidence, while
+    progressively shrinking the people inside them, maps the edge of its vision.
+    Below roughly 15% of frame height it does not become less confident. It
+    stops seeing anything at all.</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">Detection collapses with subject size</div>
+    <div class="fig-sub">Same 40 clips, rescaled. Person height as a percentage of frame height</div>
+    <div class="chart" id="c-scale"></div>
+    <div class="cap"><b>A blind camera and a safe street produce identical output:
+    zero alarms.</b> For a public-safety system that is the most dangerous failure
+    mode there is, because nothing looks wrong. This chart is the reason the
+    project measured actual subject size on the deployment cameras rather than
+    assuming it — see §4.</div>
+  </figure>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">03</span><h2>How the robbery detector behaves</h2></div>
+  <div class="col">
+    <p>Same architecture, different training set, and one design decision that
+    made the class possible at all.</p>
+
+    <p>The negatives are the <strong>non-crime spans of the same videos as the
+    positives</strong>. A shop interior therefore appears on both sides of the
+    label, and the model cannot separate the classes by recognising the DVR
+    overlay, the lighting, or the room. It has to separate them on the act. That
+    is what makes indoor footage safe to include, and including it took the class
+    from 15 usable source videos to <strong>43</strong>.</p>
+
+    <p>Splitting is by <em>source video</em>, never by clip: 26 train / 9 val / 8
+    test scenes, zero group-level leakage.</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">Choosing the operating point</div>
+    <div class="fig-sub">139 clips from 8 source videos the model never trained on</div>
+    <div class="chart" id="c-rob"></div>
+    <div class="cap"><b>0.70 is where precision becomes usable without recall
+    collapsing.</b> At 0.50 a quarter of normal clips misfire — the alert-fatigue
+    failure this project spent most of its effort on for violence. Past 0.80,
+    precision is nearly perfect and recall falls off a cliff. The deployed point
+    accepts missing about one robbery in three in exchange for a 5.6%
+    false-positive rate.</div>
+  </figure>
+
+  <div class="col">
+    <div class="note flag"><b>Say the recall number out loud before the panel finds
+    it.</b> 65.3% means it misses roughly one robbery in three. That is defensible
+    for a first version built on 43 source videos, and it is deliberately
+    precision-weighted — but it is not a "catches everything" claim and should
+    never be presented as one.</div>
+
+    <p>Two further caveats belong with any figure quoted from this table. The test
+    set is <strong>8 scenes, not 139 independent samples</strong> — clips from one
+    video are highly correlated. And the confirmation requirement of 3 is
+    <strong>carried over from violence, not tuned</strong>, because there is no
+    continuous robbery footage to tune it on.</p>
+
+    <p>What it replaced is worth stating plainly: a hard-coded constant,
+    <code>0.895</code>, with no derivation anywhere, which the dashboard rendered
+    as though it were a model output.</p>
+  </div>
+
+  <details>
+    <summary>Full threshold sweep — table view</summary>
+    <div class="body"><div class="tbl-wrap"><table>
+      <thead><tr><th>Threshold</th><th>Accuracy</th><th>Recall</th><th>Precision</th><th>FPR</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">0.30</td><td class="num">71.2%</td><td class="num">91.8%</td><td class="num">55.6%</td><td class="num">40.0%</td></tr>
+        <tr><td class="mono">0.50</td><td class="num">76.3%</td><td class="num">79.6%</td><td class="num">62.9%</td><td class="num">25.6%</td></tr>
+        <tr><td class="mono">0.60</td><td class="num">80.6%</td><td class="num">71.4%</td><td class="num">72.9%</td><td class="num">14.4%</td></tr>
+        <tr class="hi"><td class="mono">0.70 — deployed</td><td class="num">84.2%</td><td class="num">65.3%</td><td class="num">86.5%</td><td class="num">5.6%</td></tr>
+        <tr><td class="mono">0.80</td><td class="num">84.2%</td><td class="num">57.1%</td><td class="num">96.6%</td><td class="num">1.1%</td></tr>
+        <tr><td class="mono">0.90</td><td class="num">80.6%</td><td class="num">44.9%</td><td class="num">100.0%</td><td class="num">0.0%</td></tr>
+      </tbody>
+    </table></div></div>
+  </details>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">04</span><h2>Vandalism: why it is switched off</h2></div>
+  <div class="col">
+    <p>Two independent routes were built and measured. Both failed, in different
+    ways, and the honest outcome was to disable the class rather than ship
+    something that produces confident-looking output.</p>
+
+    <h3>Route one — the rule has never fired</h3>
+    <p><code>score_vandalism()</code> requires a person's wrist to be near a
+    YOLO-detected <em>sign</em> box. Given the first labelled vandalism footage
+    this project has ever had, that gate opened <strong>zero times</strong>:</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">Both routes, measured</div>
+    <div class="fig-sub">Left: the shipped rule on 64 labelled clips. Right: the trained model against the majority-class baseline</div>
+    <div class="chart" id="c-vand"></div>
+    <div class="cap"><b>Zero <span class="mono">Sign</span> detections across 4,800
+    sampled frames.</b> Person tracking worked normally in 1,260 of those frames,
+    so the pipeline is healthy — the condition is simply not satisfiable. This is
+    not a tuning problem: no threshold makes a detector that never fires work. And
+    the trained model's 70.3% accuracy is <b>below the 78.4%</b> you get by
+    labelling every clip vandalism, so it carries negative information.</div>
+  </figure>
+
+  <div class="col">
+    <p>The trained model fires on <strong>7 of the 8 normal clips</strong> in its
+    test set. Its training curve confirms what that means: validation accuracy
+    fell from 42% to 33% while training accuracy climbed to 86% — it memorised
+    eleven scenes.</p>
+
+    <div class="note"><b>The blocker is scene count, not algorithm.</b> Robbery
+    works at 26 training scenes. Vandalism fails at 11. Filtering existing corpora
+    cannot cross that gap, because the limit is <em>distinct locations</em> and
+    filtering does not create any. Filming does. The route across is roughly 20
+    outdoor scenes, documented in <code>docs/vandalism_data_collection.md</code>.</div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">05</span><h2>The assumption that was wrong</h2></div>
+  <div class="col">
+    <p>This project's plan was written around the belief that a wide street camera
+    puts a person at 6–12% of frame height — comfortably inside the blind region
+    from §2. Measuring 248 person detections across the four deployment cameras
+    showed it is not true.</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">Subject size: assumed, trained, and actual</div>
+    <div class="fig-sub">Person height as a percentage of frame height. Measured with <span class="mono">measure_object_scale.py</span></div>
+    <div class="chart" id="c-size"></div>
+    <div class="cap"><b>The deployment cameras sit at 22–29%, close to the training
+    distribution — not at 6–12%.</b> The scale problem is far less severe than the
+    project believed for most of its life, which is why cropping and tiled
+    inference were dropped. <b>The caveat runs the other way, though:</b> these are
+    heights of <em>detected</em> people, and YOLO misses small distant ones by
+    definition, so the true distribution has more small people in it than this and
+    these medians are biased upward.</div>
+  </figure>
+
+  <div class="col">
+    <p>The same measurement answers whether object recognition would help. Against
+    a roughly 24-pixel floor for reliable small-object detection: a backpack is
+    about 38 px and <strong>detectable</strong>; a carried box is 29 px and
+    borderline; a <strong>phone or wallet is 10 px — below detection</strong>. A
+    "detect the stolen item" feature is not available at these camera distances,
+    regardless of model choice.</p>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">06</span><h2>What was tried and lost</h2></div>
+  <div class="col">
+    <p>This is the most transferable part of the work, and it should be presented
+    as a finding rather than hidden. <strong>Every algorithmic intervention
+    lost.</strong> What worked was more representative data and correctly
+    configuring a temporal parameter that had been mismeasured for the entire
+    project.</p>
+  </div>
+
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Intervention</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>Pose gate — require ≥2 people</td><td>Lost to a 0.05 threshold change</td></tr>
+      <tr><td>Wrist-velocity gate</td><td>Lost</td></tr>
+      <tr><td>Motion-localisation gate</td><td>Lost</td></tr>
+      <tr><td>Tiled inference, 4×4 with 25% overlap</td><td>Lost at every scale, at 8× the compute</td></tr>
+      <tr><td>Flyover artefact theories — scale, global motion, blur, pan/zoom</td><td>All four <em>depleted</em> among alarms</td></tr>
+      <tr><td>"Short UCF videos are mostly anomaly"</td><td>Median coverage 0.32 — an upper bound</td></tr>
+      <tr><td>"Motion localises the anomaly"</td><td>Crime is busier in 11 of 21 sources, quieter in 10</td></tr>
+      <tr><td>Object-centric features (COCO-80)</td><td>+0.12% over published RTFM — inside the noise</td></tr>
+      <tr class="hi"><td><b>More and more diverse negatives</b></td><td><b>54 → 26 → 17 alarms/hour</b></td></tr>
+      <tr class="hi"><td><b>Confirmation requirement 1 → 3</b></td><td><b>49 → 17 alarms/hour, at no cost in recall</b></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">07</span><h2>What ships, and how fast it runs</h2></div>
+  <div class="col">
+    <p>Four models, all local. No cloud service, no internet at run time, no
+    external database. The whole pipeline holds about <strong>295 MB of GPU
+    memory</strong> including the CUDA context, and 1.22 GB of system RAM.</p>
+
+    <p>The installer offers an optional step that recompiles each model for the
+    GPU it finds. This has to happen on the target machine: a compiled engine is
+    locked to the architecture that built it, so shipping them prebuilt would
+    produce files that simply fail to load on any other card.</p>
+  </div>
+
+  <figure>
+    <div class="fig-title">Optional GPU compilation, measured before and after</div>
+    <div class="fig-sub">Milliseconds per inference on a GTX 1660 SUPER. Lower is better</div>
+    <div class="legend">
+      <span><i style="background:var(--series-1)"></i>Standard weights</span>
+      <span><i style="background:var(--series-3)"></i>Compiled for this GPU</span>
+    </div>
+    <div class="chart" id="c-trt"></div>
+    <div class="cap"><b>Accuracy is unchanged, and that is verified rather than
+    assumed.</b> Each compiled model is diffed against the original before being
+    installed; one that disagrees is discarded. Measured through the live
+    detector: max deviation 0.000026 over 150 frames, and <b>zero verdict changes</b>
+    at the deployed threshold. Without that guarantee, every threshold in the
+    config would quietly mean two different things depending on whether a
+    compiled model happened to load.</div>
+  </figure>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">08</span><h2>Answers to the questions you will be asked</h2></div>
+  <div class="col">
+
+    <h3>"Why not just use a bigger model?"</h3>
+    <p>Because every accuracy gain in this project came from data, not capacity —
+    see §6. Four separate fine-tuning runs peaked at epoch 1, 2, 2 and 4 before
+    drifting, and the most recent day-plus-night retrain peaked at <strong>epoch 1
+    and never beat it across seven epochs</strong>. The models converge almost
+    immediately; the remaining error is not something more parameters or more
+    epochs reach.</p>
+
+    <h3>"Your violence accuracy is 95% — why is robbery only 65%?"</h3>
+    <p>They are not the same measurement. The 95% is a <em>detection rate for
+    events</em> on continuous footage — did an alert fire during the incident. The
+    65.3% is <em>per-clip recall</em> across eight scenes. On the comparable
+    per-clip measure the violence model scores 91.4% recall, and it has an order
+    of magnitude more training data behind it.</p>
+
+    <h3>"Why is vandalism in the system at all if it is disabled?"</h3>
+    <p>Because the measurement is the contribution. The class is off, with both
+    failure modes recorded in <code>config.json</code> next to the switch, and a
+    documented route to enabling it. A negative result that is written down is
+    reusable; one that is quietly deleted is not.</p>
+
+    <h3>"How do you know the model is not just memorising cameras?"</h3>
+    <p>Splits are by source video, never by clip, so no scene appears on both
+    sides. For robbery, the negatives come from the same videos as the positives,
+    so camera identity carries no label information at all. For violence, the
+    holdout cameras were checked frame by frame against the training set — and
+    where a <em>venue</em> overlaps, §2 says so and points at the flyover as the
+    clean figure instead.</p>
+
+    <h3>"What would you do next?"</h3>
+    <p>Multiple Instance Learning, in the Sultani formulation — video-level labels
+    over 32 segments with a ranking loss. It removes the need for temporal
+    annotation, which is the actual bottleneck: it would take robbery from 43 to
+    roughly 400 source videos and vandalism from 18 to about 100. Every other
+    lever in §6 has already been pulled and lost.</p>
+
+    <div class="note"><b>The data for this is already on disk.</b> MIL trains on
+    <em>untrimmed</em> videos with a single label each — which is exactly what
+    UCF-Crime ships as, and what this project already downloaded and then spent
+    considerable effort cutting into hand-annotated clips. The 43 robbery sources
+    are 43 because that is how many survived manual annotation; the full category
+    is roughly ten times that. Nothing new needs collecting.</div>
+  </div>
+
+  <h3 style="margin-top:26px;">Where to get it</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>What</th><th>Where</th><th>Why this one</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>Sultani et al., 2018</b><br><span class="meta">Real-world Anomaly Detection in Surveillance Videos (CVPR)</span></td>
+        <td class="mono">arxiv.org/abs/1801.04264<br>github.com/WaqasSultani/<wbr>AnomalyDetectionCVPR2018</td>
+        <td>The original MIL ranking-loss formulation, and the paper that introduced UCF-Crime itself. Start here — the method is simple enough to reimplement.</td>
+      </tr>
+      <tr>
+        <td><b>RTFM</b><br><span class="meta">Tian et al., ICCV 2021</span></td>
+        <td class="mono">arxiv.org/abs/2101.10030<br>github.com/tianyu0207/RTFM</td>
+        <td>The standard modern baseline on UCF-Crime; feature-magnitude selection fixes MIL's weakness on subtle anomalies. This is the number other papers compare against.</td>
+      </tr>
+      <tr>
+        <td><b>MGFN</b><br><span class="meta">Chen et al., AAAI 2023</span></td>
+        <td class="mono">arxiv.org/abs/2211.15098<br>github.com/carolchenyx/MGFN.</td>
+        <td>Magnitude-contrastive; competitive with RTFM and often easier to train on a small GPU.</td>
+      </tr>
+      <tr>
+        <td><b>UMIL</b><br><span class="meta">Unbiased MIL, CVPR 2023</span></td>
+        <td class="mono">github.com/ktr-hubrt/UMIL</td>
+        <td>Directly targets the context bias this project fought by hand — the "indoor = violent" problem that forced UCF-Crime's violence half to be excluded.</td>
+      </tr>
+      <tr>
+        <td><b>WSAD collection</b></td>
+        <td class="mono">github.com/Minqi824/WSAD</td>
+        <td>Curated index of weakly-supervised anomaly detection work; the fastest way to see what has already been tried.</td>
+      </tr>
+      <tr>
+        <td><b>UCF-Crime, untrimmed</b></td>
+        <td class="mono">crcv.ucf.edu/projects/real-world/</td>
+        <td>Already downloaded for this project. MIL wants the full-length videos, not the clips.</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <div class="col">
+    <p class="meta">arXiv identifiers are from memory — verify each before citing
+    in the paper. The GitHub paths are the ones to search on if a link has moved.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Scripts backing every figure: <span class="mono">sweep_operating_point.py</span>,
+  <span class="mono">score_spliced_recall.py</span>, <span class="mono">build_spliced_recall_set.py</span>,
+  <span class="mono">eval_test_split.py</span>, <span class="mono">measure_vandalism_rule.py</span>,
+  <span class="mono">measure_object_scale.py</span>, <span class="mono">check_holdout_overlap.py</span>,
+  <span class="mono">build_property_crime_manifest.py</span>, <span class="mono">optimize_weights.py</span>.
+  Narrative and derivations in <span class="mono">docs/progress_report_violence_detection.md</span> §§27–32
+  and <span class="mono">docs/detection_performance_report.md</span>.</p>
+</footer>
+
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+/* Small SVG chart layer. Data-driven rather than hand-authored so the numbers
+   in the markup above and the marks below cannot drift apart. */
+const NS = "http://www.w3.org/2000/svg";
+const tip = document.getElementById("tip");
+
+function mk(tag, attrs = {}, text) {
+  const n = document.createElementNS(NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text != null) n.textContent = text;
+  return n;
+}
+function svgRoot(host, w, h) {
+  const s = mk("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h, role: "img" });
+  host.appendChild(s);
+  return s;
+}
+function hover(node, label) {
+  node.classList.add("hot");
+  node.addEventListener("pointerenter", (e) => {
+    tip.textContent = label;
+    tip.classList.add("on");
+    move(e);
+  });
+  node.addEventListener("pointermove", move);
+  node.addEventListener("pointerleave", () => tip.classList.remove("on"));
+  function move(e) {
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+    tip.style.top = (e.clientY - tip.offsetHeight - 10) + "px";
+  }
+  // Keyboard reachability: the table views carry the same data, but a focusable
+  // mark keeps the chart itself navigable rather than mouse-only.
+  node.setAttribute("tabindex", "0");
+  node.setAttribute("role", "img");
+  node.setAttribute("aria-label", label.replace(/\n/g, ", "));
+}
+
+/* ---- grouped/simple bar chart, horizontal ---- */
+function barsH(hostId, rows, opts = {}) {
+  const host = document.getElementById(hostId);
+  const w = 720, rowH = opts.rowH || 44, padT = 8, padB = 26;
+  const labW = opts.labW || 148, right = 64;
+  const h = padT + rows.length * rowH + padB;
+  const s = svgRoot(host, w, h);
+  const max = opts.max || Math.max(...rows.map((r) => r.v)) * 1.15;
+  const x0 = labW, plotW = w - labW - right;
+
+  for (let i = 0; i <= 4; i++) {
+    const x = x0 + (plotW * i) / 4;
+    s.appendChild(mk("line", { x1: x, y1: padT, x2: x, y2: h - padB, class: "gridl" }));
+    s.appendChild(mk("text", { x, y: h - padB + 15, class: "tick", "text-anchor": "middle" },
+      Math.round((max * i) / 4) + (opts.unit || "")));
+  }
+  rows.forEach((r, i) => {
+    const y = padT + i * rowH + rowH / 2;
+    const bw = Math.max(2, (r.v / max) * plotW);
+    s.appendChild(mk("text", { x: labW - 12, y: y + 4, class: "alabel", "text-anchor": "end" }, r.k));
+    const bar = mk("rect", {
+      x: x0, y: y - 9, width: bw, height: 18, rx: 4,
+      fill: r.color || "var(--series-1)",
+    });
+    hover(bar, `${r.k}\n${r.v}${opts.unit || ""}${r.note ? "\n" + r.note : ""}`);
+    s.appendChild(bar);
+    s.appendChild(mk("text", { x: x0 + bw + 9, y: y + 4, class: "dlabel" },
+      r.v + (opts.unit || "")));
+  });
+  s.appendChild(mk("line", { x1: x0, y1: padT, x2: x0, y2: h - padB, class: "axis" }));
+}
+
+/* ---- line chart, multi-series, single y-axis ---- */
+function lines(hostId, xs, series, opts = {}) {
+  const host = document.getElementById(hostId);
+  const w = 720, h = opts.h || 280;
+  const padL = 46, padR = 58, padT = 12, padB = 40;
+  const s = svgRoot(host, w, h);
+  const yMax = opts.yMax != null ? opts.yMax : 100, yMin = 0;
+  const px = (i) => padL + (i * (w - padL - padR)) / (xs.length - 1);
+  const py = (v) => h - padB - ((v - yMin) / (yMax - yMin)) * (h - padT - padB);
+
+  for (let t = 0; t <= 4; t++) {
+    const v = yMin + ((yMax - yMin) * t) / 4, y = py(v);
+    s.appendChild(mk("line", { x1: padL, y1: y, x2: w - padR, y2: y, class: "gridl" }));
+    s.appendChild(mk("text", { x: padL - 9, y: y + 4, class: "tick", "text-anchor": "end" },
+      Math.round(v) + (opts.unit || "")));
+  }
+  xs.forEach((x, i) => s.appendChild(mk("text",
+    { x: px(i), y: h - padB + 18, class: "tick", "text-anchor": "middle" }, x)));
+  if (opts.xTitle) s.appendChild(mk("text",
+    { x: (padL + w - padR) / 2, y: h - 4, class: "alabel", "text-anchor": "middle" }, opts.xTitle));
+
+  series.forEach((ser) => {
+    const d = ser.v.map((v, i) => `${i ? "L" : "M"}${px(i)},${py(v)}`).join(" ");
+    s.appendChild(mk("path", { d, fill: "none", stroke: ser.color, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    ser.v.forEach((v, i) => {
+      // 2px surface ring so overlapping series stay separable where they cross
+      const c = mk("circle", { cx: px(i), cy: py(v), r: 4.5, fill: ser.color,
+        stroke: "var(--panel)", "stroke-width": 2 });
+      hover(c, `${ser.name}\n${opts.xTitle || "x"} ${xs[i]}\n${v}${opts.unit || ""}`);
+      s.appendChild(c);
+    });
+    const last = ser.v.length - 1;
+    s.appendChild(mk("text", { x: px(last) + 10, y: py(ser.v[last]) + 4,
+      class: "dlabel", fill: ser.color }, ser.short || ser.name));
+  });
+  s.appendChild(mk("line", { x1: padL, y1: h - padB, x2: w - padR, y2: h - padB, class: "axis" }));
+}
+
+/* ---- small multiples: two stacked panels sharing one x-axis ---- */
+function twoPanel(hostId, xs, top, bottom, opts = {}) {
+  const host = document.getElementById(hostId);
+  // padT/gap carry the panel titles. They used to be 16/34 with the title at
+  // y0-5, which put it one line above the topmost y-tick and slightly on top
+  // of it -- visible as "40" printed through "Events detected". The title now
+  // gets a full line of its own.
+  const w = 720, ph = 118, gap = 46, padL = 52, padR = 20, padT = 28;
+  const h = padT + ph * 2 + gap + 34;
+  const s = svgRoot(host, w, h);
+  const px = (i) => padL + (i * (w - padL - padR)) / (xs.length - 1);
+
+  [[top, padT], [bottom, padT + ph + gap]].forEach(([p, y0]) => {
+    const py = (v) => y0 + ph - (v / p.max) * ph;
+    s.appendChild(mk("text", { x: 0, y: y0 - 13, class: "alabel" }, p.title));
+    [0, p.max / 2, p.max].forEach((v) => {
+      s.appendChild(mk("line", { x1: padL, y1: py(v), x2: w - padR, y2: py(v), class: "gridl" }));
+      s.appendChild(mk("text", { x: padL - 9, y: py(v) + 4, class: "tick", "text-anchor": "end" },
+        v + (p.unit || "")));
+    });
+    xs.forEach((x, i) => {
+      const bw = 34, cx = px(i);
+      const yv = py(p.v[i]);
+      const bar = mk("rect", { x: cx - bw / 2, y: yv, width: bw, height: y0 + ph - yv,
+        rx: 4, fill: p.colors ? p.colors[i] : "var(--series-1)" });
+      hover(bar, `${p.title}\n${opts.xTitle || ""} ${x}\n${p.v[i]}${p.unit || ""}`);
+      s.appendChild(bar);
+      s.appendChild(mk("text", { x: cx, y: yv - 7, class: "dlabel", "text-anchor": "middle" },
+        p.v[i] + (p.unit || "")));
+    });
+    s.appendChild(mk("line", { x1: padL, y1: y0 + ph, x2: w - padR, y2: y0 + ph, class: "axis" }));
+  });
+  xs.forEach((x, i) => s.appendChild(mk("text",
+    { x: px(i), y: h - 16, class: "tick", "text-anchor": "middle" }, x)));
+  if (opts.xTitle) s.appendChild(mk("text",
+    { x: (padL + w - padR) / 2, y: h - 1, class: "alabel", "text-anchor": "middle" }, opts.xTitle));
+}
+
+/* ---- grouped bars, two series ---- */
+function grouped(hostId, rows, opts = {}) {
+  const host = document.getElementById(hostId);
+  const w = 720, rowH = 52, padT = 8, padB = 28, labW = 170, right = 60;
+  const h = padT + rows.length * rowH + padB;
+  const s = svgRoot(host, w, h);
+  const max = Math.max(...rows.flatMap((r) => [r.a, r.b])) * 1.2;
+  const x0 = labW, plotW = w - labW - right;
+  for (let i = 0; i <= 4; i++) {
+    const x = x0 + (plotW * i) / 4;
+    s.appendChild(mk("line", { x1: x, y1: padT, x2: x, y2: h - padB, class: "gridl" }));
+    s.appendChild(mk("text", { x, y: h - padB + 15, class: "tick", "text-anchor": "middle" },
+      (max * i / 4).toFixed(0) + " ms"));
+  }
+  rows.forEach((r, i) => {
+    const yTop = padT + i * rowH + 8;
+    s.appendChild(mk("text", { x: labW - 12, y: yTop + 17, class: "alabel", "text-anchor": "end" }, r.k));
+    [["a", "var(--series-1)", 0, "Standard"], ["b", "var(--series-3)", 17, "Compiled"]]
+      .forEach(([key, color, dy, name]) => {
+        const bw = Math.max(2, (r[key] / max) * plotW);
+        // 2px surface gap between the paired bars
+        const bar = mk("rect", { x: x0, y: yTop + dy, width: bw, height: 15, rx: 4, fill: color });
+        hover(bar, `${r.k} — ${name}\n${r[key].toFixed(1)} ms`);
+        s.appendChild(bar);
+        s.appendChild(mk("text", { x: x0 + bw + 8, y: yTop + dy + 12, class: "dlabel" },
+          r[key].toFixed(1)));
+      });
+    s.appendChild(mk("text", { x: w - right + 6, y: yTop + 21, class: "dlabel",
+      fill: "var(--ok)" }, r.gain + "×"));
+  });
+  s.appendChild(mk("line", { x1: x0, y1: padT, x2: x0, y2: h - padB, class: "axis" }));
+}
+
+/* ---- range plot: three bands on one scale ---- */
+function ranges(hostId, rows) {
+  const host = document.getElementById(hostId);
+  const w = 720, rowH = 58, padL = 190, padR = 40, padT = 14, padB = 42;
+  const h = padT + rows.length * rowH + padB;
+  const s = svgRoot(host, w, h);
+  const max = 65, plotW = w - padL - padR;
+  const px = (v) => padL + (v / max) * plotW;
+  for (let v = 0; v <= 60; v += 10) {
+    s.appendChild(mk("line", { x1: px(v), y1: padT, x2: px(v), y2: h - padB, class: "gridl" }));
+    s.appendChild(mk("text", { x: px(v), y: h - padB + 16, class: "tick", "text-anchor": "middle" }, v + "%"));
+  }
+  // The blind region from the scale-degradation chart, drawn as context
+  s.appendChild(mk("rect", { x: px(0), y: padT, width: px(15) - px(0), height: h - padT - padB,
+    fill: "var(--critical)", opacity: 0.09 }));
+  s.appendChild(mk("text", { x: px(7.5), y: padT + 13, class: "tick", "text-anchor": "middle",
+    fill: "var(--critical)" }, "blind"));
+
+  rows.forEach((r, i) => {
+    const y = padT + i * rowH + rowH / 2 + 4;
+    s.appendChild(mk("text", { x: padL - 14, y: y + 4, class: "alabel", "text-anchor": "end" }, r.k));
+    const bar = mk("rect", { x: px(r.lo), y: y - 10, width: px(r.hi) - px(r.lo), height: 20,
+      rx: 5, fill: r.color, opacity: r.ghost ? 0.42 : 1 });
+    hover(bar, `${r.k}\n${r.lo}% – ${r.hi}% of frame height${r.note ? "\n" + r.note : ""}`);
+    s.appendChild(bar);
+    s.appendChild(mk("text", { x: px(r.hi) + 10, y: y + 4, class: "dlabel" }, `${r.lo}–${r.hi}%`));
+    if (r.med != null) {
+      s.appendChild(mk("line", { x1: px(r.med), y1: y - 14, x2: px(r.med), y2: y + 14,
+        stroke: "var(--ink)", "stroke-width": 2 }));
+    }
+  });
+  s.appendChild(mk("text", { x: (padL + w - padR) / 2, y: h - 6, class: "alabel",
+    "text-anchor": "middle" }, "person height as % of frame height"));
+}
+
+/* ======================= render ======================= */
+
+// §2 confirmation tradeoff — two panels, never one dual axis
+twoPanel("c-cons", ["1", "2", "3", "4"],
+  { title: "Events detected, of 40", max: 40, unit: "",
+    v: [38, 38, 38, 36],
+    colors: ["var(--series-1)", "var(--series-1)", "var(--ok)", "var(--critical)"] },
+  { title: "False alarms per hour", max: 50, unit: "",
+    v: [49, 32, 17, 9],
+    colors: ["var(--critical)", "var(--series-2)", "var(--ok)", "var(--series-3)"] },
+  { xTitle: "consecutive confirmations required" });
+
+// §2 per-camera
+barsH("c-cam", [
+  { k: "agdao_market", v: 0, color: "var(--ok)", note: "venue also appears in training" },
+  { k: "outside Lyn's", v: 6, color: "var(--ok)", note: "venue also appears in training" },
+  { k: "agdao_flyover (PTZ)", v: 45, color: "var(--critical)", note: "no training camera at this venue — the clean figure" },
+], { unit: "", max: 50, labW: 170 });
+
+// §2 scale degradation
+lines("c-scale", ["37%", "30%", "22%", "19%", "15%", "9%"],
+  [{ name: "Detection rate", short: "detected", color: "var(--series-1)",
+     v: [100, 85, 62.5, 55, 17.5, 0] }],
+  { unit: "%", xTitle: "person height (% of frame)" });
+
+// §3 robbery sweep
+lines("c-rob", ["0.30", "0.50", "0.60", "0.70", "0.80", "0.90"], [
+  { name: "Recall", short: "recall", color: "var(--series-1)", v: [91.8, 79.6, 71.4, 65.3, 57.1, 44.9] },
+  { name: "Precision", short: "precision", color: "var(--series-2)", v: [55.6, 62.9, 72.9, 86.5, 96.6, 100] },
+  { name: "False-positive rate", short: "FPR", color: "var(--series-3)", v: [40, 25.6, 14.4, 5.6, 1.1, 0] },
+], { unit: "%", xTitle: "decision threshold", h: 300 });
+
+// §4 vandalism
+barsH("c-vand", [
+  { k: "Rule — fired on vandalism", v: 0, color: "var(--critical)", note: "0 of 40 clips" },
+  { k: "Rule — Sign detections", v: 0, color: "var(--critical)", note: "0 across 4,800 frames" },
+  { k: "Model — accuracy", v: 70.3, color: "var(--series-2)", note: "below the baseline below" },
+  { k: "Always-guess-vandalism", v: 78.4, color: "var(--ink-3)", note: "the majority-class baseline" },
+  { k: "Model — false-positive rate", v: 87.5, color: "var(--critical)", note: "fires on 7 of 8 normal clips" },
+], { unit: "%", max: 100, labW: 200 });
+
+// §5 subject size
+ranges("c-size", [
+  { k: "Assumed by the plan", lo: 6, hi: 12, color: "var(--critical)", ghost: true,
+    note: "inside the blind region — this drove the whole architecture debate" },
+  { k: "Training clips", lo: 24, hi: 60, med: 37, color: "var(--series-1)", note: "median 37%" },
+  { k: "Deployment cameras", lo: 21.7, hi: 28.6, color: "var(--ok)",
+    note: "measured on 248 detections across 4 cameras" },
+]);
+
+// §7 compilation
+grouped("c-trt", [
+  { k: "Violence detector", a: 27.6, b: 8.8, gain: "3.24" },
+  { k: "Person / pose", a: 23.6, b: 9.2, gain: "2.56" },
+  { k: "Robbery detector", a: 17.7, b: 10.4, gain: "1.71" },
+  { k: "Weapon / sign", a: 18.6, b: 13.1, gain: "1.43" },
+]);
+</script>

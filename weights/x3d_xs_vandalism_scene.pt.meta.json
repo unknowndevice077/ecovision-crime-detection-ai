@@ -1,0 +1,36 @@
+{
+  "run_name": "vandalism",
+  "arch": "x3d_xs",
+  "clip_frames": 13,
+  "frame_size": 160,
+  "input_repr": "whole_frame",
+  "head_activation": "softmax",
+  "output": "probabilities",
+  "loss": "NLLLoss(log(p))",
+  "inference_contract": "use model output directly; do not apply softmax",
+  "normalization": "(x/255 - 0.45) / 0.225",
+  "manifest": "dataset_manifest_property_crime.json (vandalism class)",
+  "unfreeze_blocks": 2,
+  "train_scenes": 11,
+  "val_scenes": 4,
+  "test_scenes": 3,
+  "clips": 215,
+  "source_videos": 18,
+  "status": "REJECTED FOR DEPLOYMENT",
+  "test_split_results_at_0.5": {
+    "accuracy": 0.703,
+    "recall": 0.862,
+    "precision": 0.781,
+    "fpr": 0.875
+  },
+  "test_split_results_at_0.9": {
+    "accuracy": 0.730,
+    "recall": 0.759,
+    "precision": 0.880,
+    "fpr": 0.375
+  },
+  "majority_class_baseline": 0.784,
+  "why_rejected": "Accuracy at 0.5 (70.3%) is BELOW the 78.4% obtainable by labelling every clip vandalism, so the model carries negative information. It fires on 7 of the 8 normal clips in the test split. Training showed the cause directly: validation accuracy fell 42% -> 33% while training accuracy climbed to 86% -- memorisation of 11 scenes. Even the best threshold (0.9) leaves a 37.5% false-positive rate, i.e. it still fires on 3 of 8 quiet clips.",
+  "caveat": "The test split is THREE scenes and EIGHT negatives. It is simultaneously too small to measure anything reliably and bad at what little it does measure. Neither half of that justifies shipping.",
+  "to_improve": "Scene count, not architecture. Robbery works at 26 training scenes; this fails at 11. Filtering existing corpora cannot help -- the limit is distinct locations and filtering creates none. See docs/vandalism_data_collection.md (~20 filmed outdoor locations) or move to Multiple Instance Learning, which would take the class from 18 to roughly 100 source videos with no new footage."
+}

@@ -182,6 +182,12 @@ def _smooth_and_confirm(prev_ema: float, prev_hits: int, was_confirmed: bool,
 
 
 class X3DViolenceDetector:
+    # What this class actually feeds the model, checked against the
+    # "input_repr" a training run records in its .meta.json sidecar. This
+    # detector crops to one person (see _crop_person); the scene subclass
+    # overrides it to whole_frame.
+    EXPECTED_INPUT_REPR = "person_crop"
+
     def __init__(self, model_path: str = MODEL_PATH, device: str = None,
                  log_path: str = DIAGNOSTIC_LOG_PATH):
         # log_path is parameterised because main.py holds a per-track detector
@@ -220,9 +226,31 @@ class X3DViolenceDetector:
         # logits instead, which is a different computation (Jensen), not a
         # rescaling -- measured on 120 real clips it flipped a verdict at a
         # logit gap of -1.30, nowhere near a floating-point tie.
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        # weights_only=True is explicit rather than left to the default, which
+        # PyTorch is flipping in a future release -- pinning it means the flip
+        # is a no-op here instead of a surprise. These checkpoints are plain
+        # state_dicts (tensors only), so the restricted unpickler handles them.
+        self.model.load_state_dict(
+            torch.load(model_path, map_location=self.device, weights_only=True))
         self.model.to(self.device)
         self.model.eval()
+
+        # Optional TensorRT acceleration, same pattern main.py already uses for
+        # the two YOLO models: prefer a sibling .engine, fall back silently to
+        # the .pt. The torch model above stays loaded regardless -- it is the
+        # fallback, it is what validates the .meta.json geometry below, and at
+        # 11.7 MB the duplication is not worth avoiding.
+        #
+        # Measured on the GTX 1660 SUPER, x3d_xs_violence_scene_corpus_neg:
+        #   batch 1  (scene mode)  27.6 ms -> 9.6 ms   2.86x
+        #   batch 17 (tiled mode) 109.9 ms -> 91.4 ms  1.20x
+        # and the engine's output matched torch to 0.00000 on 8 random clips
+        # with 0 verdict flips, so no threshold in config.json has to move.
+        # The batch-1 gain is the one that matters: scene mode is what ships,
+        # and two detectors (violence + robbery) each pay that cost per check.
+        self._trt = None
+        self._trt_max_batch = 0
+        self._load_engine(model_path)
 
         # Input geometry is a property of the WEIGHTS, not a user preference.
         # config.json can state a frame_size, but it has no way to be right
@@ -252,6 +280,19 @@ class X3DViolenceDetector:
                 print(f"[X3D] weights trained on {repr_} "
                       f"({self.meta.get('run_name','?')}, "
                       f"val_acc {self.meta.get('best_val_acc','?')})")
+                # Geometry above is enforced; representation was previously only
+                # printed. That is the weaker half of the same check: feeding
+                # person crops to whole-frame weights costs no error message and
+                # 5.3 accuracy points, which is how the mismatch described in
+                # SceneViolenceDetector's docstring went unnoticed. A wrong
+                # frame_size is loud; a wrong representation must be too.
+                if repr_ != self.EXPECTED_INPUT_REPR:
+                    print(f"[X3D] *** WARNING: these weights were trained on "
+                          f"{repr_}, but {type(self).__name__} feeds the model "
+                          f"{self.EXPECTED_INPUT_REPR}. Accuracy will be worse "
+                          f"than the checkpoint's reported val_acc, silently. "
+                          f"Point this mode at a {self.EXPECTED_INPUT_REPR} "
+                          f"checkpoint. ***")
         else:
             print(f"[X3D] note: no {meta_path.name} -- cannot verify this checkpoint's "
                   f"input geometry; assuming config.json "
@@ -434,6 +475,71 @@ class X3DViolenceDetector:
 
         return self._cached_result[tid]
 
+    def _load_engine(self, model_path):
+        """Look for a sibling .engine and use it if it works. Never fatal.
+
+        A TensorRT engine is locked to the TensorRT version, GPU architecture
+        and driver it was built against. When any of those move the load
+        raises, and the only correct response is to keep running on the .pt --
+        which is why every failure path here ends in a message rather than an
+        exception. Build one with _scratch/x3d_to_engine.py.
+        """
+        engine_path = Path(str(model_path)).with_suffix(".engine")
+        if self.device.type != "cuda" or not engine_path.exists():
+            return
+        try:
+            import tensorrt as trt
+        except ImportError:
+            print(f"[X3D] {engine_path.name} is present but tensorrt is not "
+                  f"installed in this interpreter -- using the .pt.")
+            return
+        try:
+            runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+            engine = runtime.deserialize_cuda_engine(engine_path.read_bytes())
+            if engine is None:
+                raise RuntimeError("deserialize_cuda_engine returned None")
+            ctx = engine.create_execution_context()
+            # The engine was built with a dynamic batch profile so one file
+            # serves scene mode (batch 1) and tiled mode (batch 17). Read the
+            # ceiling rather than assume it: a batch past the profile is a
+            # hard TensorRT error, and _forward hands those back to torch.
+            _, _, prof_max = engine.get_tensor_profile_shape("clip", 0)
+            self._trt_max_batch = int(prof_max[0])
+            self._trt = (engine, ctx)
+            print(f"[X3D] TensorRT engine loaded: {engine_path.name} "
+                  f"(batch 1-{self._trt_max_batch})")
+        except Exception as e:
+            print(f"[X3D] TensorRT engine failed ({engine_path.name}): "
+                  f"{type(e).__name__}: {str(e)[:120]}")
+            print(f"[X3D] Falling back to {Path(model_path).name}. Engines do not "
+                  f"transfer between GPUs or TensorRT versions -- rebuild on "
+                  f"this machine to use one.")
+            self._trt = None
+
+    def _forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        """One model call: TensorRT where it is available, torch otherwise.
+
+        Both paths return the same thing -- an (N, 2) probability tensor, not
+        logits. Verified on 8 random clips: max |delta| 0.00001, 0 verdict
+        flips at threshold 0.5. That equivalence is the point; if it ever
+        stops holding, every threshold in config.json silently means something
+        different depending on whether an engine happened to load.
+        """
+        if self._trt is None or tensor.shape[0] > self._trt_max_batch:
+            with torch.no_grad():
+                return self.model(tensor)
+
+        _engine, ctx = self._trt
+        src = tensor.contiguous()   # named, so it outlives the enqueue below
+        out = torch.empty((src.shape[0], 2), dtype=torch.float32, device=self.device)
+        ctx.set_input_shape("clip", tuple(src.shape))
+        ctx.set_tensor_address("clip", src.data_ptr())
+        ctx.set_tensor_address("prob", out.data_ptr())
+        stream = torch.cuda.current_stream(self.device)
+        ctx.execute_async_v3(stream.cuda_stream)
+        stream.synchronize()
+        return out
+
     def _prepare_clip_array(self, frames_deque: deque) -> np.ndarray:
         """Sample + normalize one buffer into a (C, T, H, W) float32 array,
         everything _run_inference did before the model call. Factored out so
@@ -468,7 +574,7 @@ class X3DViolenceDetector:
             # Verified on 120 real clips: 0 verdict changes. Thresholds OTHER
             # than 0.5 do move, and should -- the old sweep's "0.40" was really
             # testing a true probability of 0.298.
-            outputs = self.model(tensor)
+            outputs = self._forward(tensor)
             violence_prob = float(outputs[0][1])
 
         is_violent = violence_prob >= VIOLENCE_CONFIDENCE_THRESHOLD
@@ -503,7 +609,7 @@ class X3DViolenceDetector:
         batch = torch.from_numpy(np.stack(arrays, axis=0)).float().to(self.device)
 
         with torch.no_grad():
-            outputs = self.model(batch)   # (N, 2) probabilities -- see _run_inference
+            outputs = self._forward(batch)   # (N, 2) probabilities -- see _run_inference
             probs = outputs[:, 1].tolist()
 
         if tid is not None:
@@ -592,6 +698,9 @@ class SceneViolenceDetector(X3DViolenceDetector):
     """
 
     SCENE_TID = -1   # sentinel key into the inherited per-track dicts
+
+    # This class resizes the whole frame; it never crops to a person.
+    EXPECTED_INPUT_REPR = "whole_frame"
 
     def __init__(self, model_path: str = None, device: str = None,
                  threshold: float = None, consecutive: int = None,

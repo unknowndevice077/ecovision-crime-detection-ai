@@ -1,0 +1,31 @@
+{
+ "run_name": "robbery3",
+ "arch": "x3d_xs",
+ "clip_frames": 13,
+ "frame_size": 160,
+ "input_repr": "whole_frame",
+ "head_activation": "softmax",
+ "output": "probabilities",
+ "loss": "NLLLoss(log(p))",
+ "inference_contract": "use model output directly; do not apply softmax",
+ "normalization": "(x/255 - 0.45) / 0.225",
+ "manifest": "dataset_manifest_robbery.json",
+ "unfreeze_blocks": 2,
+ "init_weights": "x3d_xs_violence_scene_corpus_neg.pt",
+ "train_scenes": 26,
+ "val_scenes": 9,
+ "test_scenes": 8,
+ "test_split_results_at_0.7": {
+  "accuracy": 0.842,
+  "recall": 0.653,
+  "precision": 0.865,
+  "fpr": 0.056
+ },
+ "test_split_results_at_0.5": {
+  "accuracy": 0.763,
+  "recall": 0.796,
+  "precision": 0.629,
+  "fpr": 0.256
+ },
+ "caveat": "Measured on 139 clips from EIGHT held-out source videos, not 139 independent samples. Trained on 26 scenes. Do not quote an accuracy from this without the scene count beside it."
+}

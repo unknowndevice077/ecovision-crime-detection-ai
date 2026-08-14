@@ -1,0 +1,66 @@
+{
+  "run_name": "daynight",
+  "arch": "x3d_xs",
+  "clip_frames": 13,
+  "frame_size": 160,
+  "input_repr": "whole_frame",
+  "head_activation": "softmax",
+  "output": "probabilities",
+  "loss": "NLLLoss(log(p))",
+  "inference_contract": "use model output directly; do not apply softmax",
+  "normalization": "(x/255 - 0.45) / 0.225",
+  "manifest": "dataset_manifest_3way_daynight.json",
+  "unfreeze_blocks": 2,
+  "augment": true,
+  "best_val_acc": 0.8779,
+  "best_epoch": 1,
+  "epochs_run": 7,
+  "status": "STAGED, NOT DEPLOYED -- candidate replacement for x3d_xs_violence_scene_corpus_neg.pt",
+
+  "val_acc_caveat": "0.8779 vs the deployed model's 0.8814 made this look like a REGRESSION, and it was reported as one. That was wrong: val is a model-SELECTION split on a different manifest, and the two checkpoints are calibrated differently, so comparing them at one fixed threshold measures calibration rather than quality. Every figure below is from the test split or from real footage instead.",
+
+  "test_split_daynight_manifest": {
+    "clips": 1310,
+    "note": "the daynight manifest's own held-out test split",
+    "at_0.5": { "accuracy": 0.901, "recall": 0.838, "precision": 0.958, "fpr": 0.037 },
+    "at_0.3": { "accuracy": 0.919, "recall": 0.896, "precision": 0.939, "fpr": 0.058 },
+    "at_0.2": { "accuracy": 0.929, "recall": 0.927, "precision": 0.931, "fpr": 0.069 },
+    "deployed_model_same_clips_at_0.5": {
+      "accuracy": 0.918, "recall": 0.904, "precision": 0.931, "fpr": 0.067,
+      "leakage_caveat": "25 of 1247 clips (2.0%) in this split appear in corpus_neg's own training or val data, so the deployed model's numbers here are slightly optimistic. Too small to explain the gap, but it is not a perfectly clean comparison."
+    }
+  },
+
+  "spliced_recall_replay": {
+    "note": "40 held-out violent clips spliced into real Davao night footage, replayed through the shipped state machine at consecutive=3",
+    "at_0.5": { "detected": "38/40", "recall": 0.950, "pad_alarms_per_hr": 3.5 },
+    "at_0.45": { "detected": "39/40", "recall": 0.975, "pad_alarms_per_hr": 7.0 },
+    "at_0.4": { "detected": "39/40", "recall": 0.975, "pad_alarms_per_hr": 10.5 },
+    "deployed_model_at_0.5": { "detected": "38/40", "recall": 0.950, "pad_alarms_per_hr": 20.9 },
+    "reading": "IDENTICAL recall to the deployed model at the deployed operating point, with 6x fewer alarms. This is what rules out 'it is quieter because it is blind'."
+  },
+
+  "real_camera_false_alarms": {
+    "note": "4 held-out cameras, 20 minutes each, threshold 0.5 consecutive 3. Every confirmed alert counted as a false alarm.",
+    "agdao_flyover_ptz": { "deployed": 45.0, "daynight": 6.0 },
+    "agdao_market": { "deployed": 0.0, "daynight": 0.0 },
+    "iloilo_guiez": { "deployed": 0.0, "daynight": 0.0 },
+    "lyns_restaurant": { "deployed": 6.0, "daynight": 12.0 },
+    "total_per_hour": { "deployed": 12.75, "daynight": 4.50 },
+    "honest_reading": "A 2.8x overall reduction driven ENTIRELY by the flyover collapsing 45 -> 6. It is TWICE AS NOISY on outside Lyn's (6 -> 12). Not a uniform win: it trades a small regression on a quiet camera for a large gain on the worst one."
+  },
+
+  "threshold_0.45_measured_and_rejected": {
+    "note": "0.45 looked attractive on the spliced replay (recall 95.0 -> 97.5%), so it was measured on the same 4 real cameras rather than adopted on the replay alone.",
+    "agdao_flyover_ptz": 18.0,
+    "agdao_market": 3.0,
+    "iloilo_guiez": 0.0,
+    "lyns_restaurant": 12.0,
+    "total_per_hour": 8.25,
+    "verdict": "REJECTED. Alarms rise 4.50 -> 8.25/hr (+83%) to buy exactly ONE more detected event out of 40. The spliced set resolves recall to about +/-2.5 points, so a single event IS the resolution limit -- the gain is not distinguishable from noise while the alarm cost is measured and clear. It also breaks a quiet camera: agdao_market goes 0 -> 3/hr, and a camera that never fires is worth more than a marginal recall point."
+  },
+
+  "recommendation": "Deploy as a drop-in at the SAME threshold (0.50) and consecutive (3): recall unchanged at 95.0%, real-camera alarms 12.75 -> 4.50/hr, no config change beyond the model path. Do NOT lower the threshold -- 0.45 was measured and rejected above.",
+
+  "not_deployed_because": "The user asked that the shipping MVP not be replaced yet. config.json still points at x3d_xs_violence_scene_corpus_neg.pt. To adopt: set detection.violence.scene_model_path to weights/x3d_xs_violence_scene_daynight.pt and restart detection."
+}

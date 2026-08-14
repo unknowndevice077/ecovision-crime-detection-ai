@@ -4,7 +4,8 @@ import React, { useState, useMemo } from 'react';
 import {
   ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
   Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
-  Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus, ChevronDown
+  Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus, ChevronDown,
+  Brain, AlertTriangle, Info, RotateCw
 } from 'lucide-react';
 import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
@@ -64,7 +65,30 @@ type PendingLocation = {
   created_at: string;
 };
 
-type Tab = 'directory' | 'approvals' | 'create' | 'cameras' | 'stations';
+type Tab = 'directory' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models';
+
+type ModelStat = {
+  label: string; value: number; unit: string; note?: string; good?: boolean;
+};
+type ModelMetrics = {
+  status: string;
+  headline?: { label: string; value: number; unit: string };
+  stats?: ModelStat[];
+  measured_on?: string;
+  caveat?: string;
+};
+type DetectionModel = {
+  name: string;
+  display_name: string;
+  enabled: boolean;
+  experimental: boolean;
+  threshold: number;
+  consecutive_required: number;
+  model_path: string;
+  weights_present: boolean;
+  metrics?: ModelMetrics;
+  notes?: Record<string, string>;
+};
 
 type Station = { id: string; name: string; barangay_ids: string[]; staff_count: number };
 
@@ -205,6 +229,59 @@ export default function DevteamView() {
   useLiveChannel("*", fetchOverview);
 
   const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  // ── Detection models ──────────────────────────────────────────────────────
+  // Fetched on demand rather than with the overview: config.json changes only
+  // when someone here changes it, so polling it alongside live incident data
+  // would be pure noise.
+  const [models, setModels] = useState<DetectionModel[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelBusy, setModelBusy] = useState<string | null>(null);
+  const [restartPending, setRestartPending] = useState(false);
+  const [confirmEnable, setConfirmEnable] = useState<DetectionModel | null>(null);
+
+  const fetchModels = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/detection-models`, { headers: authHeaders() });
+      if (res.ok) {
+        const d = await res.json();
+        setModels(d.models || []);
+      }
+    } catch { /* leave the previous list up rather than blanking the panel */ }
+    finally { setModelsLoaded(true); }
+  };
+
+  const applyModelChange = async (m: DetectionModel, body: Record<string, unknown>) => {
+    setModelBusy(m.name);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/detection-models/${m.name}`, {
+        method: 'PATCH',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { flash(d.detail || 'Could not save'); return; }
+      await fetchModels();
+      setRestartPending(true);
+      flash(`${m.display_name} ${body.enabled === false ? 'turned off' : 'turned on'} — restart detection to apply`);
+    } catch {
+      flash('Could not reach the server');
+    } finally {
+      setModelBusy(null);
+    }
+  };
+
+  // Turning a measured-bad model ON gets a confirmation step; turning anything
+  // OFF does not. Disabling a detector can only reduce output, so there is
+  // nothing to warn about -- but enabling one whose own numbers say it fires
+  // on 3 of 8 quiet clips should not be a single unguarded click.
+  const requestToggle = (m: DetectionModel) => {
+    if (!m.enabled && (m.experimental || m.metrics?.status === 'disabled')) {
+      setConfirmEnable(m);
+      return;
+    }
+    applyModelChange(m, { enabled: !m.enabled });
+  };
 
   const handleLogout = () => {
     const token = localStorage.getItem('ecoToken');
@@ -466,6 +543,12 @@ export default function DevteamView() {
         <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
         <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
         <TabButton icon={<Radio size={12} />} label="Stations" active={tab === 'stations'} onClick={() => setTab('stations')} badge={stations.length} />
+        <TabButton
+          icon={<Brain size={12} />}
+          label="AI Models"
+          active={tab === 'models'}
+          onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); }}
+        />
       </div>
 
       {/* ================= DIRECTORY TAB ================= */}
@@ -952,6 +1035,165 @@ export default function DevteamView() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {tab === 'models' && (
+        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-4">
+
+          {restartPending && (
+            <div className="flex items-start gap-2.5 border border-[var(--warn)]/30 bg-[var(--warn)]/[0.06] px-4 py-3">
+              <RotateCw size={12} className="text-[var(--warn)] mt-0.5 shrink-0" />
+              <p className="text-[10.5px] leading-relaxed text-[var(--text)]">
+                <span className="text-[var(--warn)] font-bold">Restart required.</span>{' '}
+                Detection reads this configuration once at startup. Your change is saved
+                but will not affect live detection until the AI core restarts.
+              </p>
+            </div>
+          )}
+
+          <p className="text-[10px] leading-relaxed text-[var(--text-2)]">
+            Every figure below was measured on footage the model never trained on.
+            Turning a model off stops its alerts entirely; it does not affect the others.
+          </p>
+
+          {!modelsLoaded ? (
+            <div className="border border-[var(--line)] py-14 text-center">
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">Loading models…</p>
+            </div>
+          ) : models.length === 0 ? (
+            <div className="border border-[var(--line)] py-14 text-center">
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No detection models configured</p>
+            </div>
+          ) : models.map(m => {
+            const bad = m.metrics?.status === 'disabled' || m.experimental;
+            const accent = m.enabled
+              ? (bad ? 'var(--warn)' : 'var(--ok)')
+              : 'var(--text-3)';
+            return (
+              <div key={m.name} className="border border-[var(--line)]">
+
+                {/* header: name, state, switch */}
+                <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+                  <Brain size={13} style={{ color: accent }} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] tracking-[0.12em] uppercase text-[#fff]">{m.display_name}</span>
+                      {m.experimental && (
+                        <span className="text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border border-[var(--warn)]/30 text-[var(--warn)]">
+                          Experimental
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-[var(--text-2)] font-mono truncate mt-0.5">{m.model_path}</p>
+                  </div>
+
+                  <span className="text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border"
+                        style={{ color: accent, borderColor: accent + '40' }}>
+                    {m.enabled ? 'Active' : 'Off'}
+                  </span>
+
+                  <button
+                    onClick={() => requestToggle(m)}
+                    disabled={modelBusy === m.name || (!m.enabled && !m.weights_present)}
+                    title={!m.weights_present ? 'Model file is missing' : (m.enabled ? 'Turn off' : 'Turn on')}
+                    className="relative w-10 h-[18px] shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{ background: m.enabled ? accent : 'var(--panel-2)', border: `1px solid ${m.enabled ? accent : 'var(--line-2)'}` }}
+                  >
+                    <span
+                      className="absolute top-[2px] w-[12px] h-[12px] transition-all"
+                      style={{ left: m.enabled ? '24px' : '2px', background: m.enabled ? 'var(--bg)' : 'var(--text-3)' }}
+                    />
+                  </button>
+                </div>
+
+                {/* measured numbers */}
+                {m.metrics?.stats && (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-y sm:divide-y-0 divide-[var(--panel-2)] border-b border-[var(--line)]">
+                    {m.metrics.stats.map(s => (
+                      <div key={s.label} className="px-4 py-3">
+                        <p className="text-[8.5px] tracking-[0.12em] uppercase text-[var(--text-3)]">{s.label}</p>
+                        <p className="text-[19px] leading-tight mt-1 font-mono tabular-nums"
+                           style={{ color: s.good === false ? 'var(--warn)' : '#fff' }}>
+                          {s.value}<span className="text-[11px] text-[var(--text-2)]">{s.unit}</span>
+                        </p>
+                        {s.note && <p className="text-[9px] leading-snug text-[var(--text-2)] mt-1">{s.note}</p>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* settings + provenance */}
+                <div className="px-4 py-3 space-y-2">
+                  <div className="flex flex-wrap gap-x-6 gap-y-1 text-[9.5px] text-[var(--text-2)] font-mono">
+                    <span>threshold <span className="text-[#fff]">{m.threshold}</span></span>
+                    <span>confirmations <span className="text-[#fff]">{m.consecutive_required}</span></span>
+                    <span>weights {m.weights_present
+                      ? <span className="text-[var(--ok)]">present</span>
+                      : <span className="text-[var(--critical)]">MISSING</span>}</span>
+                  </div>
+                  {m.metrics?.measured_on && (
+                    <p className="text-[9.5px] leading-relaxed text-[var(--text-2)]">
+                      <span className="text-[var(--text-3)]">Measured on </span>{m.metrics.measured_on}
+                    </p>
+                  )}
+                  {m.metrics?.caveat && (
+                    <div className="flex items-start gap-2 pt-1">
+                      <Info size={10} className="text-[var(--text-3)] mt-[2px] shrink-0" />
+                      <p className="text-[9.5px] leading-relaxed text-[var(--text-2)]">{m.metrics.caveat}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* CONFIRM ENABLING A MODEL THAT MEASURED BADLY */}
+      {confirmEnable && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+          <div className="bg-[var(--panel)] border border-[var(--warn)]/30 w-full max-w-md p-6 font-mono">
+            <div className="flex items-center gap-2 mb-4 pb-3 border-b border-[var(--panel-2)]">
+              <AlertTriangle size={14} className="text-[var(--warn)]" />
+              <span className="text-[10px] tracking-[0.15em] uppercase text-[#fff]">
+                Turn on {confirmEnable.display_name}?
+              </span>
+            </div>
+            <p className="text-[10.5px] leading-relaxed text-[var(--text-2)] mb-3">
+              This model did not meet the bar for deployment. Its own measurements:
+            </p>
+            <div className="border border-[var(--line)] divide-y divide-[var(--panel-2)] mb-4">
+              {confirmEnable.metrics?.stats?.map(s => (
+                <div key={s.label} className="flex items-baseline justify-between px-3 py-2">
+                  <span className="text-[9.5px] text-[var(--text-2)]">{s.label}</span>
+                  <span className="text-[11px] tabular-nums"
+                        style={{ color: s.good === false ? 'var(--warn)' : '#fff' }}>
+                    {s.value}{s.unit}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {confirmEnable.metrics?.caveat && (
+              <p className="text-[9.5px] leading-relaxed text-[var(--text-2)] mb-5">
+                {confirmEnable.metrics.caveat}
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmEnable(null)}
+                className="flex-1 py-2.5 text-[10px] tracking-[0.12em] uppercase border border-[var(--line-2)] text-[var(--text)] hover:border-[var(--text-3)]"
+              >
+                Keep it off
+              </button>
+              <button
+                onClick={() => { const m = confirmEnable; setConfirmEnable(null); applyModelChange(m, { enabled: true }); }}
+                className="flex-1 py-2.5 text-[10px] tracking-[0.12em] uppercase border border-[var(--warn)]/40 text-[var(--warn)] hover:bg-[var(--warn)]/10"
+              >
+                Turn on anyway
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

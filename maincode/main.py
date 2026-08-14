@@ -75,6 +75,7 @@ except ImportError:
 from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
 from x3d_violence_detector import (
     X3DViolenceDetector, SceneViolenceDetector, TiledSceneViolenceDetector, VIOLENCE_MODE,
+    MODEL_PATH as TRACK_MODEL_PATH,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -437,7 +438,11 @@ violence_model, weapon_file_name = load_model_with_fallback(
     "weapon_signs.engine", "weapon_signs.pt", "detect", WEIGHTS_DIR
 )
 
-x3d_model_path = os.path.join(WEIGHTS_DIR, "x3d_xs_violence_best.pt")
+# Comes from detection.violence.model_path in config.json, not a literal here.
+# This line used to hardcode weights/x3d_xs_violence_best.pt, which happened to
+# equal the configured value -- so the config key looked like it worked while
+# editing it did nothing. Deploying a new checkpoint is exactly when that bites.
+x3d_model_path = TRACK_MODEL_PATH
 x3d_detector   = X3DViolenceDetector(model_path=x3d_model_path, device=TARGET_DEVICE)
 
 # Scene (whole-frame) violence detection -- see detection.violence.mode.
@@ -491,6 +496,47 @@ if SCENE_MODE_ON:
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
 else:
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (per-track detection)")
+
+# ── Robbery: a trained model, replacing the rule-based placeholder ─────────
+#
+# Same class as the violence scene detector -- SceneViolenceDetector is generic
+# over its checkpoint -- running on the same frames with its own threshold and
+# its own confirmation counter. That independence is the reason robbery is a
+# separate model rather than a fourth softmax class: a robbery involving
+# assault is genuinely BOTH, and one softmax would force the probability to
+# split between them on exactly the clips that matter most.
+#
+# Cost is a second X3D-XS forward on an already-decoded frame, ~8-10 ms on the
+# 1660 SUPER, and only every check_interval frames.
+VANDALISM_ON = bool(sys_config.get("detection", {})
+                    .get("vandalism", {}).get("enabled", False))
+if not VANDALISM_ON:
+    print("🚫 Vandalism: disabled (rule scored 0% recall on 40 labelled "
+          "clips; see config detection.vandalism._why_disabled)")
+
+_ROBBERY_CFG = sys_config.get("detection", {}).get("robbery", {})
+ROBBERY_ON = bool(_ROBBERY_CFG.get("enabled", False))
+robbery_detector = None
+if ROBBERY_ON:
+    try:
+        # Resolved against the REPO ROOT, matching how
+        # x3d_violence_detector.py resolves detection.violence.*model_path.
+        # BASE_DIR is maincode/, so joining there would look one level too deep
+        # and fail only at runtime, on the machine that has the weights.
+        robbery_detector = SceneViolenceDetector(
+            model_path=os.path.normpath(os.path.join(
+                os.path.dirname(BASE_DIR), _ROBBERY_CFG["model_path"])),
+            device=TARGET_DEVICE,
+            threshold=float(_ROBBERY_CFG.get("confidence_threshold", 0.7)),
+            consecutive=int(_ROBBERY_CFG.get("consecutive_required", 3)))
+        print(f"🛍️  Robbery model: {_ROBBERY_CFG['model_path']} "
+              f"@ {_ROBBERY_CFG.get('confidence_threshold', 0.7)}")
+    except Exception as e:
+        # Fail loudly but keep the rest of the system up: a missing robbery
+        # checkpoint must not take violence detection down with it.
+        print(f"⚠️  Robbery model failed to load ({e}); "
+              f"falling back to the rule-based path")
+        ROBBERY_ON = False
 
 print(f"📦 [ENGINE LOADER] Using Pose Pipeline: {pose_file_name}")
 print(f"📦 [ENGINE LOADER] Using Weapon Pipeline: {weapon_file_name}")
@@ -1507,8 +1553,24 @@ track_states, prev_joints, id_last_seen = {}, {}, {}
 robbery_tracker = RobberyTracker()                  
 vandal_states: dict = {}             
 vandal_sweep_history: dict = {}                     
-_vandal_alert_cooldown: dict = {}  
+_vandal_alert_cooldown: dict = {}
 _robbery_alert_cooldown: dict = {}
+
+# PLACEHOLDER confidences for the two RULE-BASED detectors. These are not
+# measured, not calibrated, and not derived from anything -- robbery and
+# vandalism are hand-written geometric rules that either fire or do not, so
+# there is no probability to report. They were literals inline at the two
+# alert sites; naming them here at least stops the numbers reading like model
+# output to somebody skimming the code.
+#
+# They are still WRONG to display. The dashboard renders this field as a
+# confidence percentage, so an operator sees "ROBBERY 89.5%" and reasonably
+# believes the system computed it. Fixing that properly means deciding what the
+# UI should show for a rule-based detector -- "rule-based" rather than a
+# percentage is the honest answer -- which is a product decision, not a code
+# cleanup, so the wire format is deliberately left unchanged here.
+RULE_ROBBERY_PLACEHOLDER_CONF = 0.895
+RULE_VANDALISM_PLACEHOLDER_CONF = 0.84
 
 scene_last_alert_frame = -SCENE_COOLDOWN_FRAMES
 
@@ -1583,6 +1645,13 @@ while _running:
     scene_violent, scene_conf = (False, 0.0)
     if SCENE_MODE_ON:
         scene_violent, scene_conf = scene_detector.update(frame, frame_count)
+
+    # Robbery runs on the same frame, with its own threshold and confirmation
+    # state. Independent of the violence verdict on purpose: a robbery
+    # involving assault should raise both, not compete for one label.
+    robbery_hit, robbery_conf = (False, 0.0)
+    if ROBBERY_ON and robbery_detector is not None:
+        robbery_hit, robbery_conf = robbery_detector.update(frame, frame_count)
 
     res_half_flag = (USE_CUDA and pose_file_name.endswith(".pt"))
     pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, half=res_half_flag)
@@ -1716,17 +1785,34 @@ while _running:
         armed_states    = {t: (track_states[t].state == "ARMED")   for t in ids if t in track_states}
         violence_states = {t: (track_states[t].state == "ASSAULT") for t in ids if t in track_states}
         
+        # The ARMED-person-near-another-person heuristic still runs, but only
+        # as an attribution hint. Whether an alert fires is now the model's
+        # call, and the confidence sent downstream is the model's probability
+        # instead of RULE_ROBBERY_PLACEHOLDER_CONF, a constant with no
+        # derivation behind it.
         robbery_pairs = robbery_tracker.update(ids, boxes, armed_states, violence_states)
-        for pair_key, r_state in robbery_pairs.items():
-            if r_state == "ROBBERY":
-                last_alert = _robbery_alert_cooldown.get(pair_key, -ALERT_COOLDOWN_FRAMES)
-                if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
-                    _robbery_alert_cooldown[pair_key] = frame_count
-                    incident_id = str(uuid.uuid4())[:8]
-                    triggered_alerts_this_frame.append({"id": incident_id, "conf": 0.895, "event": "ROBBERY"})
+        if not ROBBERY_ON:
+            for pair_key, r_state in robbery_pairs.items():
+                if r_state == "ROBBERY":
+                    last_alert = _robbery_alert_cooldown.get(pair_key, -ALERT_COOLDOWN_FRAMES)
+                    if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
+                        _robbery_alert_cooldown[pair_key] = frame_count
+                        incident_id = str(uuid.uuid4())[:8]
+                        triggered_alerts_this_frame.append({"id": incident_id,
+                                                            "conf": RULE_ROBBERY_PLACEHOLDER_CONF,
+                                                            "event": "ROBBERY"})
 
         # ─── VANDALISM FILTER ANALYSIS ───
-        sign_boxes = [w["box"] for w in tracked_weapons if w["name"] == "sign"]
+        # Disabled by default -- see detection.vandalism._why_disabled in
+        # config.json. Measured against 40 labelled outdoor vandalism clips:
+        # fired 0 times, because condition 1 needs a YOLO "sign" box and
+        # weapon_signs.pt produced zero Sign detections in 4,800 frames.
+        # Left in place rather than deleted so it can be re-measured once
+        # filmed data exists (docs/vandalism_data_collection.md).
+        if not VANDALISM_ON:
+            sign_boxes = []
+        else:
+            sign_boxes = [w["box"] for w in tracked_weapons if w["name"] == "sign"]
         _draw_sign_boxes(frame, sign_boxes)
         
         for tid, joints, p_box in zip(ids, kpts, boxes):
@@ -1746,7 +1832,22 @@ while _running:
             if v_state_res == "VANDALISM" and (frame_count - last_alert > ALERT_COOLDOWN_FRAMES):
                 _vandal_alert_cooldown[tid] = frame_count
                 incident_id = str(uuid.uuid4())[:8]
-                triggered_alerts_this_frame.append({"id": incident_id, "conf": 0.84, "event": "VANDALISM"})
+                triggered_alerts_this_frame.append({"id": incident_id,
+                                                    "conf": RULE_VANDALISM_PLACEHOLDER_CONF,
+                                                    "event": "VANDALISM"})
+
+    # ─── ROBBERY MODEL ALERT ───
+    # Outside the pose block, for the same reason scene-mode violence is: the
+    # frame must be classified whether or not YOLO held a track. Robbery in
+    # this dataset is frequently one person at a vehicle, which is exactly the
+    # case a tracker loses.
+    if ROBBERY_ON and robbery_hit:
+        last_alert = _robbery_alert_cooldown.get("__model__", -ALERT_COOLDOWN_FRAMES)
+        if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
+            _robbery_alert_cooldown["__model__"] = frame_count
+            triggered_alerts_this_frame.append({"id": str(uuid.uuid4())[:8],
+                                                "conf": float(robbery_conf),
+                                                "event": "ROBBERY"})
 
     # ─── SCENE-MODE FALLBACK: alert with nobody tracked ───
     # Deliberately OUTSIDE the pose block. This is the whole point of scene

@@ -108,6 +108,8 @@ def run_one(src, det, args):
     n = fires = checks = 0
     was_fired = False
     peak_raw = peak_ema = 0.0
+    alarm_started_at = 0.0
+    alarm_peak = 0.0
     t0 = time.time()
 
     limit = int(args.seconds * fps) if getattr(args, "seconds", None) else None
@@ -163,8 +165,25 @@ def run_one(src, det, args):
             peak_ema = max(peak_ema, ema)
 
         # Count rising edges, not frames -- one incident is one alarm.
+        elapsed_now = n / fps
         if fired and not was_fired:
             fires += 1
+            alarm_started_at = elapsed_now
+            alarm_peak = ema
+            # Printed with a wall clock so it can be matched against what a
+            # person watching the same scene wrote down. The HUD shows the
+            # current state; only a timestamped line survives to be compared
+            # afterwards.
+            print(f"[{time.strftime('%H:%M:%S')}] t={elapsed_now:6.1f}s  "
+                  f"ALARM #{fires} raised   raw={raw:.2f} ema={ema:.2f}",
+                  flush=True)
+        elif fired:
+            alarm_peak = max(alarm_peak, ema)
+        elif was_fired:
+            print(f"[{time.strftime('%H:%M:%S')}] t={elapsed_now:6.1f}s  "
+                  f"  alarm #{fires} cleared after "
+                  f"{elapsed_now - alarm_started_at:.1f}s "
+                  f"(peak ema {alarm_peak:.2f})", flush=True)
         was_fired = fired
 
         elapsed = n / fps
@@ -197,10 +216,16 @@ def run_one(src, det, args):
     }
 
 
-def check_scale(source, roi, seconds=20, device=None):
+def check_scale(source, roi, seconds=20, device=None, show=False):
     """Report person height as a fraction of the analysed frame, against the
     range measured on the training data. Framing, not resolution, is what
-    decides whether this model can work on a given camera."""
+    decides whether this model can work on a given camera.
+
+    show=True draws each detection with its height and a pass/fail colour while
+    sampling. Aiming a camera from a printed summary means adjust, re-run, wait
+    20 seconds, read, repeat; with the window open you just point it until the
+    boxes go green. The numbers printed at the end are identical either way.
+    """
     from ultralytics import YOLO
 
     TRAIN_LO, TRAIN_MED, TRAIN_HI = 0.237, 0.371, 0.600
@@ -232,13 +257,52 @@ def check_scale(source, roi, seconds=20, device=None):
         res = model.predict(frame, imgsz=640, verbose=False,
                             device=device if device else None)
         got = 0
+        vis = frame.copy() if show else None
         if res and res[0].boxes is not None and len(res[0].boxes):
             for b in res[0].boxes.xyxy.cpu().numpy():
-                heights.append((b[3] - b[1]) / H)
+                frac = (b[3] - b[1]) / H
+                heights.append(frac)
                 got += 1
+                if show:
+                    # Green: inside the range the training data actually covers.
+                    # Amber: below it but still detectable. Red: under ~15%,
+                    # where the shrink test measured recall collapsing to 0/40 --
+                    # the camera is effectively blind there and looks identical
+                    # to a quiet street.
+                    if frac >= TRAIN_LO:
+                        col = (0, 220, 0)
+                    elif frac >= 0.15:
+                        col = (0, 190, 255)
+                    else:
+                        col = (0, 0, 255)
+                    x1, y1, x2, y2 = [int(v) for v in b[:4]]
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), col, 2)
+                    cv2.putText(vis, f"{frac*100:.0f}%", (x1, max(y1 - 6, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
         if not got:
             empty += 1
+        if show:
+            if heights:
+                s = sorted(heights)
+                med_so_far = s[len(s)//2]
+                if med_so_far >= TRAIN_LO:
+                    verdict, col = "GOOD - inside training range", (0, 220, 0)
+                elif med_so_far >= 0.15:
+                    verdict, col = "MARGINAL - move closer", (0, 190, 255)
+                else:
+                    verdict, col = "TOO SMALL - model is blind here", (0, 0, 255)
+                hud = f"median {med_so_far*100:.0f}%  (want >={TRAIN_LO*100:.0f}%)  {verdict}"
+            else:
+                hud, col = "no people detected yet", (200, 200, 200)
+            cv2.rectangle(vis, (0, 0), (vis.shape[1], 34), (0, 0, 0), -1)
+            cv2.putText(vis, hud, (8, 23), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, col, 2, cv2.LINE_AA)
+            cv2.imshow("EcoVision scale check  (q/esc to stop)", vis)
+            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                break
     cap.release()
+    if show:
+        cv2.destroyAllWindows()
 
     print(f"\nframes sampled: {frames_seen//10}   with nobody detected: {empty}")
     if not heights:
@@ -340,7 +404,7 @@ def main():
 
     if args.check_scale:
         check_scale(args.source if str(args.source).isdigit() else Path(args.source),
-                    roi, device=args.device)
+                    roi, device=args.device, show=args.show)
         return
 
     if args.tiles > 1:

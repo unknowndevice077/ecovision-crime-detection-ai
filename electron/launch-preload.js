@@ -7,4 +7,7 @@ contextBridge.exposeInMainWorld("launchBridge", {
   onProgress: (cb) => ipcRenderer.on("launch:progress", (_e, pct, label) => cb(pct, label)),
   onStepStatus: (cb) => ipcRenderer.on("launch:step", (_e, step, state) => cb(step, state)),
   onError: (cb) => ipcRenderer.on("launch:error", (_e, msg) => cb(msg)),
+  // One-line summary of preflight.py's verdict: "ok" | "warn" | "fail".
+  // Advisory only -- startup never blocks on it.
+  onPreflight: (cb) => ipcRenderer.on("launch:preflight", (_e, verdict, summary) => cb(verdict, summary)),
 });

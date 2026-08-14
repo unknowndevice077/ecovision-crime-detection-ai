@@ -524,7 +524,7 @@ This is presented as the strongest evidenced configuration to date, **not as a c
 4. Investigate whether **person-crop mode** offers any further benefit now that scene mode's false-alarm problem is substantially addressed — lower priority than before §14, since the original motivating problem is largely resolved.
 5. **Phase 5** — document the final cameras-per-GPU scaling path. Scene mode's cost profile (§9: ~1.92ms/frame, ~17 cameras/GPU) is far better than tiled mode's, which changes the scaling story favorably now that scene mode is the deployed candidate.
 6. Consider a milder scale-augmentation ablation, as before (§10), though now a lower priority given §14.4 found no evidence of a recall cost in the current checkpoint.
-7. **Drive down the 44.3% real-CCTV false-positive rate (§14.8)** — the single highest-priority item, and now known to be the binding constraint rather than recall. The combined retrain (group-clean split + 720 daytime negatives + the non-CCTV violence pool) is the current attempt; it must be evaluated per-source, not in aggregate, and re-validated on daytime footage rather than only on the night clips that produced §14.5's zeros.
+7. **Drive down the 44.3% real-CCTV false-positive rate (§14.8)** — the single highest-priority item, and now known to be the binding constraint rather than recall. **§19 supplies a large part of the answer without retraining**: on held-out night cameras the deployed operating point produces 54.0 false alarms/hour, and moving `scene_confidence_threshold` 0.5 → 0.7 with `scene_consecutive_required` 1 → 3 reduces that to 6.0/hour for 6.9 points of benchmark recall. That is a two-line `config.json` edit and is pending a decision on the recall trade, not further work. The combined retrain (group-clean split + 720 daytime negatives + the non-CCTV violence pool) is the current attempt; it must be evaluated per-source, not in aggregate, and re-validated on daytime footage rather than only on the night clips that produced §14.5's zeros.
 8. **Validate along the untested domain axes before claiming deployability** — at minimum wet-weather footage and a second camera height, given that all three axes tested so far have each broken the model (§18).
 9. **Multi-camera concurrency (§15.5)** — source flexibility is done and tested; running more than one camera per process is not, and it is what separates "works on a camera" from "monitors a barangay."
 
@@ -542,6 +542,1173 @@ The tiled architecture (§9) remains fully implemented and switchable, and its m
 - **Every headline accuracy figure in this report is an aggregate over data sources that behave very differently.** §14.8 measures 91.9% overall and 67.0% on the only real-CCTV source, from the same evaluation run. Wherever a single number appears without a source breakdown, it should be assumed to be benchmark-weighted.
 - **Three separate domain-gap axes have each broken a model that looked finished** — scale (§7), scene realism (§12.4) and lighting/time-of-day (§14.6). Each was invisible until validation was deliberately extended along it. There is no basis for assuming the third is the last; weather, camera height, lens distortion and crowd density are all untested and all plausible.
 - The system's live negative footage carries an **unverified label**: no violence is assumed to have occurred during ordinary capture windows because none was observed, but the clips were not exhaustively reviewed frame by frame. A missed real incident inside a "negative" clip would be training the model to ignore exactly what it exists to detect.
+
+---
+
+## 19. The Operating Point: the Largest Available Improvement, and It Is Free
+
+§17.7 names the real-CCTV false-positive rate as the binding constraint. This section measures it on cameras the model has never seen, and finds that most of it is removable by configuration alone — no retraining, no new data.
+
+### 19.1 Baseline on held-out night cameras
+
+Three YouTube-sourced Philippine street cameras were captured overnight, screened (§19.2), and replayed through the deployed scene-mode checkpoint, 10 minutes each, at both the deployed operating point and one step of extra persistence:
+
+| camera | 0.5 / 1 (**deployed**) | 0.5 / 2 |
+|---|---|---|
+| MncLrf2LsT8 | 12.0 | 6.0 |
+| ooU2gpVTJ8Y | 54.0 | 30.0 |
+| u8CbGedbI08 | **96.0** | 78.0 |
+| **aggregate** | **54.0** (27 alarms / 0.5h) | **38.0** (19 alarms / 0.5h) |
+
+> **Correction (2026-08-13): this table originally mixed two operating points.** It gave the aggregate as **54.0/hour** above per-camera rows of 6.0 / 30.0 / 78.0, which average to 38.0 and cannot produce it. The source file (`baseline_holdout_fa.csv`) records 19 alarms over 0.5 hours = 38.0/hour, and `eval_false_alarms_corpus.py` defaults to `--consecutive 2` — so those rows were 0.5/**2** data presented under a 0.5/1 heading. **The 54.0 aggregate was correct; the row labels were not.**
+>
+> Re-running the measurement explicitly at `--consecutive 1` on the same three cameras confirms it exactly: **27 alarms / 0.5 h = 54.0/hour**. Both columns above are now measured rather than inferred, and the 0.5/1 per-camera figures (12 / 54 / 96) appear here for the first time — the earlier table understated per-camera severity at the deployed setting by roughly half.
+
+Two things follow. First, 54/hour is roughly one alarm every 67 seconds — not deployable unattended; even the more forgiving 0.5/2 setting is one every 95 seconds. Second, and less obvious, the **8× spread between cameras at the deployed setting** (12 to 96, widening to 13× at 0.5/2) means the aggregate is dominated by the worst one. A single global threshold is being asked to serve cameras whose false-alarm behaviour differs by nearly an order of magnitude, which is the strongest evidence yet for per-camera configuration (§17) rather than one tuned number.
+
+One further caveat on the corpus itself: `corpus/holdout_night` contains **four** screened captures, but this baseline covers only three. `2iENQ0dDmqI` is a legitimate holdout camera that was never included in it, so any future aggregate over all four is not directly comparable to the number above. Comparisons between checkpoints must be made on the *same* videos, and the per-video rows exist precisely so that can be checked rather than assumed.
+
+### 19.2 The operating-point curve
+
+`_smooth_and_confirm()` is a pure function of `(prev_ema, prev_hits, was_confirmed, raw_conf)`, and the detector already logs `raw_conf` for every inference. The entire confirmation stage can therefore be replayed offline at any parameter setting — exactly, not approximately — with no GPU. Recall is measured separately by replaying 250 labelled violent clips through the same function.
+
+| threshold / persistence | false alarms/hr | recall | alert latency |
+|---|---|---|---|
+| **0.5 / 1 — deployed** | **54.0** | 91.8% | 0.5s |
+| 0.5 / 2 | 38.0 | 91.8% | 1.0s |
+| 0.7 / 2 | 8.0 | 85.5% | 1.0s |
+| **0.7 / 3 — recommended** | **6.0** | **84.9%** | 1.5s |
+| 0.8 / 4 | 2.0 | 80.5% | 2.0s |
+
+Moving from 0.5/1 to 0.7/3 is a **9× reduction in false alarms for 6.9 points of recall** and one extra second of latency. The offline sweep independently reproduced the directly-measured 38.0/hr figure at 0.5/2, so the replay and the GPU measurement agree.
+
+Recall figures are from the **fixed 159-clip subset** — the only column-comparable one. The "all clips" table is contaminated because short clips physically cannot satisfy a high persistence requirement, so their apparent recall loss is an artefact of clip length rather than a real miss.
+
+**Three limits on how far this can be pushed:**
+
+- **The low rows are statistically empty.** "2.0/hr" means *one alarm in 30 minutes*; the 0.9 threshold row's zeros mean zero. 2/hr cannot be distinguished from 0/hr on this much footage. Only the 54 → 8 range rests on meaningful counts (27 alarms vs 4).
+- **Recall is benchmark recall.** The 250 violent clips are RWF/SCVD, not street CCTV. Recall on Philippine street cameras remains unmeasured, exactly as §18 already states.
+- **The false-alarm side assumes no real violence occurred** in the captured footage. Reasonable for 30 minutes of ordinary street activity, but unverified.
+
+Two measurement defects were found and corrected in the sweep tool itself, both of which had flattered the results: it divided alarm counts by **wall-clock** time (inflating every rate 3.9× when replaying recorded video faster than real time), and quoted persistence in wall seconds, so `need=3` displayed as 0.4s when the true wait is 1.5s. Every figure above is post-correction.
+
+### 19.2b Independent confirmation of the recall cost, on 6× the clips
+
+The recall figures above come from a fixed **159-clip** subset, which §19.2 already flags as the only column-comparable one. That is a small number to hang a deployment decision on, so the threshold half of the change was re-measured from the other direction: the deployed scene checkpoint scored on its own honest test split (`dataset_manifest_3way_negatives.json`, **942 clips**, 471 violent / 471 normal, never touched by training or checkpoint selection), with `eval_test_split.py --dump-probs` producing a full sweep from one inference pass.
+
+| threshold | accuracy | recall | precision | FPR |
+|---|---|---|---|---|
+| 0.1 | 89.7% | 95.3% | 85.7% | 15.9% |
+| 0.2 | 90.4% | 93.8% | 87.9% | 13.0% |
+| 0.3 | 90.3% | 91.5% | 89.4% | 10.8% |
+| 0.4 | 89.9% | 89.4% | 90.3% | 9.6% |
+| **0.5 — deployed** | 90.0% | **87.5%** | 92.2% | **7.4%** |
+| 0.6 | 89.4% | 84.7% | 93.4% | 5.9% |
+| **0.7 — recommended** | 88.0% | **80.3%** | 95.0% | **4.2%** |
+| 0.8 | 86.3% | 76.4% | 95.2% | 3.8% |
+| 0.9 | 83.2% | 68.6% | 97.0% | 2.1% |
+
+**§19.2's estimate holds.** It put the cost of moving to 0.7 at 6.9 points of recall from 159 clips; this puts the threshold component at **7.2 points** (87.5 → 80.3) from 942. Two independent measurements on different data, agreeing within 0.3 points.
+
+**0.7 sits almost exactly at the knee of the curve**, which is an argument for it that does not depend on the live alarm-rate measurement at all:
+
+| step | recall cost | FPR gained |
+|---|---|---|
+| 0.5 → 0.6 | −2.8 | −1.5 |
+| 0.6 → 0.7 | −4.4 | −1.7 |
+| **0.7 → 0.8** | **−3.9** | **−0.4** |
+| 0.8 → 0.9 | −7.8 | −1.7 |
+
+Past 0.7 the trade collapses — 3.9 points of recall for 0.4 points of FPR. Pushing the threshold higher is poor value, and §19.2's separate observation that the low rows are statistically empty says the same thing from the alarm-count side.
+
+This also surfaces an option §19.2 did not consider. **Threshold 0.6** cuts clip-level FPR from 7.4% to 5.9% for only **2.8** points of recall, with accuracy essentially unchanged (90.0 → 89.4). It is a materially gentler step than 0.7 while still moving in the right direction — worth having on the table if 0.7/3 is judged too aggressive for a first deployment.
+
+**Scope, stated precisely:** this measures the *threshold* only. Clip-level FPR is not alarms per hour — the persistence change (`consecutive` 1 → 3) acts on continuous footage, where consecutive inferences are correlated, and is captured by §19.2's replay rather than here. The two measurements are complementary, cover different halves of the same change, and agree on the half they share.
+
+### 19.2c The split those numbers came from was leaking, and fixing it exposed something worse
+
+The table above was measured on `dataset_manifest_3way_negatives.json`'s test split — the manifest the deployed checkpoint was trained on. That manifest has **group-level leakage: 176 of its 277 CCTV-Fights source videos have clips in more than one split**, covering 654 clips. `fight_0123_seg0` in train and `fight_0123_gap0` in test: different bytes, same camera, same scene, often the same people.
+
+`dataset_manifest_3way_grouped.json` contains the identical 6,128 clips and the identical 277 source videos and straddles **none**, so `_negatives` was simply built before the group-aware fix landed. Both record `split_rule: bucket=int(sha256[:8],16)%100`, which describes the *bucketing* but not whether the key was the clip hash or the source video — **so a leaky manifest is indistinguishable from a clean one by its own metadata.** That is why this survived unnoticed through every number derived from it. `check_manifest_group_leakage.py` now tests any manifest directly and runs in the standing check suite.
+
+Re-measuring on the 804 test clips whose entire source video stays in test (138 demoted; test purity verified as zero straddling groups touching test) gave a **higher** score, not a lower one:
+
+| | 942 clips (leaking) | 804 clips (leak-free) |
+|---|---|---|
+| accuracy | 90.0% | **94.0%** |
+| recall | 87.5% | **90.0%** |
+| FPR | 7.4% | **2.0%** |
+
+Leakage inflating a score is the expected direction, so this needed explaining rather than accepting. The 138 demoted clips are **100% CCTV-Fights**, while the surviving 804 are only 48% — removing the contamination also removed the hardest domain, and the two numbers therefore differ in *composition* as well as in leakage. Neither is "the corrected version" of the other.
+
+Because the demoted clips are exactly the difference between two measured confusion matrices, their own scores follow by subtraction (and check out exactly: 71 violent, 67 normal):
+
+| the 138 real-CCTV clips | |
+|---|---|
+| accuracy | **66.7%** |
+| recall | **73.2%** |
+| precision | 65.8% |
+| FPR | **40.3%** |
+
+**73.2% recall / 40.3% FPR are the exact figures quoted inside `group_key()`'s own docstring** as the real-CCTV numbers that "could not be trusted in either direction". This reproduces them independently and identifies precisely which clips produced them.
+
+The conclusion is worse than the leakage alone implied. These clips were **helped** by leakage — the model trained on their siblings — and it still gets only two thirds of them right, with a 40% false-positive rate. The honest reading is that real-CCTV performance is *at best* that, and the aggregate 94.0% is flattering mainly because RWF and SCVD, which are curated and comparatively easy, dominate the surviving test set. This is the same conclusion §17.7 and §14.8 reach from other directions, now with a specific number attached to a specific set of clips.
+
+**What survives for the operating-point decision.** The recall cost of raising the threshold from 0.5 to 0.7 is now measured three ways on three different clip sets: **−6.9** points (§19.2, 159 clips), **−7.2** points (§19.2b, 942 leaking clips), and **−5.2** points (this leak-free 804). The absolute levels move around with the population, as they should; the *delta* is stable at roughly 5–7 points. The recommendation rests on that delta, and the delta holds.
+
+### 19.3 Capture screening caught a camera that would have corrupted the holdout
+
+Of 12 overnight captures, `screen_capture_quality.py` rejected one: **12.45 cuts/minute**, meaning a multiplexed feed switching between several cameras rather than one fixed view. It was in the *holdout* set, which is the quiet way this kind of defect does damage — it would not have poisoned training, it would have poisoned the number reported as honest, since every scene cut is a whole-frame content change a motion-sensitive model can read as an event. Quarantined, not deleted.
+
+---
+
+## 20. Weapon False Positives Are Mostly One Stuck Detection
+
+The weapon detector's false-alarm counts were dominated not by many distinct errors but by **static scene objects re-counted every frame**. Measured box-centre stability across whole clips:
+
+| camera | class | n | centre stdev (fraction of frame) |
+|---|---|---|---|
+| tireshop | Gun | 68 | (0.0209, 0.0111) |
+| newcam2 | Knife | 55 | (0.0386, **0.0000**) |
+| streetview1 | Knife | 16 | (**0.0004**, **0.0003**) |
+
+Inspecting the frames directly — rather than inferring from counts — the tire shop's detector locks onto a **utility pole**, a box 48% of frame width by 100% of frame height, and reports it as a Gun at 0.93 confidence frame after frame. Its "6,438 detections/hour" was one stuck detection re-counted, not thousands of distinct errors.
+
+Two earlier explanations for these detections ("impact wrenches", "vendor knives") were inferences from detection counts and were **both wrong**; looking at the footage disproved them. This is recorded because it is the third instance in this project of a count-based inference failing where a visual check succeeded.
+
+A position-stability filter (`_is_static_scene_object()` in `main.py`, switchable via `config.json`) rejects detections whose box centre stays fixed across a rolling window. Measured removal: **97.4% / 81.0% / 78.1%** on streetview1 / tireshop / barbershop.
+
+**The cost, stated rather than hidden:** a genuinely motionless weapon is suppressed — a knife left on a table, or someone standing very still holding a gun for longer than the window. Two things bound it: the window is a few seconds, and an object that starts moving is released after **3 observations (~30px of travel)**, verified against the shipped function. Note that newcam2, a market, only dropped 23.6% — its knife detections *do* move, consistent with vendors genuinely handling knives. The filter correctly leaves those alone, and a real knife in a market remains a problem this rule cannot and should not solve.
+
+---
+
+## 21. UCF-Crime: Why Most of It Was Rejected
+
+UCF-Crime (95.9 GiB, 1,900 videos) was acquired to supply real continuous CCTV. What it actually yields for this project is much smaller than the headline size suggests, and the reasons are worth recording.
+
+### 21.1 Frame-accurate labels cover only the test split
+
+Frame-level anomaly annotations exist for **290 videos**. The other ~1,600 carry **video-level labels only** — a ten-minute "Fighting" video is labelled violent though the fight is twenty seconds of it. Cutting clips from those would produce ~97% mislabelled positives, teaching the model that the CCTV *look* means violence — the precise failure already recorded at §14.7. Multiple-instance learning is the published method for using them; that is a separate build, not a data-extraction step.
+
+Usable frame-accurate yield: **10 videos / ~7.3 minutes** of violence; 68 videos / ~31.5 minutes across all crime types.
+
+### 21.2 The violent clips are 96% indoor — rejected
+
+1,818 clips were extracted. A contact sheet (one row per source video) was then built and **viewed**, per the standing requirement to inspect data before training it:
+
+| source | clips | setting |
+|---|---|---|
+| Assault006 | **115 (54% of the class)** | indoor shop, one camera |
+| Fighting047 | 27 | indoor auto garage |
+| Fighting003 | 21 | indoor metro station |
+| Assault010 | 16 | indoor dormitory, very dark |
+| Fighting042 | 15 | indoor lobby |
+| **Assault011** | **9** | **outdoor street** |
+| Fighting018 | 5 | indoor corridor |
+| Fighting033 | 4 | underpass |
+| Abuse028 / Abuse030 | 2 | **animal cruelty (RSPCA watermark), no people fighting** |
+
+Only **9 of 214 clips (4%)** are outdoor street violence — the only kind in scope for a streetlight (§0). Meanwhile the UCF *normal* clips sample at roughly **57% outdoor**. Training on both would offer the model a shortcut it would certainly take — *indoor ⇒ violent* — making outdoor violence **harder** to separate. The entire violent half was therefore excluded (`EXCLUDE_DIRS` in the manifest builder, with the measurements recorded inline).
+
+This is a negative result about a dataset, not about the extraction: the pipeline works and the clips are on disk. Recovering data does not make it the right data.
+
+### 21.3 What was kept, and two defects fixed to keep it honestly
+
+**Kept: 900 normal clips** — real continuous CCTV, majority outdoor, day and night, from cameras nothing in this pipeline has seen. As negatives they cannot teach a false positive, and they target §19.1's 54/hour directly. Robbery (541) and vandalism (163) clips are retained on disk but not manifested: this classifier is binary violent/normal, robbery frequently involves no violence, and vandalism involves none by definition.
+
+Two defects had to be fixed before these could be used without corrupting the measurement:
+
+1. **Group-aware splitting.** Split assignment was by content hash, which is correct for byte-identical duplicates but wrong for clips *cut from* a shared source: the 115 clips from Assault006 are different bytes and would have scattered across train/val/test — same scene, same camera, same people on both sides. `group_key()` now buckets UCF clips by source video (12 unit tests, including confirmation that RWF/SCVD/CCTV-Fights/live-capture splits are unchanged so prior numbers stay comparable).
+
+2. **The balance discard.** The builder equalised classes per split by dropping the surplus. Adding 900 negatives therefore produced **930 balance-drops** — the new negatives *displaced* existing ones and the manifest came out *smaller* than before (3,057/3,057 vs 3,283/3,283). More negatives were bought and none were kept. `--train-neg-ratio` now allows the training split to tilt; **val and test remain 50/50**, so accuracy and FPR keep their meaning and stay comparable with every earlier figure.
+
+Resulting manifest (`dataset_manifest_3way_ucf.json`): train 3,057 violent / 3,925 normal, val 643/643, test 655/655. Byte-level leakage 0, group-level leakage 0.
+
+### 21.4 The robbery and vandalism clips have the same defect, for different reasons
+
+Both classes were screened visually before any future use, since the violence class showed that folder labels are not a description of content.
+
+**Robbery (541 clips, 44 source videos).** Dominated by **Shoplifting**, which is indoor retail by nature — shop counters, aisles, electronics displays. The genuinely in-scope material is a smaller outdoor subset: a night car break-in (Stealing058, 51 clips), a gate intrusion (Burglary079, 27), a driveway approach (Robbery050, 15). Beyond the indoor problem, **shoplifting is a different detection problem entirely**: there is no violent motion signature, only a person quietly placing an item into a bag. A motion-based clip classifier such as X3D is the wrong instrument for it regardless of camera placement.
+
+**Vandalism (163 clips, 14 source videos).** Roughly **69% is arson**, not property damage — bright flames and sensor blowout, a visual signature with nothing in common with the graffiti/damage the rule-based detector targets. Fire detection on a streetlight may be a worthwhile capability in its own right, but it is a separate model, not this class. Genuine outdoor property damage amounts to roughly **17 clips** (Vandalism015, and Vandalism028 in which someone climbs on a car). One source (Arson011) is unusable at any scope: a face filling the frame while the camera itself is tampered with.
+
+**The consistent pattern:** UCF-Crime is an *anomaly* dataset, and every crime class in it is dominated by a setting or a signature that does not match an outdoor streetlight — indoor retail for robbery, fire for vandalism, indoor premises for violence. The 900 normal clips remain the one unambiguously valuable component, which is what §21.3's manifest uses.
+
+---
+
+## 22. Motionless Clips Labelled Violent
+
+The UCF review established that folder labels do not describe content. Applying the same scepticism to the datasets already *in* training turned up a defect that had been there the whole time.
+
+### 22.1 The measurement
+
+X3D is a motion classifier. A clip containing no motion cannot demonstrate what violence looks like; the only thing it can teach is that stillness is compatible with the violent label — which is precisely the direction that produces false alarms on an empty street, the system's main outstanding problem at 54 alarms/hour.
+
+`audit_frozen_clips.py` scored mean inter-frame absolute difference (160×96 grayscale, to suppress sensor noise and compression shimmer) over a 1,500-clip sample per label:
+
+| | median motion | frozen (< 0.5) |
+|---|---|---|
+| normal | 0.801 | 528 / 1500 (35.2%) |
+| **violent** | 2.969 | **138 / 1500 (9.2%)** |
+
+Violent clips move 3.7× more, as they should. The 35.2% figure for normals is expected and harmless — a static camera watching an empty street genuinely is still, and those clips are exactly what teaches the model not to alarm. The 9.2% is the problem.
+
+### 22.2 Ruling out the obvious confound first
+
+Mean absolute pixel difference is not scale-free: a dark, low-contrast night clip compresses every difference, so real motion in the dark can score lower than trivial motion in daylight. Reporting these as mislabelled without checking would have been a measurement error dressed up as a data finding. `audit_frozen_confound.py` measured brightness and contrast alongside a contrast-normalised motion score:
+
+| | brightness | contrast | motion / contrast |
+|---|---|---|---|
+| violent, frozen | 96.2 | 56.3 | **0.006** |
+| violent, moving | 99.6 | 60.2 | **0.055** |
+
+Frozen and moving violent clips are equally bright and equally contrasty, and the 9× gap survives normalisation. The metric is reading stillness, not darkness.
+
+### 22.3 What the footage actually shows
+
+Per the standing rule that label claims are verified by viewing, `review_frozen_violent.py` rendered the 20 lowest-motion violent clips. They do not merely lack motion — **most contain no people at all**: empty car parks, an empty covered bicycle shelter, an empty garden path, parked cars. Several also contain a hard scene cut mid-clip (a stairwell becoming a car park).
+
+Most originate from `SCVD_converted_sec_split` — one-second splits of longer SCVD videos, where every second inherits the **video-level** label whether or not anything happens in it. This is the same video-level-label problem that got UCF-Crime rejected in §21, except it was already inside the training set.
+
+Frozen rate by origin, among sampled violent clips:
+
+| origin | frozen |
+|---|---|
+| SCVD_converted | 10/48 (20.8%) |
+| SCVD_converted_sec_split | 55/282 (19.5%) |
+| archive/Complete Dataset | 45/450 (10.0%) |
+| CCTV_Fights_Extracted | 21/210 (10.0%) |
+| CCTVFights_NonCCTV_Extracted | **7/510 (1.4%)** |
+
+The non-CCTV CCTV-Fights extraction — the most recent addition, cut from explicit temporal annotations rather than inherited video labels — is by far the cleanest. That is consistent with the diagnosis: the defect tracks how the labels were assigned, not which dataset they came from.
+
+### 22.4 Status
+
+`build_dataset_manifest_grouped.py` gained `--min-violent-motion` (default **0**, off). Only violent clips are ever filtered. The default path was verified to rebuild `dataset_manifest_3way_ucf.json` byte-identically, so every number measured so far remains valid.
+
+Whether removing these clips actually improves the false-alarm rate is **a hypothesis, not a result.** It is plausible — but so was "UCF violence will help", and that turned out to be wrong on inspection. It gets a controlled run against the unfiltered manifest at the same geometry, and the outcome is reported either way.
+
+### 22.5 The filter creates a measurement trap, and the comparison has to dodge it
+
+Built at `--min-violent-motion 0.5`, `dataset_manifest_3way_ucf_motion.json` drops **378 violent clips (8.7%)** — close to the 9.2% the 1,500-clip sample predicted. The loss is concentrated exactly where the per-origin frozen rates said it would be: Weaponized 956 → 778 (**18.6%**), Fight 3399 → 3199 (5.9%).
+
+The split assignment is stable, as the content-hash rule intends — verified explicitly: **zero clips changed split**, and each filtered split is a strict subset of the unfiltered one (train 6982 → 6730, val 1286 → 1164, test 1310 → 1180).
+
+That stability is what creates the trap. The filter removes violent clips from **val and test as well as train**, so the filtered test split is not the same benchmark — it is the old benchmark **with the hardest cases deleted**. A motionless clip labelled violent is one the model essentially cannot get right, so dropping 130 of them from the test split raises measured accuracy on its own, before any training effect exists. Reporting "filtered manifest scores higher on its own test split" would be measuring the filter, not the model.
+
+The comparison therefore uses two things that cannot be gamed this way:
+
+1. **False alarms/hour on `corpus/holdout_night`** — footage entirely outside every manifest, so no split arithmetic touches it. This is also the metric the project actually cares about.
+2. **Accuracy on the UNFILTERED 1,310-clip test split**, for both models — one fixed benchmark, including the hard clips, scored identically for each.
+
+The same argument applies to **val**, with a smaller consequence. Val is the model-*selection* split, so the filtered run picks its best epoch against a filtered val set (1,164 vs 1,286). That is the right thing to do in practice — you select on the data you believe — but it means the two runs' reported `val_acc` figures are **not comparable to each other**, nor to any other run's.
+
+That is not a hypothetical caution: §24.1 records this exact mistake being made in this report, comparing a 48×224 run's val accuracy against a number from a different manifest. Every `val_acc` in this project is measured against its own manifest's split. Only the two external measurements above compare models honestly. The reference point that *is* trustworthy for the 13×160 model is **88.1% on the shared 1,116-clip test split** (§24.2), because both models were scored on the identical clips.
+
+---
+
+## 23. Zero-Frame Clips From an ffmpeg Failure Mode
+
+`build_dataset_manifest_grouped.py` reported `1 identical files carry BOTH labels`. Tracing it found three 261-byte MP4s decoding to **zero frames**, all cut from source video `fight_0520` — two labelled Fight, one labelled NonFight.
+
+**Cause.** CCTV-Fights' `ground-truth.json` claims a longer duration for that video than the file contains, so every requested cut began past the end of the stream. **ffmpeg exits 0 in that case**, writing a structurally valid MP4 with no frames, so the extractor's `check=True` saw success.
+
+**Why it mattered.** `train_x3d_full.py`'s `load_clip_frames()` returns an all-black clip for a video reporting zero frames, silently — deliberate robustness that here would have fed a blank clip into training under a real label. The label conflict is the only reason it surfaced; had the `gap1` file not existed, the two identical Fight clips would have deduped into one zero-frame **violent** example with nothing to flag it.
+
+**Fixed.** `ffmpeg_extract()` in `extract_cctv_fights_noncctv.py` and `extract_cctv_fights_clips.py` now decodes each cut and requires 8 frames, deleting and raising otherwise. `extract_ucf_crime.py`'s `size > 1024` check was upgraded to a frame count — a byte threshold cannot catch a larger empty file. A size scan across all 10,026 dataset videos confirmed **exactly these three** were affected; they are in `quarantine/empty_clips/` with the write-up, not deleted. `verify_manifest_integrity.py` now checks every manifest entry exists and decodes before any training run.
+
+---
+
+## 24. Negative Result: a Bigger Clip Geometry Did Not Help
+
+X3D-XS is normally trained at longer clips and larger frames than this project uses (13 frames at 160px). The obvious hypothesis was that the small geometry was the accuracy ceiling, so a run at **48 frames × 224px** — 3.7× the frames and 2× the resolution — was given a full 10 epochs.
+
+| epoch | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|
+| val acc | 80.3 | 78.6 | 81.0 | 81.9 | **83.4** | 82.0 | 77.5 |
+
+Best: **83.4%** at epoch 8.
+
+### 24.1 Correction: the first version of this comparison was invalid
+
+This section originally read "the 13×160 run reached 86.6%, so the bigger geometry lost by 3.2 points." **That comparison was not valid, and the 3.2-point figure should be disregarded.**
+
+Every training run in this project reports `val_acc` against *its own* manifest's validation split, and those splits are not the same set:
+
+| checkpoint | val_acc | manifest | val size |
+|---|---|---|---|
+| `3way_nll` | 0.9446 | 3way | 722 |
+| `..._scaleaug_negatives` | 0.8864 | 3way_negatives | 898 |
+| `3way_full` | 0.8656 | 3way_full | 1280 |
+| `geom48x224` | 0.8336 | **3way_clean** | **1100** |
+| `ucf_neg` | 0.8701 | 3way_ucf | 1286 |
+
+The 86.6% came from `3way_full`; the 48×224 run trained and validated on `3way_clean`, whose val split is a strict subset (1,100 of those 1,280 clips). Two different benchmarks. More broadly, **none of the numbers in that column are comparable to each other**, so the apparent decline across runs from 94.5% to 86.6% to 83.4% is substantially a change of benchmark rather than of model quality. This is the same error §22.5 warns about, made in this report before it was written down.
+
+### 24.2 The comparison done properly
+
+`3way_clean` and `3way_full` turn out to share an **identical 1,116-clip test split** (the content-hash split rule is deterministic, so a clip lands in the same bucket in both), and that split is disjoint from both manifests' train and val sets — verified explicitly. So both checkpoints can be scored on one fixed benchmark:
+
+- `x3d_xs_violence_best_geom48x224.pt` — 48 frames × 224px
+- `x3d_xs_violence_best_3way_full.pt` — 13 frames × 160px
+
+evaluated with `eval_test_split.py`, which now takes each checkpoint's geometry from its `.meta.json` sidecar (§25.3 — without that fix the 48×224 model would have been fed 13×160 clips and scored nonsense).
+
+Both scored on the identical 1,116 clips:
+
+| | 48 × 224 | 13 × 160 |
+|---|---|---|
+| accuracy | 81.4% | **88.1%** |
+| recall | 69.5% (TP 388, FN 170) | **92.1%** (TP 514, FN 44) |
+| precision | **91.1%** | 85.2% |
+| FPR | **6.8%** (FP 38) | 15.9% (FP 89) |
+
+**The original conclusion survives, and by a wider margin than the invalid version claimed: 6.7 points of accuracy, not 3.2.**
+
+### 24.3 But "worse" is the wrong word for the shape of it
+
+The two models do not differ the way a good model differs from a bad one. The 48×224 model is dramatically more **conservative**: it gives up 22.6 points of recall and buys back less than half the false-positive rate (6.8% vs 15.9%) and 5.9 points of precision.
+
+That is a description of *where a model sits on its curve*, not automatically of how good the curve is — and both numbers above are taken at `argmax`, i.e. a single threshold of 0.5. A single-point comparison genuinely cannot separate "this model is worse" from "this model is more conservative", which matters here more than usual, because §19 exists entirely to move the operating point around and a 6.8% FPR is very attractive for a system whose main problem is false alarms.
+
+What can be said from one point: **Youden's J** (recall + specificity − 1) is 0.627 for 48×224 against **0.762** for 13×160. A gap that size indicates a genuinely better curve rather than a luckier threshold, so the conclusion stands.
+
+It is not fully settled, and the remaining step is cheap: `eval_test_split.py` now supports `--dump-probs` and prints a nine-point threshold sweep from the probabilities it already computed, so a full curve for both models costs one GPU-minute each once the training queue clears. Until then the claim is "13×160 is better on the evidence available", not "proven dominant at every threshold".
+
+### 24.4 The cost argument is independent and decisive on its own
+
+48 frames at 224px is roughly **13× the decode-and-inference work** of 13×160 per clip — visible directly in this evaluation, where the two models ran on the same CPU over the same 1,116 clips and the larger one took nearly an order of magnitude longer. Training cost about 2× per epoch. For a system whose scaling story is cameras-per-GPU (§ Phase 5), a geometry that costs an order of magnitude more per inference would have to be *much* better to justify itself, and it is not better at all.
+
+**13×160 remains the deployment geometry**, now on measured grounds rather than inherited ones.
+
+---
+
+## 25. Two Ways the Measurements Could Have Been Measuring the Wrong Code
+
+Both of these were found by trying to *prove* an assumption rather than restate it. Neither produced a wrong number that reached this report, but both could have, without any visible symptom.
+
+### 25.1 A stale module was shadowing the shipped detector
+
+`D:\EcoVisionImagesTraining\` contained a **7,801-byte** copy of `x3d_violence_detector.py` dated 7 July, next to the measurement scripts. The shipped module is **43,712 bytes**. Running any script from that directory puts it on `sys.path` first, so the local copy wins.
+
+Most scripts there defend with `sys.path.insert(0, ".../maincode")`. Two did not: **`test_x3d_true_heldout.py`** — the honest held-out evaluator named in this project's verification steps — and `generate_eval_report.py`.
+
+What makes this the dangerous kind of bug: the fossil still defines `X3DViolenceDetector`, the one symbol those two scripts import. The import succeeded. Nothing crashed, nothing warned, and the scripts would have evaluated July-era code while reporting the result as current. A *missing* symbol fails loudly; a stale but present one fails silently.
+
+The scripts that already pinned `maincode` — `eval_false_alarms_corpus.py`, the `phase0_*`/`phase3_*` measurement scripts, `measure_scale_recall*.py`, `compare_modes.py` — resolved correctly all along, and additionally use `SceneViolenceDetector`/`TiledSceneViolenceDetector`, which the fossil does not contain and could not have supplied. **Those results stand.**
+
+Fixed: both scripts now pin `maincode` first with the reason recorded inline; the fossil is in `quarantine/stale_module/` with a write-up; `check_stale_detector_copy.py` verifies both conditions on demand.
+
+### 25.2 The operating-point sweep used a copy of the FSM, kept in sync by a comment
+
+`sweep_operating_point.py` reimplements `_smooth_and_confirm()` so the operating point can be replayed from recorded confidences with no GPU — the design that made the whole threshold × persistence curve affordable. Its comment read: *"Mirrors maincode/x3d_violence_detector.py::_smooth_and_confirm. If that changes, this must change."*
+
+A comment is not a mechanism, and the exposure is total: **every false-alarms-per-hour figure in §19, including the 54/hr baseline and the 6/hr recommendation, came out of the copy rather than the original.** Any drift would mean those numbers describe a system that was never deployed.
+
+`test_sweep_matches_shipped_fsm.py` now drives both implementations with identical confidence traces — ramps, alternating spikes, values sitting inside the release-hysteresis band, values straddling each threshold by ±0.001, and randomised sequences — across all 7 thresholds × 5 persistence values, and requires identical `(confirmed, ema, hits)` at every step. It also checks the default-argument path the three live call sites depend on, and the cold-start rule that seeds the EMA from the first reading instead of blending against zero.
+
+Result: **51,100 transitions compared, zero mismatches.** The §19 operating-point numbers are confirmed to describe the code that actually ships.
+
+### 25.3 The test-split evaluator ignored the checkpoint's input geometry
+
+`maincode/x3d_violence_detector.py` has treated a checkpoint's `.meta.json` sidecar as authoritative over `config.json` for some time, because a wrong `frame_size` costs accuracy with nothing to point at. `eval_test_split.py` — which produces the honest test-split accuracy figures — had no such check. It builds `ViolenceClipDataset`, which calls `load_clip_frames()` with `num_frames=None, size=None`, resolving `train_x3d_full`'s module globals at call time: **13 frames at 160px, always**.
+
+This was a live near-miss. The 48×224 run in §24 had just finished; evaluating that checkpoint with this script would have fed **13×160 clips to weights trained at 48×224** and printed an accuracy that looks entirely real. The failure is silent in both directions — nothing in the tensor shapes objects, because the model accepts either.
+
+Fixed: the script now reads the sidecar, adopts the checkpoint's geometry (announcing the override), and **refuses to run without one** unless `--allow-missing-meta` is passed. Verified both ways — the refusal fires on `x3d_xs_violence_best.pt`, which has no sidecar, and the override correctly reads 48f × 224px from the geometry run's sidecar against the 13f × 160px default.
+
+`torch.load` in the same script was also pinned to `weights_only=True`, matching §23's change elsewhere.
+
+---
+
+## 26. Real-CCTV Negatives Halve the False-Alarm Rate
+
+§21 rejected UCF-Crime's violence classes after visual review and kept only its **900 normal clips** — real continuous CCTV, roughly 57% outdoor street, day and night, on cameras nothing in this pipeline had seen. §22 flagged that this was a hypothesis, not a result, and owed a controlled run.
+
+`ucf_neg` is that run: the same proven 13×160 geometry, the same initialisation weights, the same unfreeze depth, differing from its predecessor **only** in the manifest. It early-stopped at epoch 8 with its best at epoch 2 (val 87.0%) — converging in two epochs and then memorising, which is what fine-tuning an already-converged checkpoint on modest extra data looks like.
+
+Per §24.1, that 87.0% says nothing on its own. The measurement that matters is false alarms on held-out night footage, scored against the deployed checkpoint on **identical video** at the **deployed** 0.5/1 operating point, one decode feeding both models:
+
+| | deployed baseline | `ucf_neg` | change |
+|---|---|---|---|
+| **three baseline cameras** (§19.1) | 54.0/hr (27 alarms) | **26.0/hr (13)** | **−51.9%** |
+| all four holdout cameras | 76.5/hr (51 alarms) | **27.0/hr (18)** | **−64.7%** |
+
+Per camera, on the four-camera set:
+
+| camera | baseline | `ucf_neg` |
+|---|---|---|
+| 2iENQ0dDmqI | 144.0 | **30.0** |
+| ooU2gpVTJ8Y | 54.0 | **6.0** |
+| u8CbGedbI08 | 96.0 | **54.0** |
+| MncLrf2LsT8 | 12.0 | 18.0 |
+
+**900 clips of real street CCTV cut the false-alarm rate roughly in half, with no architecture change and no new labelling.** For a system whose binding constraint is false positives (§17.7, §14.8), this is the largest single improvement measured in this work period other than the operating point itself — and unlike the operating point it costs no recall at a fixed threshold, because it changes what the model believes rather than how confident it must be.
+
+**Honest limits.**
+
+- MncLrf2LsT8 got *worse* (12.0 → 18.0/hr), which is **2 alarms versus 3**. At these counts a one-alarm difference is noise, and `analyze_false_alarm_csv.py` prints raw counts beside every rate specifically so that cannot be read as a trend.
+- Even the three-camera aggregate is 27 vs 13 alarms over half an hour. The direction is clear and the effect is large, but the precision is not — this establishes "roughly halved", not "51.9%".
+- The corpus holds **four** screened captures while §19.1's baseline used three (`2iENQ0dDmqI` was never in it), so the four-camera aggregate is *not* comparable to the historical 54.0. Both rows are reported, computed as total alarms ÷ total hours over videos both models actually ran on.
+- **Recall on these cameras remains unmeasured**, exactly as §18 states: the footage contains no labelled violence. That leaves one serious loophole — a model that simply alarms *less* would produce the same table as a model that discriminates *better*. §26.1 closes it.
+
+### 26.1 It is not desensitisation: recall went up, not down
+
+Halving false alarms is only good news if detection survived. The two checkpoints were therefore scored on **1,194 clips held out from both of them** — clips in the UCF manifest's test split that are either absent from the negatives manifest entirely or test there with no sibling leakage, verified at zero straddling groups. Neither model trained on any of them.
+
+| at threshold 0.5 | deployed baseline | `ucf_neg` |
+|---|---|---|
+| accuracy | 86.6% | **88.9%** |
+| recall | 84.5% | **89.1%** |
+| precision | 88.9% | 89.2% |
+| FPR | 11.2% | 11.4% |
+
+**Recall rose 4.6 points at an unchanged false-positive rate.** The improvement is not a quieter model; it is a better one. It holds across the curve rather than at one lucky threshold — at 0.7 `ucf_neg` reaches 80.9% recall at 6.7% FPR, while the baseline must go to 0.8 to reach a comparable 6.9% FPR and gets only 73.4% recall there. Youden's J at each model's best threshold: **79.2 for `ucf_neg` against 75.8** for the baseline.
+
+### 26.2 The benchmark could not see the improvement that matters
+
+Read the two measurements together:
+
+| | benchmark FPR (1,194 clips) | real footage (3 cameras) |
+|---|---|---|
+| deployed baseline | 11.2% | 54.0 alarms/hr |
+| `ucf_neg` | 11.4% | **26.0 alarms/hr** |
+
+**Benchmark false-positive rate is essentially identical, while real-camera false alarms halved.** Had this work relied on the test split alone — the standard thing to do — the single largest false-alarm improvement of the period would have registered as *no change at all*, or marginally worse.
+
+The reason is domain, not statistics. The benchmark's negatives are RWF `NonFight` and SCVD `Normal`: curated, framed, mostly indoor or close-range. Real street CCTV at night is none of those things. A model can be excellent at rejecting the first kind and hopeless at the second, and clip-level FPR on a curated set cannot tell the difference. This is the same gap §19.2c measured from the other side, where the real-CCTV subset scored 40.3% FPR against 2.0% on the curated remainder.
+
+Practical consequence, worth stating as a rule rather than an observation: **benchmark FPR is not a proxy for false alarms per hour on a real camera, and must not be used as one.** Every false-alarm claim in this report rests on recorded footage from the target domain for exactly this reason.
+
+
+## 27. Negative Result: Pose, Wrist-Velocity and Motion-Localisation Gates All Lose to the Threshold
+
+A gate is a cheap check that runs alongside the classifier and can veto an
+alarm. Gates are attractive because they need no retraining and revert with one
+line, and dangerous for the same reason: *any* veto reduces false alarms, so a
+gate that vetoes indiscriminately looks identical to a gate that discriminates
+unless recall is measured beside it.
+
+Four were proposed after a live session on `agdao_market` produced 32 alarms in
+38.5 minutes on footage a human confirmed contained nothing:
+
+| gate | rule | intended target |
+|---|---|---|
+| `pose2` | at least 2 people within N body-lengths | vehicles, animals, empty scenes |
+| `wrist` | peak per-person wrist speed above a threshold | ordinary close-range activity |
+| `localized` | fraction of frame-difference energy inside person boxes | passing vehicles, camera pans |
+| `unstuck` | veto a confidence pinned while the scene barely changes | the 242 s alarm on a static market |
+
+All four were measured on 60 minutes of held-out Davao footage
+(`agdao_market`, `agdao_flyover`, `lyns_restaurant`) plus 89 violent test
+clips, recording every gate's features at every inference point in a single
+decode so all gates saw identical frames.
+
+### 27.1 The result
+
+Scored at the deployed operating point (0.5 / 1), with the veto wired as
+`block` — the classifier's own state left untouched and only the alarm
+withheld, which is both the honest description of a veto and the wiring that
+stays cleanly revertible:
+
+| gate | alarms/hr | recall | threshold alone, same recall | verdict |
+|---|---|---|---|---|
+| none | 63.0 | 85.4% | — | — |
+| `pose1` | 57.0 | 68.5% | 20.0 | worse |
+| `pose2` | 54.0 | 55.1% | 8.0 | worse |
+| `close1.5` | 45.0 | 46.1% | 1.0 | worse |
+| `wrist12` | 8.0 | 37.1% | 0.0 | worse |
+| `local0.5` | 15.0 | 34.8% | 0.0 | worse |
+| all three | 0.0 | 12.4% | 0.0 | same |
+
+**Not one gate sits below the threshold-only curve.** `wrist12` cuts false
+alarms by 87%, which reads as a triumph until the recall column shows 85.4% →
+37.1%; raising the threshold to 0.90 reaches 1 alarm/hour at 50.6% recall,
+strictly better on both axes with no pose model, no tracker and no additional
+per-frame cost.
+
+The comparison was made deliberately unfavourable to the gates: each is
+compared against the *lowest-alarm* threshold that still meets its recall, so a
+gate only wins if it beats the best available alternative.
+
+### 27.2 Why each failed
+
+**Motion localisation is confounded with person size.** Median `localized` by
+person count on the flyover:
+
+| people in frame | 0 | 1 | 2–3 | 4–7 | 8+ |
+|---|---|---|---|---|---|
+| median `localized` | 0.000 | 0.029 | 0.104 | 0.222 | 0.644 |
+
+It rises monotonically with the frame area people occupy, so it substantially
+measures *how big the people are*, not *whether people caused the motion*. On a
+wide camera where a person is 8% of frame height it reads low whether they are
+fighting or standing still — precisely the cameras it was meant to help.
+
+**Proximity fails in crowds.** Assault requires closeness, but so does a
+market. Firing points had closest-pair distances of 0.28–0.85 body-lengths on
+all three cameras: in any crowd some pair is always touching, so a proximity
+gate never fires where it is needed.
+
+**Wrist velocity barely separates.** Median tracked wrist speed at firing
+points versus all points: 2.94 → 3.21 body-lengths/s on the market, 1.90 → 3.35
+on the flyover, 3.97 → 4.75 at Lyn's. The 87% alarm reduction `wrist12`
+produces comes from vetoing nearly everything, not from discriminating.
+
+### 27.3 A measurement bug that would have sold the wrist gate
+
+The first wrist implementation compared each wrist to the *nearest* wrist in
+the previous frame, with no track association. In a crowd the nearest wrist
+belongs to a different person, so the metric was silently measuring identity
+switches. It produced values up to **177 body-lengths per frame** — a wrist
+cannot travel 177 torso lengths between two frames, and the implausibility of
+the magnitude is the only thing that revealed the bug.
+
+Rebuilt on ByteTrack, so every comparison is a person against their own
+previous position, with a keypoint-confidence floor and a plausibility ceiling
+above which comparisons are counted and discarded rather than silently kept:
+
+| | untracked (void) | tracked |
+|---|---|---|
+| max | 177.7 | 29.7 |
+| p90 | — | 9.3 |
+| median | — | 4.2 |
+
+Pose is sampled every 3 frames rather than at the classifier's cadence: a 0.5 s
+gap is far longer than a punch, so sampling at the alarm rate would measure
+where an arm ended up rather than how fast it moved.
+
+**All wrist figures recorded before this fix are void**, including those in the
+earlier pose-separation experiment.
+
+### 27.4 What this cost and what it bought
+
+Nothing was wired into the live path at any point — every gate lived in a
+standalone measurement script — so the negative result required no revert.
+
+It also produced the largest available improvement of the session, from the
+threshold sweep the gates were being compared against:
+
+| threshold | alarms/hr | recall |
+|---|---|---|
+| **0.50 (deployed)** | **63.0** | **85.4%** |
+| 0.52 | 56.0 | 85.4% |
+| 0.54 | 50.0 | 85.4% |
+| **0.55** | **42.0** | **85.4%** |
+| 0.56 | 40.0 | 84.3% |
+
+**0.50 → 0.55 removes a third of all false alarms at zero recall cost** — the
+identical 76 of 89 clips are detected at both settings, so this is not a
+rounding artefact but dead space below the point where any violent clip's
+confidence lands.
+
+---
+
+## 28. False Alarms Are Camera-Specific, Not Time-of-Day-Specific
+
+The working hypothesis after §26 was that the model's negatives lacked daytime
+Philippine street footage. That hypothesis was wrong in two ways, and the
+correction changes what the fix has to be.
+
+**First, the daytime data was already there.** The training negatives contain
+833 daytime Davao clips from 7 cameras, two of which (`newcam1`, W Aquino
+market area; `newcam2`, Bankerohan market) are market scenes. The gap was
+volume, not absence: 180 market clips out of 5,097 negatives is 3.5%.
+
+**Second, and decisively, the model is already clean on those cameras.**
+Running the deployed detector across 253 minutes of newly captured daytime
+TRAIN footage and cutting a clip wherever smoothed confidence exceeded 0.45:
+
+| cameras | hard windows in 20 min each |
+|---|---|
+| 12 of 14 TRAIN cameras | **0** |
+| `Soliman_Street_cam_5` | 2 |
+| `Bankerohan` | 1 |
+
+Against, on the same day and the same hours:
+
+| camera | alarms/hr at 0.5 |
+|---|---|
+| `agdao_flyover` | 46 |
+| `agdao_market` | 9 |
+| `lyns_restaurant` | 8 |
+
+The false alarms are concentrated on specific cameras, not on a time of day or
+a scene type. Hard-negative mining from TRAIN cameras therefore yields almost
+nothing — those cameras do not trigger the model in the first place.
+
+### 28.1 Per-camera threshold calibration
+
+If cameras differ in what "quiet" looks like, one global threshold is
+necessarily too low for the noisy ones and too high for the rest. Calibrating
+per camera is standard practice and, for a streetlight-mounted unit, a natural
+install step: record a few quiet minutes, set one scalar, done — no retraining
+and no second model.
+
+Measured on a temporal split, threshold set from each camera's first half and
+every alarm counted on the second half the calibration never saw:
+
+| | flyover | market | Lyn's | total | recall |
+|---|---|---|---|---|---|
+| global 0.55 | 120/hr | 0 | 18/hr | 46/hr | 85.4% |
+| global 0.70 | — | — | — | 26/hr | 69.7% |
+| **per-camera p99.5** | 42/hr @ 0.78 | **0** @ 0.63 | 18/hr @ 0.55 | **20/hr** | 62–85% by camera |
+
+The gain improves with network size: quiet cameras sit at the 0.55 floor and
+keep full recall, and only the problem camera pays. A global threshold forces
+every camera to accept the worst camera's compromise — and with 12 of 14
+cameras producing no alarms at all, that is most of the network paying for one.
+
+A temporal split is a weaker guarantee than a held-out camera and is stated
+rather than hidden. It is, however, the correct guarantee for this method,
+because in deployment the calibration genuinely does come from that same
+camera's earlier footage.
+
+### 28.2 The flyover is not fixable by thresholding
+
+Even calibrated to 0.86 — near the point of switching the camera off — the
+flyover still produces 18 alarms/hour. No threshold rescues it.
+
+The obvious explanation is §7's scale finding — an elevated view puts people at
+6–12% of frame height, below the band where the model was measured to be blind.
+**That explanation was recorded here first and is wrong**; §29 measures the
+current model at 9% person height and finds 71.9% recall, not zero. The scale
+limit §7 describes belongs to a checkpoint that predates scale augmentation.
+
+The flyover's alarm rate is therefore an unexplained observation rather than a
+diagnosed one. Vehicle traffic across an elevated view is the leading
+hypothesis — the alarms coincide with heavy traffic, and the reviewed alarm
+frames are dominated by vehicles — but the TRAIN-role `traffic` camera (Leon
+Garcia Street) produces zero alarms in 20 minutes, so "traffic" alone does not
+account for it. The mechanism is open.
+
+**A methodological constraint applies either way, and should be recorded rather
+than worked around:** `agdao_flyover` is a HOLDOUT camera, and the inventory
+contains no TRAIN-role camera with comparable elevated geometry. There is
+currently no way to fix the flyover *and* honestly measure the fix. The options
+are to promote another elevated camera to TRAIN, or to document the flyover as
+a known-bad case.
+
+### 28.3 A mining bug worth recording
+
+The first hard-negative run reported 60 hard windows from three minutes of one
+camera — a rate 80× every other camera. The file was still being written by
+ffmpeg. A partially-written file decodes as truncated, corrupt h264, and
+**corrupt frames score high**: the run's own log ended with
+`error while decoding MB 30 43`.
+
+Mining it would have taught the model that video breakup is normal street
+activity. This is the same failure family as §23's zero-frame clips — a file
+existing is not evidence it contains anything — and it is very likely the
+mechanism behind the field observation that low-quality video is marked violent
+almost immediately.
+
+The miner now skips files touched within 90 seconds and takes duration from
+`ffprobe` rather than the container header, which reports full duration for a
+file whose tail does not yet exist.
+
+
+## 29. The Scale Problem Is Already Solved, and Tiling Is Now the Wrong Answer
+
+§7 recorded a deployment-blocking discovery: replaying 40 clips the model
+detected at 1.000 confidence while shrinking the people in them gave 40/40
+detections at 37% person-height and **0/40 at 9%**. Not less confident —
+blind. That measurement drove the entire architecture plan, and
+`TiledSceneViolenceDetector` exists because of it.
+
+That measurement was made on a checkpoint predating scale augmentation. The
+currently deployed `ucf_neg_motion` was fine-tuned from
+`x3d_xs_violence_best_3way_nll_scaleaug_negatives.pt`, and the trainer applies
+`ZOOM_OUT_PROB = 0.45` with `ZOOM_OUT_MIN = 0.18` — 45% of augmented clips are
+shrunk to between 18% and 90% of linear size, taking a median 37.1%
+person-height down to as little as 6.7%.
+
+Re-measured on 89 violent test clips through the same shrink transform the
+repository's own `--shrink` harness uses:
+
+| person height | ~37% (full) | ~13% | ~9% |
+|---|---|---|---|
+| §7, pre-augmentation checkpoint | 40/40 | — | **0/40** |
+| deployed `ucf_neg_motion` | 85.4% | 80.9% | **71.9%** |
+
+**Graceful degradation, not a cliff.** The augmentation worked, and the
+blindness that motivated the tiled architecture no longer exists.
+
+### 29.1 Tiled mode measured properly, and rejected
+
+`TiledSceneViolenceDetector` had never been measured for false alarms — only
+for recall on shrunk clips. It fires when ANY tile confirms, which at grid=3
+plus the full frame is 10 independent state machines and 10 chances to be
+wrong per check. Measured on the same 60 minutes of held-out Davao footage as
+every other false-alarm figure in this report:
+
+At full scale, at matched recall:
+
+| | alarms/hr | recall |
+|---|---|---|
+| whole-frame @ 0.55 | **42** | 85.4% |
+| tiled ≥2 tiles @ 0.75 | 211 | 85.4% |
+
+At 9% person-height, expressed as the best recall available inside an alarm
+budget — which is the form an operator actually faces:
+
+| alarms/hr budget | whole-frame | tiled |
+|---|---|---|
+| 10/hr | 19.1% @ 0.85 | unreachable |
+| 20/hr | 32.6% @ 0.75 | 1.1% |
+| 50/hr | **70.8% @ 0.55** | 9.0% |
+
+Tiling reaches a higher recall ceiling than whole-frame ever does (97.8% at
+full scale) but only at 294 alarms/hour, which is an alert nobody reads.
+Requiring 2 or 3 tiles to agree reduces the alarms but never brings the
+trade below the whole-frame curve.
+
+**Tiled mode loses at every scale and every alarm budget, at roughly 8x the
+compute.** It should not be deployed, and the architecture question §9 settled
+in its favour should be considered reopened and settled the other way — by
+augmentation rather than by architecture.
+
+This is a better outcome than the plan anticipated. Tiling was measured at
+28.48 ms/frame, 1.17x real-time, unable to sustain a second concurrent camera
+on a GTX 1660 SUPER. Whole-frame runs at 3.3 ms/frame. Solving the scale
+problem in the training data instead of the architecture keeps the per-camera
+cost roughly 8x lower, which is the difference between about 1 camera per GPU
+and about 15 — the same argument §5 made for person-crop mode, arrived at from
+the opposite direction.
+
+### 29.2 Why the earlier tiling result did not transfer
+
+The prior evidence for tiling was "whole-frame 0/30, 3x3 tiles 25/30" on
+shrunk clips. Both halves of that comparison were recall-only. Nothing was
+wrong with the measurement; it simply answered half the question, and the
+missing half reversed the conclusion.
+
+The general form is worth stating, because it is the same error the gate
+experiment in §27 was designed to avoid: **a change that increases detections
+must be measured on false alarms, and a change that reduces false alarms must
+be measured on recall.** Tiling multiplies the number of independent chances to
+fire, so it necessarily improves recall and necessarily worsens false alarms;
+measuring only the first guarantees a favourable answer.
+
+### 29.3 What this leaves unexplained
+
+Correcting the scale premise removes the explanation §28.2 originally offered
+for the flyover's 46 alarms/hour. The model is not blind on that camera. The
+alarm rate is real and reproduced across two separate 20-minute recordings,
+but its mechanism is now open rather than diagnosed, and the report should say
+so rather than retain a tidy explanation that measurement has contradicted.
+
+Reviewing the alarm footage frame by frame corrected two further assumptions
+and produced one hypothesis that did not survive testing:
+
+- **The held-out flyover recording is NIGHT footage**, not daytime. Wet road,
+  headlights, streetlight glare. It had been reasoned about as a daytime
+  camera throughout §28.
+- **People on it are close to the camera, not small** — 40–60% of frame
+  height at the bus stop, the opposite of the inventory's "elevated, small
+  people" description. The camera is a PTZ and its framing is not a fixed
+  property, so any conclusion keyed to its geometry is keyed to something that
+  moves.
+- **One alarm was a camera pan**, with the whole scene sweeping and
+  motion-blurred; YOLO reported `airplanex8` and zero people on it. Camera
+  motion filling the frame is a plausible violence signature and would be
+  cheap to detect, so it was tested across all 161 flyover firing points —
+  and **rejected**: only 6% fall in the top decile of global scene motion
+  against 10% expected by chance. Pans occur but do not drive the alarm rate.
+
+A third hypothesis was then tested and also rejected. `audit_quality_bias.py`
+found, across 581 normal benchmark clips, that lower SHARPNESS correlates with
+scoring violent (Spearman rho −0.192) while lower RESOLUTION does not — false
+positives are in fact **2× higher on the higher-resolution half** (14.1% vs
+7.2%). That splits the field observation "low quality video is marked violent"
+into a true half and a false one, and blur is the true half. A panning PTZ
+produces heavy blur at full resolution, so it fit.
+
+It does not survive measurement either. Sharpness (variance of the Laplacian)
+at every inference point, against each camera's own baseline:
+
+| camera | alarms in the blurriest decile | chance | enrichment |
+|---|---|---|---|
+| `agdao_flyover` | 4% | 10% | **0.4×** |
+| `agdao_market` | 5% | 10% | **0.5×** |
+
+**All three artefact hypotheses are depleted among alarms, not enriched**
+(scale, 0.6× for global motion, 0.4× for blur). Read together they say
+something useful rather than nothing: the model fires on *clean, sharp,
+moderate-motion* frames — the ones where it can see the scene properly. The
+false alarms are not an artefact of degraded video at all.
+
+What is left is the plainest explanation, and the one that survived three
+attempts to replace it with something cleverer: **the model looks at ordinary
+night bus-stop and roadside traffic activity and finds it genuinely
+violence-like.** That is a negative-data coverage problem, not a signal
+processing one, and it is consistent with the flyover's confidence being
+elevated *throughout* rather than spiking on events — its median inter-frame
+motion is 4.58 against the market's 0.46. A camera that is simply busier all
+the time is also the case per-camera calibration (§28.1) exists for, which is
+why calibration reduces it from 120 to 42 alarms/hour where no global threshold
+could.
+
+The corresponding action is more night negatives, not another filter: the
+training negatives run 630 daytime to 203 night, while the failing camera is a
+night camera.
+
+---
+
+## 30. Two of the Three Holdout Cameras Share a Venue With Training Cameras
+
+Verifying the night capture surfaced something that had gone unnoticed through
+every measurement in this report. `corpus_night/TRAIN` contains
+`Agdao_Public_Market_PTZ` — while `agdao_market_heldout.ts` is one of the three
+cameras that every false-alarm figure here is measured on. 60 clips from the
+TRAIN market camera are already in the manifest.
+
+Stream roles in `stream_inventory.txt` are assigned per **YouTube video ID**, and
+two IDs can be two channels restreaming one camera, two cameras in one place, or
+genuinely unrelated views. None of that is visible in a file listing.
+`check_holdout_overlap.py` pulls four frames from each candidate and puts them
+side by side, deliberately leaving the verdict to a human: a PTZ camera at two
+zoom levels is one camera and would score as different, while two cameras across
+one street are two cameras and could score as similar.
+
+### 30.1 No camera is in both roles
+
+| venue | HOLDOUT | TRAIN | same camera? |
+|---|---|---|---|
+| Agdao Market | `u8CbGedbI08` tight night view of a food stall | `nTHJUQqW3wc` wide daytime street, blue hoarding | **no** |
+| outside Lyn's | `MncLrf2LsT8` wide road junction at night | `vnniDOWtM3Q` street-level shopfront; `7-oD0lZA7JQ` covered eatery | **no** |
+| Agdao flyover | `15weHVdoNFs` | *(none)* | — |
+
+The market pair is decided by more than framing: the two carry different on-screen
+display formats — `MM-DD-YYYY` left-aligned with a `Cam 1 ZOOM` label, versus
+`DD-MM-YYYY` right-aligned with a `JazBaz Philippines` watermark. Different DVR
+overlay means a different recording system, which means a different camera.
+
+**So the manifest is not leaking.** No holdout footage is in training.
+
+### 30.2 But the venues overlap, and that is an alternative explanation
+
+Two of three holdout cameras have a training camera at the same venue — same
+street furniture, same lighting, same passers-by, same hours. The inventory
+itself already records "four Lyn's restaurant angles". Ranking the three cameras
+by how much venue presence they have in training reproduces the ranking of how
+much they improved:
+
+| holdout camera | training camera at same venue | alarms before | after | change |
+|---|---|---|---|---|
+| agdao_flyover | none | 93 | 84 | −10% |
+| outside Lyn's | 2 angles | 15 | 9 | −40% |
+| agdao_market | 1 angle, 60 clips | 15 | **3** | **−80%** |
+
+The camera with no venue overlap improved least; the camera with the most
+overlap improved most. That ordering is exactly what venue-level leakage would
+produce. It is *also* exactly what "we added negatives from busy Philippine
+market scenes, and market cameras got better" would produce — which is the
+intended mechanism. **The two explanations are not separable with the data on
+hand**, and no amount of re-analysis of these three cameras will separate them.
+
+### 30.3 What follows
+
+Nothing was deleted. Removing the market and Lyn's training clips would spend
+real negative diversity to fix a measurement problem, and would not even fix it
+— it would only move the venue overlap into the past.
+
+The correct response is to the *reporting*, not the data:
+
+- **`agdao_flyover` is the headline number.** It is the only holdout camera with
+  no training camera at its location, which makes its 84 alarms the most
+  trustworthy figure in this report and, not coincidentally, the least
+  flattering one. §29's conclusion — that the flyover's alarms are a
+  night-coverage problem — is unaffected, since that camera has no overlap.
+
+  Stated precisely, because the weaker claim is the true one: seven training
+  cameras *are* in Agdao district (House View, Jet Wash, Outside Cynthia, Van
+  Storage, Vulcanizing, Outside Lodi's, Public Market). None shares the
+  flyover's view, subject, or elevation — they are shopfronts at street level,
+  it is an elevated road and bus stop. So the flyover has **district-level**
+  co-location but no venue-level overlap, which is a materially different and
+  much weaker form of shared context than pointing a second camera at the same
+  storefront.
+- The market and Lyn's figures are reported as **venue-adjacent** and are an
+  upper bound on generalisation, not a measure of it.
+- The next holdout camera added should be chosen for having *no* training
+  presence, which is the property that was never a selection criterion here.
+
+This is the third measurement-integrity error found by checking rather than
+assuming (after §25's two), and the pattern holds: each was invisible in
+summary statistics and obvious in four frames side by side.
+
+---
+
+## 31. The One Free Win: `consecutive_required`, and the Mismatch That Hid It
+
+Four algorithmic interventions have now been tested and rejected (§27, §29),
+each losing to a 0.05 threshold change. This section reports the opposite
+outcome — a change that removes **65% of false alarms at no measured cost in
+recall** — and the measurement error that kept it invisible.
+
+### 31.1 Every false-alarm figure in this report was taken at the wrong setting
+
+`eval_false_alarms_corpus.py` defaults to `--consecutive 2`. `main.py:495`
+constructs `SceneViolenceDetector(device=TARGET_DEVICE)` with **no** consecutive
+argument, so the live system used `config.json`'s `scene_consecutive_required`,
+which was **1**.
+
+The two never matched. Replaying the deployed model at threshold 0.50:
+
+| `consecutive` | alarms/hr | flyover | market | lyns |
+|---|---|---|---|---|
+| **1 — what deployment ran** | **49.0** | 38 | 2 | 9 |
+| 2 — what every measurement used | 32.0 | 28 | 1 | 3 |
+
+So the published rates — corpus_neg 32.0/hr, ucf_neg_motion 41.0/hr, and the
+84/3/9 per-camera split — **understated live behaviour by roughly 53%**. The
+*comparisons* between checkpoints survive, because both sides were measured the
+same way; the absolute numbers do not.
+
+This is the third measurement-integrity error found by checking rather than
+assuming (§25 has two more, §30 a fourth). It shares their signature: nothing in
+any output looked wrong, because both halves of the system were individually
+behaving exactly as written.
+
+### 31.2 Why the setting had never been tuned
+
+`consecutive_required` has been untunable for a reason that is arithmetic, not
+empirical. Of 3,413 violent clips available to this project the longest is 137
+seconds and **the second longest is 11**; most are under 7. At the detector's
+inference stride a 5-second clip yields only two or three decision points, so
+`need >= 3` fails on it regardless of how confident the model becomes. Earlier
+attempts to tune this measured that limitation and mistook it for a result.
+
+A continuously-running camera has no such ceiling. The measurement had to move
+to continuous footage or not be made at all.
+
+### 31.3 Measuring it on continuous footage
+
+`build_spliced_recall_set.py` takes 40 violent clips from the **test** split,
+each at least 4 seconds, and splices them into real Davao night street footage
+with 25 seconds of ordinary activity on either side — enough for the EMA to
+settle into "quiet street" before each event. Exact event windows go to a
+sidecar JSON; `score_spliced_recall.py` then replays the shipped
+`_smooth_and_confirm()` and asks whether an alarm rose inside each window.
+
+At threshold 0.50, against held-out camera alarms from §31.1:
+
+| `consecutive` | events detected | recall | alarms/hr |
+|---|---|---|---|
+| 1 | 38/40 | 95.0% | 49.0 |
+| 2 | 38/40 | 95.0% | 32.0 |
+| **3** | **38/40** | **95.0%** | **17.0** |
+| 4 | 36/40 | 90.0% | 9.0 |
+| 5 | 35/40 | 87.5% | — |
+
+**3 is the last free step; 4 is the first that costs.** Going from the deployed
+1 to 3 loses none of 40 events and takes 49.0 alarms/hour to 17.0.
+
+Deployed in `config.json` with a full rollback note. Reverting is one edit.
+
+### 31.4 What this number is not
+
+- **40 events gives about ±2.5 points of resolution.** "Zero cost" means "lost
+  none of 40", not "provably lossless". A 2–3% true cost would be invisible here.
+- **Spliced recall is an upper bound.** The splice is a hard cut between two
+  cameras, resolutions and lighting conditions, and a large visual change is
+  the kind of thing this model already responds to. A real assault on the
+  flyover does not arrive that way.
+- **The violent clips are not street CCTV.** Inspecting the splice points
+  (`check_splices.py`) showed most are indoor, several carry YouTube
+  compilation watermarks — `INSTANT KARMA OFFICIAL 2015`, `FLIPAGRAM` — one has
+  a visible YouTube player UI, and several are portrait phone video letterboxed
+  into frame. **The 91.4% benchmark recall this project quotes is measured on
+  that footage.** This does not invalidate §31.3, which is a question about the
+  state machine's temporal behaviour rather than about domain, but it should
+  temper every recall figure in this report.
+
+### 31.5 The pattern, updated
+
+Five interventions have now been measured. The scoreboard is consistent and
+worth stating plainly, because it is the most transferable thing here:
+
+| intervention | outcome |
+|---|---|
+| pose / wrist-velocity / motion-localisation gates | lost to threshold |
+| tiled inference | lost at every scale, at 8× compute |
+| three flyover artefact hypotheses | all depleted among alarms |
+| **more and more diverse negatives** | **54 → 26 → ~0 → 32 alarms/hr** |
+| **`consecutive_required` 1 → 3** | **49 → 17 alarms/hr, free** |
+
+Everything clever lost. What worked was more representative data, and correctly
+configuring a temporal parameter that had been mismeasured for the whole
+project.
+
+---
+
+## 32. Robbery and Vandalism: Building Two Classes That Had No Data
+
+Both classes shipped as rule-based placeholders transmitting invented
+confidence constants (`0.895` and `0.84`) to the dashboard. This section covers
+building real models for them, and it is mostly a record of what the data
+would not support.
+
+### 32.1 The project was using 3% of the footage it owned
+
+`extract_ucf_crime.py` takes only the 68 UCF-Crime videos carrying
+frame-accurate temporal annotations and skips ~1,600 that have video-level
+labels only. Surveying the archive against that policy:
+
+| class | videos in archive | used | median size | under 15 MB |
+|---|---|---|---|---|
+| **Vandalism** | 50 | **5** | 12.0 MB | 30 |
+| **Robbery** | 150 | **5** | 13.8 MB | 84 |
+| Burglary | 100 | 13 | 17.5 MB | 45 |
+| Stealing | 100 | 5 | 18.1 MB | 42 |
+
+After filtering to outdoor and dropping arson, vandalism came to **two usable
+source videos**. Two scenes cannot be split into train, validation and test.
+
+### 32.2 Two ways to unlock the rest, both rejected by measurement
+
+The skip policy's justification is a ratio — "a ten-minute Fighting video is
+labelled violent though the fight is twenty seconds of it" — and a ratio is
+empirical. Most of the unused videos are short. Two hypotheses followed, and
+the 68 annotated videos are ground truth for both.
+
+**Hypothesis 1: short videos are mostly anomaly, so video-level labels are
+nearly segment-accurate.** Measured (`where_is_the_anomaly.py`): median anomaly
+coverage on sub-15 MB videos is **0.32**, and that is an *upper* bound because
+a video runs past its last annotated frame by an unknown amount. Cutting blind
+would mislabel roughly two positives in three. **The original policy was right
+and the hypothesis was wrong.**
+
+**Hypothesis 2: motion localises the act, so rank windows by motion.** Measured
+by comparing annotated crime clips against same-camera normal clips from the
+same 21 sources: crime is the busier of the two in **11 sources and the quieter
+in 10**. A coin flip. On `Stealing058` the normal footage is nine times busier
+than the theft; on `Vandalism007`, more than twice.
+
+Both were cheap to test and would have been expensive to assume.
+
+### 32.3 What worked: reading them
+
+All 86 Vandalism and Arson videos were extracted and rendered as 24-frame
+timestamped filmstrips (`build_vandalism_filmstrips.py`). Spans were then read
+off by eye and written in UCF's own annotation format, so the existing
+extractors consume them with no changes. **11 videos newly annotated**, taking
+vandalism from 2 usable outdoor sources to 18.
+
+Four were deliberately excluded with the reason recorded, because a wrong
+positive is worse than a missing one:
+
+| video | why excluded |
+|---|---|
+| `Vandalism040` | Indoor. The overview sheet suggested outdoor railings; the full-resolution filmstrip showed a workshop interior. |
+| `Vandalism038` | 94 s of a child riding a BMX. A positive here teaches that cycling is vandalism. |
+| `Vandalism004` | A *vehicle* striking a road barrier, no person acting. Real property damage, but it would fire whenever a car brushes street furniture. |
+| `Vandalism039` | Streetlight glare washes out the frame; no act locatable, so no honest span. |
+
+### 32.4 The negative design that makes indoor footage safe
+
+Indoor robbery was originally excluded because it teaches "indoor = crime" to a
+camera that only sees outdoors — the shortcut that got UCF's violence half
+dropped (§14.7). **That objection dies once negatives come from the same
+videos.** Negatives here are the non-crime spans of the same source videos
+(`extract_ucf_same_camera_normals.py`), so a shop interior appears on both
+sides of the label and carries no information about it. The model cannot take
+the shortcut because the shortcut does not separate the classes.
+
+That unlocked every robbery source: **15 outdoor-only became 43**.
+
+### 32.5 The datasets
+
+| | clips | source videos | train / val / test **scenes** | leakage |
+|---|---|---|---|---|
+| robbery | 795 | 43 | 26 / 9 / 8 | 0 |
+| vandalism | 215 | 18 | 11 / 4 / 3 | 0 |
+
+Splits are by source video, never by clip. **Any accuracy from these is a
+measurement over 8 and 3 scenes respectively**, and the manifest builder prints
+that line so it cannot be quoted without it.
+
+### 32.5a Results: robbery works, vandalism does not
+
+Both models initialised from the deployed violence checkpoint, `unfreeze_blocks
+= 2`, evaluated on their held-out **scenes**.
+
+**Robbery — 139 clips from 8 unseen scenes:**
+
+| threshold | accuracy | recall | precision | FPR |
+|---|---|---|---|---|
+| 0.5 | 76.3% | 79.6% | 62.9% | 25.6% |
+| **0.7** | **84.2%** | **65.3%** | **86.5%** | **5.6%** |
+| 0.8 | 84.2% | 57.1% | 96.6% | 1.1% |
+
+This is a working model. At 0.7 it identifies two thirds of robbery clips in
+scenes it has never seen, while firing on 5.6% of normal clips from those same
+cameras. It is defensible as an MVP with the threshold stated.
+
+**Vandalism — 37 clips from 3 unseen scenes: not deployable.**
+
+| threshold | accuracy | recall | precision | FPR |
+|---|---|---|---|---|
+| 0.5 | 70.3% | 86.2% | 78.1% | **87.5%** |
+| 0.9 | 73.0% | 75.9% | 88.0% | 37.5% |
+
+The FPR column is the finding: at the operating threshold the model fires on
+**7 of the 8 normal clips in the test set**. Its 70.3% accuracy is *below* the
+78.4% obtainable by labelling every clip vandalism, so it has learned something
+worse than the base rate. Validation told the same story during training —
+accuracy fell from 42.4% to 33.3% while training accuracy climbed to 86.2%,
+which is a model memorising 11 training scenes, not learning vandalism.
+
+Two things are true at once and both belong in the write-up: the test set is 3
+scenes and 8 negatives, so it is **too small to measure anything reliably** —
+and what little it measures is bad. Neither justifies shipping it.
+
+**The conclusion is about scene count, not about effort.** Annotating 11 videos
+by hand took vandalism from 2 usable sources to 18 and the model still does not
+generalise. Robbery, at 26 training scenes, does. The gap between those two
+numbers is where this class becomes learnable, and the cheapest route across it
+is filming: every new location is a new scene, which is exactly the resource
+that is scarce.
+
+### 32.6 Four errors caught, three of them mine
+
+- **A dead source.** `Burglary076` has positive median motion 0.015 against
+  0.2–7.6 for every other source — a still corridor where the annotated
+  burglary produces no measurable change. 30 clips that could teach a motion
+  model nothing.
+- **Police title cards as training data.** Several UCF sources are
+  police-released appeal videos with editorial slides cut in — a Greater
+  Manchester Police card, a "Can you identify these men?" graphic, a
+  `#CrimeMustFall` overlay. Faithfully collected as negatives, and meaningless.
+- **A frozen backbone.** The first robbery run trained 4,098 of 2,978,772
+  parameters because `--unfreeze-blocks` defaults to 0 while the violence model
+  used 2. It scored 55.2% accuracy and 11.9% recall on held-out scenes. Void.
+- **A duplicate `source_of`.** The manifest builder carried its own copy that
+  did not know the `vand_` prefix, so all 11 hand-annotated vandalism sources
+  parsed as source `vand_VandalismNNN`, failed the category regex, and were
+  filed as **robbery**. No error anywhere; the vandalism manifest simply came
+  out with 7 sources instead of 18. Fixed by importing the one definition.
+
+### 32.7 Why these are separate models and not one softmax
+
+Recorded here because a panel will ask why the system does not use a single
+network for all incident types:
+
+- **Weapon detection cannot join.** A weapon is visible in one frame — object
+  detection, which YOLO already does. Violence is only visible across frames.
+- **A shared softmax would make violence detection worse.** A robbery involving
+  assault is genuinely both classes, and softmax forces probability to split
+  between them on exactly the clips that matter most.
+- **The classes need independent operating points.** §31 showed the threshold ×
+  `consecutive` pairing is what determines usability. One softmax is one
+  decision surface.
+- **Independent failure.** A weak class can be disabled in configuration rather
+  than retrained out of shared weights.
+
+Both models are initialised from the deployed violence checkpoint rather than
+from Kinetics: on 26 and 11 training scenes they cannot learn motion features
+from scratch, and the violence model has already learned them.
 
 ---
 

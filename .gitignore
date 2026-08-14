@@ -1,89 +1,141 @@
-# Dependencies
+# =============================================================================
+# EcoVision Sentinel — what goes to GitHub
+#
+# Principle: the repository holds SOURCE and RESEARCH. It does not hold
+# anything regenerable (builds, environments), anything huge and binary
+# (model weights, the packaged .exe), or anything produced at runtime
+# (logs, databases, screenshots).
+#
+# A fresh clone should let someone read the whole system and the whole
+# thesis. It will NOT run until they add weights and run setup.bat --
+# that is the intended trade: ~25 MB of repo instead of ~7 GB.
+# =============================================================================
+
+# ---- Dependencies & environments (regenerable) ------------------------------
 node_modules/
 .pnp
 .pnp.js
+.venv/
+venv/
+env/
+# The bundled Python env shipped inside the installer -- 5.13 GB. It has its
+# own internal .gitignore, but that alone is fragile (lost if the venv is ever
+# regenerated wholesale), so the root file is authoritative too.
+python-env/
 
-# Build outputs
+# ---- Build outputs (regenerable) --------------------------------------------
 .next/
-dist/
-build/
 out/
+# dist/ holds the 1.63 GB portable .exe. Ship it as a GitHub Release asset,
+# never as a tracked file -- GitHub rejects blobs over 100 MB.
+dist/
+*.egg-info/
+pip-wheel-metadata/
+tsconfig.tsbuildinfo
+next-env.d.ts
 
-# Python
+# ---- Python bytecode ---------------------------------------------------------
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-*.egg-info/
-pip-wheel-metadata/
+
+# ---- Secrets -- never commit -------------------------------------------------
 .env
 .env.local
 .env.*.local
-venv/
-env/
-.venv/
+devteam_credentials.txt
+devteamcredentials.txt
 
-# IDE / Editor
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.vs/
+# ---- Model weights -----------------------------------------------------------
+# The binaries stay out (11-72 MB each, ~400 MB total), but the sidecars and
+# the README stay IN: they record input geometry, training manifest and
+# measured test results for every checkpoint. That is the part a reader of
+# the thesis actually needs, and it costs a few KB.
+weights/**/*.pt
+weights/**/*.pth
+weights/**/*.onnx
+weights/**/*.engine
+weights/archive/
+!weights/**/*.meta.json
+!weights/README.md
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs & caches
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pytest_cache/
-.cache/
-.coverage
-
-# Databases (runtime data, never versioned)
-*.db
-*.sqlite
-*.sqlite3
-
-# Bundled Python venv used for Electron packaging (electron-builder
-# extraResources) -- also has its own internal .gitignore, but that alone
-# is fragile (lost if the venv is ever regenerated wholesale); make the
-# root .gitignore authoritative too.
-python-env/
-
-# Model weights & exports
+# Stray model files anywhere else in the tree
 *.pt
 *.pth
 *.onnx
 *.engine
 *.task
-*.mp4
+!weights/**/*.meta.json
 
-# Project-specific
+# ---- Runtime output ----------------------------------------------------------
+logs/
+data/
+static/screenshots/
+static/clips/
+static/recordings/
+runtime_ports.json
+*.db
+*.sqlite
+*.sqlite3
 runs/
-roboflow_cache/
-Assault_Snapshots/
-useless/
-yolo11n_openvino_model/
-engine/
 eval_report_val/
-x3d_debug_out/
-x3d_debug_out_all/
-static/
-devteamcredentials.txt
+x3d_debug_out*/
+Assault_Snapshots/
+roboflow_cache/
+yolo11n_openvino_model/
+
+# ---- Superseded / scratch ----------------------------------------------------
+archive/
+useless/
 requests/
-# Images (added)
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.webp
-*.bmp
-*.tiff
-*.ico
-*.svg
+*.bak
+*.bak_*
+*.orig
+*.err
+*.log
+!docs/**/*.md
+
+# ---- IDE / OS ----------------------------------------------------------------
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.pytest_cache/
+.cache/
+.coverage
+
+# =============================================================================
+# EXPLICITLY KEPT — these were excluded by an earlier blanket rule
+# =============================================================================
+# docs/ used to be ignored wholesale, which meant the entire research record
+# was absent from the repository. For a thesis project the reports ARE the
+# deliverable, so they are tracked. Total ~25 MB.
+!docs/
+!docs/**
+
+# The app's own image assets. A blanket *.png rule previously excluded
+# electron/logo.png, without which the installer builds with no icon and no
+# masthead -- a clone could not reproduce the shipped UI.
+!electron/logo.png
+!build/icon.ico
+!logo.png
+!public/**
+
+# Figures and animations belong to the research record.
+!docs/figures/**
+!docs/media/**
+
+# =============================================================================
+# Large media that is regenerable — excluded even inside docs/
+# =============================================================================
+# Rebuild with: .venv\Scripts\python.exe tools\make_explainer_gifs.py
+# (conv_explainer.mp4 is the exception: the script that made it is missing
+# from the repo, so it is kept.)
+docs/media/_preview_*.png
+docs/media/_chk.png

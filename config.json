@@ -17,15 +17,14 @@
     "host": "localhost"
   },
   "database": {
-    "type": "postgres",
+    "type": "sqlite",
     "path": "./data",
-    "backup_interval": 3600
+    "backup_interval": 3600,
+    "_type_note": "This key is DOCUMENTATION ONLY -- nothing reads it. It said 'postgres' while every standalone run used SQLite, which is the kind of mismatch that costs an hour when someone trusts it. The real switch is the DATABASE_URL environment variable, read in app/db.py: set -> Postgres, unset -> SQLite at database.path. A packaged install must leave it UNSET.",
+    "_offline": "Fully local by design: SQLite file on disk, no network calls, no cloud service. If Supabase is adopted later it would replace the db.py backend behind the same interface; offline-first would need its local cache, since this system must keep detecting when the link drops."
   },
   "detection": {
-    "models": {
-      "pose": "yolo11s-pose.pt",
-      "violence": "weights/x3d_xs_violence_best.pt"
-    },
+    "_models_note": "The old detection.models block was removed: nothing read it. The pose weights are resolved by load_model_with_fallback() in maincode/main.py, which prefers yolo11s-pose.engine and falls back to the .pt; the violence weights come from detection.violence.model_path and detection.violence.scene_model_path below. Two keys naming the same checkpoint invited them to drift, with only one of them actually consulted.",
     "confidence_threshold": 0.6,
     "detection_interval": 6,
     "max_unseen_frames": 150,
@@ -43,18 +42,167 @@
       "bystander_merge_radius_mult": 1.3,
       "mode": "scene",
       "scene_confidence_threshold": 0.5,
-      "scene_consecutive_required": 1,
-      "scene_model_path": "weights/x3d_xs_violence_scene_3way_nll_scaleaug_negatives.pt",
-      "_mode_options": "track | scene | tiled | both -- tiled = full camera coverage via an overlapping tile grid, for wide city cameras where a person is too small for whole-frame scene mode to see (see docs/progress_report_violence_detection.md \u00c2\u00a76). Uses scene_model_path/scene_confidence_threshold/scene_consecutive_required, same as scene mode.",
+      "scene_consecutive_required": 3,
+      "_scene_consecutive_required_rollback": "Was 1. Raised to 3 on 2026-08-14. TWO separate things are fixed by this. (1) A MEASUREMENT/CONFIG MISMATCH: eval_false_alarms_corpus.py defaults to --consecutive 2, but main.py:495 builds SceneViolenceDetector() with no consecutive argument, so the live system used this config value of 1. Every false-alarm figure on record -- including the 32.0 alarms/hr for corpus_neg and 41.0 for ucf_neg_motion -- was therefore measured at 2 while deployment ran at 1. Replayed at 1, the deployed model gives 49.0 alarms/hr (flyover 38, market 2, lyns 9), so the published rates understated live behaviour by ~53%. (2) THE SETTING ITSELF: consecutive_required has never been tunable, because 5-second benchmark clips yield too few inference points for need>=3 to succeed arithmetically -- a property of the clips, not the model. Measured instead on continuous footage (build_spliced_recall_set.py: 40 held-out violent test clips spliced into real Davao night street footage with 25 s of ordinary activity either side, replayed through the shipped _smooth_and_confirm): at threshold 0.50, cons=1 and cons=2 and cons=3 all detect 38/40 events (95.0%), while held-out camera alarms fall 49.0 -> 32.0 -> 17.0 per hour. cons=4 drops to 36/40 (90.0%) for 9.0/hr. So 3 is the last free step and 4 is the first one that costs. CAVEATS: 40 events gives about +/-2.5 points of resolution, so 'zero cost' means 'lost none of 40', not 'provably lossless'; and spliced recall is an UPPER bound, because a hard cut between two cameras is itself a large visual change and the violent clips are benchmark footage (several are indoor, some carry YouTube compilation watermarks and one a visible player UI). To roll back, set this to 1 for the previous deployed behaviour, or 2 to match how every historical measurement was taken.",
+      "scene_model_path": "weights/x3d_xs_violence_scene_corpus_neg.pt",
+      "_scene_model_path_rollback": "corpus_neg deployed 2026-08-13. Measured against the previously deployed ucf_neg_motion on IDENTICAL footage and IDENTICAL clips, both re-measured rather than compared across runs. Real cameras (agdao_flyover + agdao_market + lyns_restaurant, 20 min each, threshold 0.5 / consecutive 2): corpus_neg 32.0 alarms/hr vs ucf_neg_motion 41.0 -- per camera 84/3/9 vs 93/15/15. Benchmark on the 932 clips held out from BOTH manifests: recall 91.4% vs 87.1%, FPR 12.9% vs 13.5%, precision 92.5% vs 91.8% -- better on every axis and across the whole threshold curve, not one lucky point. CAVEAT: one training run against one training run, no seed replication, so treat +4.3 recall as a direction rather than a precise figure. The only change was negatives: 3,925 -> 4,825, from 7 daytime cameras to 26 (dataset_manifest_3way_corpus.json, --train-neg-ratio 2.0). To roll back, set scene_model_path to weights/x3d_xs_violence_scene_ucf_neg_motion.pt (the previous default), or ..._ucf_neg.pt, or ..._3way_nll_scaleaug_negatives.pt. All present.",
+      "_mode_options": "track | scene | tiled | both -- tiled = full camera coverage via an overlapping tile grid, for wide city cameras where a person is too small for whole-frame scene mode to see (see docs/progress_report_violence_detection.md §6). Uses scene_model_path/scene_confidence_threshold/scene_consecutive_required, same as scene mode.",
       "tile_grid": 3,
       "tile_overlap": 0.25,
-      "tile_check_interval": 20
+      "tile_check_interval": 20,
+      "enabled": true,
+      "display_name": "Physical injury",
+      "metrics": {
+        "status": "deployed",
+        "headline": {
+          "label": "Detection rate",
+          "value": 95.0,
+          "unit": "%"
+        },
+        "stats": [
+          {
+            "label": "Detection rate",
+            "value": 95.0,
+            "unit": "%",
+            "note": "38 of 40 events on continuous spliced footage",
+            "good": true
+          },
+          {
+            "label": "Per-clip recall",
+            "value": 91.4,
+            "unit": "%",
+            "note": "932 clips held out from both manifests",
+            "good": true
+          },
+          {
+            "label": "Precision",
+            "value": 92.5,
+            "unit": "%",
+            "note": "of alerts raised, the share that are genuine",
+            "good": true
+          },
+          {
+            "label": "False alarms",
+            "value": 17.0,
+            "unit": "/hr",
+            "note": "across 3 cameras: 0, 6 and 45 per hour",
+            "good": true
+          }
+        ],
+        "measured_on": "758-clip held-out test split + 60 min of real Davao street CCTV",
+        "caveat": "The 45/hr flyover camera is the worst case and the only one whose venue does not also appear in training -- it is the least flattering figure and the most trustworthy. Recall on the deployment cameras themselves is unmeasured: no labelled incident has been recorded on them."
+      }
     },
     "static_weapon_filter": {
       "enabled": true,
       "window_observations": 45,
       "min_observations": 15,
       "move_threshold_px": 28
+    },
+    "robbery": {
+      "enabled": true,
+      "model_path": "weights/x3d_xs_robbery_scene.pt",
+      "confidence_threshold": 0.7,
+      "consecutive_required": 3,
+      "_why_0_7": "Chosen from the held-out test sweep, not by default. On 139 clips from EIGHT source videos the model never trained on: at 0.5 it scores 76.3% accuracy / 79.6% recall / 62.9% precision / 25.6% FPR; at 0.7, 84.2% / 65.3% / 86.5% / 5.6%; at 0.8, 84.2% / 57.1% / 96.6% / 1.1%. 0.7 is where precision becomes usable without collapsing recall. A quarter of normal clips misfiring at 0.5 would make the class ignorable, which is the failure mode this project spent the most effort on for violence.",
+      "_consecutive_3": "Matches the violence detector. Measured there on continuous spliced footage: cons 1->3 removed 65% of false alarms while losing none of 40 events. Not separately measured for robbery -- there is no continuous robbery footage to measure it on -- so it is carried over as the safer default rather than claimed as tuned.",
+      "_replaces": "RULE_ROBBERY_PLACEHOLDER_CONF = 0.895 in maincode/main.py, an invented constant sent to the dashboard whenever the ARMED-person-near-another-person heuristic fired. There was no derivation for 0.895. The model emits a real probability.",
+      "_caveat": "Trained on 26 source videos, tested on 8. Any figure here is a measurement over 8 scenes, not 139 independent samples. Largely UCF-Crime footage: driveways, car parks and shop interiors, not Philippine streets. Recall on the deployment cameras is unmeasured, as it is for violence.",
+      "_rollback": "Set enabled=false to return to the rule-based path.",
+      "display_name": "Robbery",
+      "metrics": {
+        "status": "deployed",
+        "headline": {
+          "label": "Recall",
+          "value": 65.3,
+          "unit": "%"
+        },
+        "stats": [
+          {
+            "label": "Accuracy",
+            "value": 84.2,
+            "unit": "%",
+            "note": "at threshold 0.70",
+            "good": true
+          },
+          {
+            "label": "Recall",
+            "value": 65.3,
+            "unit": "%",
+            "note": "misses roughly one robbery in three",
+            "good": false
+          },
+          {
+            "label": "Precision",
+            "value": 86.5,
+            "unit": "%",
+            "note": "few false alarms -- deliberately weighted this way",
+            "good": true
+          },
+          {
+            "label": "False-positive rate",
+            "value": 5.6,
+            "unit": "%",
+            "note": "share of normal clips that misfire",
+            "good": true
+          }
+        ],
+        "measured_on": "139 clips from 8 source videos never seen in training",
+        "caveat": "8 test scenes, not 139 independent samples -- clips from one video are highly correlated. consecutive_required=3 is carried over from violence, not tuned, because there is no continuous robbery footage to tune it on."
+      }
+    },
+    "vandalism": {
+      "enabled": false,
+      "_why_disabled": "MEASURED 2026-08-14, the first evaluation this rule has ever had, against the first labelled vandalism footage this project has ever had (40 positive clips from 11 hand-annotated outdoor UCF scenes, 24 same-camera negatives). RESULT: the rule fired on 0 of 40 vandalism clips and 0 of 24 normal clips. 0% recall. The cause is condition 1 of score_vandalism(): a wrist must be near a YOLO-detected 'sign' box, and weapon_signs.pt produced ZERO Sign detections across 4,800 sampled frames. Person tracking worked normally in 1,260 of those frames, so the pipeline is fine -- the gate is not passable. Condition 4 compounds it: the rule also requires NO other person nearby, and the deployment cameras are Agdao market, Bankerohan and street-food stalls. This is not a tuning problem; there is no threshold that makes a detector that never fires work.",
+      "_why_no_model_either": "A trained X3D vandalism model was also built and rejected: 87.5% FPR on the held-out scenes, firing on 7 of 8 normal clips, with 70.3% accuracy against a 78.4% base rate -- worse than labelling everything vandalism. Trained on 11 scenes. Robbery works at 26. Scene count is the blocker.",
+      "_to_enable": "docs/vandalism_data_collection.md: ~20 filmed outdoor locations, four shots each. Combined with the 18 UCF sources already annotated that gives ~38 scenes, past where robbery started working. Then train and re-measure before setting this true.",
+      "_dashboard_note": "With this false, no VANDALISM alert is emitted at all. That is deliberate: the alternative was RULE_VANDALISM_PLACEHOLDER_CONF = 0.84, an invented constant rendered on the dashboard identically to a real model output, attached to a rule that cannot fire.",
+      "display_name": "Vandalism",
+      "model_path": "weights/x3d_xs_vandalism_scene.pt",
+      "confidence_threshold": 0.9,
+      "consecutive_required": 3,
+      "experimental": true,
+      "_model_path_note": "Present so the trained model can be enabled and inspected from the dashboard, NOT because it is recommended. 0.9 is its least-bad threshold; at the 0.5 used elsewhere its false-positive rate is 87.5%.",
+      "metrics": {
+        "status": "disabled",
+        "headline": {
+          "label": "False-positive rate",
+          "value": 37.5,
+          "unit": "%"
+        },
+        "stats": [
+          {
+            "label": "Accuracy",
+            "value": 73.0,
+            "unit": "%",
+            "note": "at 0.9; below the 78.4% always-guess baseline at 0.5",
+            "good": false
+          },
+          {
+            "label": "Recall",
+            "value": 75.9,
+            "unit": "%",
+            "note": "at threshold 0.9",
+            "good": true
+          },
+          {
+            "label": "Precision",
+            "value": 88.0,
+            "unit": "%",
+            "note": "at threshold 0.9",
+            "good": true
+          },
+          {
+            "label": "False-positive rate",
+            "value": 37.5,
+            "unit": "%",
+            "note": "fires on 3 of 8 quiet clips -- 87.5% at threshold 0.5",
+            "good": false
+          }
+        ],
+        "measured_on": "215 clips from 18 source videos; test split is 3 scenes and 8 negatives",
+        "caveat": "Both routes to this class failed. The rule-based fallback fired 0 times on 40 real clips (zero Sign detections in 4,800 frames). The trained model memorised 11 scenes -- validation accuracy fell 42% to 33% while training accuracy climbed to 86%. Enabling it will produce visible false alarms."
+      }
     }
   },
   "alert": {

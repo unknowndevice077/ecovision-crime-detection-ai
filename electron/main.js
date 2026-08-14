@@ -114,14 +114,19 @@ let setupWindow = null;
 let launchWindow = null;
 let errorWindow = null;
 
-function spawnPython(scriptPath, cwd, extraEnv = {}) {
+// scriptArgs is passed through unquoted to spawn(), which does not go via a
+// shell -- so arguments containing spaces or quotes need no escaping here.
+function spawnPython(scriptPath, cwd, extraEnv = {}, scriptArgs = []) {
   if (!fs.existsSync(scriptPath)) {
     throw new Error(`Expected script not found: ${scriptPath}`);
   }
   const pythonExe = getPythonExe();
   const writableDir = getWritableDataDir();
 
-  const proc = spawn(pythonExe, [scriptPath], {
+  // -u: the optimizer streams "@@"-prefixed progress that the setup window
+  // parses live. Block-buffered stdout would deliver it all at the end and
+  // the progress bar would jump from 0 to 100.
+  const proc = spawn(pythonExe, ["-u", scriptPath, ...scriptArgs], {
     cwd,
     windowsHide: true,
     env: {
@@ -259,8 +264,10 @@ async function createWindow(url) {
 
 function openLaunchWindow() {
   launchWindow = new BrowserWindow({
-    width: 480,
-    height: 520,
+    width: 500,
+    height: 560,
+    icon: path.join(__dirname, "logo.png"),
+    title: "EcoVision Sentinel",
     resizable: false,
     autoHideMenuBar: true,
     backgroundColor: "#0B0F17",
@@ -317,8 +324,12 @@ function openErrorWindow(message) {
 
 function openSetupWindow() {
   setupWindow = new BrowserWindow({
-    width: 560,
-    height: 560,
+    // Taller than the old 560: the flow now ends on a before/after table that
+    // has to show four models plus the combined figure without scrolling.
+    width: 580,
+    height: 640,
+    icon: path.join(__dirname, "logo.png"),
+    title: "EcoVision Sentinel — Setup",
     resizable: false,
     autoHideMenuBar: true,
     backgroundColor: "#0B0F17",
@@ -483,6 +494,11 @@ async function copyAppResourcesInto(targetDir) {
     { from: path.join(RESOURCES_ROOT, "weights"), to: path.join(targetDir, "weights") },
     { from: path.join(RESOURCES_ROOT, "config.json"), to: path.join(targetDir, "config.json") },
     { from: path.join(RESOURCES_ROOT, "requirements.txt"), to: path.join(targetDir, "requirements.txt") },
+    // Both are run from the install directory, not from RESOURCES_ROOT: they
+    // resolve weights/ relative to their own location, and the engines the
+    // optimizer writes have to land beside the weights the app will load.
+    { from: path.join(RESOURCES_ROOT, "optimize_weights.py"), to: path.join(targetDir, "optimize_weights.py") },
+    { from: path.join(RESOURCES_ROOT, "preflight.py"), to: path.join(targetDir, "preflight.py") },
   ];
   for (const { from, to } of entries) {
     if (!fs.existsSync(from)) continue;
@@ -537,18 +553,176 @@ ipcMain.on("setup:start", async (_event, targetInstallDir) => {
       fs.mkdirSync(configDir, { recursive: true });
     }
     fs.writeFileSync(CONFIG_PATH, JSON.stringify({ venvDir, appDataDir }), "utf8");
-    sendProgress(100, "Launching...");
-    setTimeout(() => { setupWindow.close(); launchMainApp(); }, 800);
+    sendProgress(100, "Installed.");
+    // Hand control back to the renderer instead of launching straight away:
+    // the optional GPU optimization is offered between install and first run,
+    // because that is the only moment the user is already waiting. The app is
+    // completely installed and runnable right now -- optimizing changes speed,
+    // never behaviour -- so "Skip" is a first-class outcome, not a failure.
+    if (setupWindow && !setupWindow.isDestroyed()) {
+      setupWindow.webContents.send("setup:complete");
+    }
   } catch (err) {
     sendError(err.message);
   }
 });
+
+function sendOptimizeEvent(ev) {
+  if (setupWindow && !setupWindow.isDestroyed()) setupWindow.webContents.send("setup:optimize-event", ev);
+}
+function sendOptimizeLog(line, isErr) {
+  if (setupWindow && !setupWindow.isDestroyed()) setupWindow.webContents.send("setup:optimize-log", line, !!isErr);
+}
+
+// Can this machine build TensorRT engines at all? Asked by running the real
+// optimizer's own precondition check, so the answer cannot drift from what the
+// optimizer will actually do. Offering a button that then fails is worse than
+// not offering it.
+ipcMain.handle("setup:check-optimize", async () => {
+  const appDataDir = getAppDataDir();
+  const script = path.join(appDataDir, "optimize_weights.py");
+  if (!fs.existsSync(script)) {
+    return { available: false, reason: "The optimizer was not included in this build." };
+  }
+  return new Promise((resolve) => {
+    let out = "";
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const proc = spawnPython(script, appDataDir, {}, ["--probe"]);
+      proc.stdout.on("data", (d) => { out += d.toString(); });
+      proc.stderr.on("data", (d) => { out += d.toString(); });
+      proc.on("error", () => done({ available: false, reason: "The optimizer could not be started." }));
+      proc.on("close", () => {
+        const line = out.split(/\r?\n/).find((l) => l.startsWith("@@"));
+        if (!line) return done({ available: false, reason: "The optimizer did not report a result." });
+        try {
+          const info = JSON.parse(line.slice(2));
+          done({ available: !!info.ok, reason: info.ok ? null : info.detail, facts: info.facts || [] });
+        } catch {
+          done({ available: false, reason: "The optimizer returned an unreadable result." });
+        }
+      });
+      setTimeout(() => done({ available: false, reason: "The hardware check timed out." }), 90000);
+    } catch {
+      done({ available: false, reason: "The optimizer could not be started." });
+    }
+  });
+});
+
+ipcMain.on("setup:start-optimize", () => {
+  const appDataDir = getAppDataDir();
+  const script = path.join(appDataDir, "optimize_weights.py");
+  let buffer = "";
+  let sawSummary = false;
+
+  const handleLine = (line) => {
+    if (line.startsWith("@@")) {
+      try {
+        const ev = JSON.parse(line.slice(2));
+        if (ev.kind === "summary") sawSummary = true;
+        sendOptimizeEvent(ev);
+      } catch {
+        sendOptimizeLog(line);
+      }
+    } else if (line.trim()) {
+      sendOptimizeLog(line);
+    }
+  };
+
+  try {
+    const proc = spawnPython(script, appDataDir, {}, ["--workspace-gb", "2"]);
+    const consume = (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop();          // keep the partial line for the next chunk
+      lines.forEach(handleLine);
+    };
+    proc.stdout.on("data", consume);
+    proc.stderr.on("data", (d) => sendOptimizeLog(d.toString().trimEnd()));
+    proc.on("error", (err) => {
+      sendOptimizeLog(`Optimizer failed to start: ${err.message}`, true);
+      sendOptimizeEvent({ kind: "summary", results: [], combined: null });
+    });
+    proc.on("close", (code) => {
+      if (buffer.trim()) handleLine(buffer);
+      // A crash before the summary would otherwise leave the window on the
+      // progress screen forever. Report an empty result instead: nothing was
+      // installed, so the install itself is still good.
+      if (!sawSummary) {
+        sendOptimizeLog(`Optimizer exited with code ${code} before finishing.`, true);
+        sendOptimizeEvent({ kind: "summary", results: [], combined: null });
+      }
+    });
+  } catch (err) {
+    sendOptimizeLog(`Optimizer failed to start: ${err.message}`, true);
+    sendOptimizeEvent({ kind: "summary", results: [], combined: null });
+  }
+});
+
+ipcMain.on("setup:finish", () => {
+  if (setupWindow && !setupWindow.isDestroyed()) setupWindow.close();
+  launchMainApp();
+});
+
+// Runs preflight.py before anything is spawned, so a machine that cannot run
+// the detector says so in plain language instead of failing later as an opaque
+// Python traceback in a log the user never opens.
+//
+// --skip-models only: weights, schema and database mode. Loading the models
+// here would add seconds to every launch to re-check something that does not
+// change between runs. The full benchmark stays a manual tool.
+//
+// Deliberately NON-FATAL. A failed check is surfaced and startup continues:
+// this must never be the reason a working install refuses to open, and the
+// checks themselves can be wrong on a machine we have not seen.
+function runPreflight() {
+  return new Promise((resolve) => {
+    const script = path.join(RESOURCES_ROOT, "preflight.py");
+    if (!fs.existsSync(script)) return resolve(null);
+    let out = "";
+    try {
+      const proc = spawnPython(script, RESOURCES_ROOT, { ECOVISION_PREFLIGHT: "1" });
+      proc.stdout.on("data", (d) => { out += d.toString(); });
+      proc.stderr.on("data", (d) => { out += d.toString(); });
+      proc.on("close", (code) => resolve({ code, out }));
+      proc.on("error", () => resolve(null));
+      setTimeout(() => resolve({ code: 0, out: out + "\n(preflight timed out)" }), 45000);
+    } catch {
+      resolve(null);
+    }
+  });
+}
 
 async function launchMainApp() {
   killAll();
   try {
     const { backendDir, backendScript, maincodeDir, aiScript } = getScriptPaths();
     const appDataDir = getAppDataDir();
+
+    sendLaunchProgress(5, "Checking this machine...");
+    const pre = await runPreflight();
+    if (pre) {
+      // Always log the full text, but summarise it in one line in the window.
+      // A WARN here is ordinary (a laptop with a browser open trips the free-RAM
+      // check), so showing warnings with the same weight as failures would
+      // teach the user to ignore the panel entirely.
+      sendLaunchLog(pre.out.trimEnd());
+      const verdict = pre.code !== 0 ? "fail" : /READY, with/.test(pre.out) ? "warn" : "ok";
+      const summary = {
+        ok: "This machine checked out",
+        warn: "Ready, with notes — click for details",
+        fail: "Some checks failed — starting anyway",
+      }[verdict];
+      if (launchWindow && !launchWindow.isDestroyed()) {
+        launchWindow.webContents.send("launch:preflight", verdict, summary);
+      }
+      if (verdict === "fail") {
+        sendLaunchLog(
+          "\n--- Preflight reported problems. Startup will continue, but " +
+          "detection may not work. See INSTALL.md for minimum specifications. ---");
+      }
+    }
 
     // Clear stale runtime_ports.json from a previous run so we don't read
     // an old port before the fresh processes have written their own.

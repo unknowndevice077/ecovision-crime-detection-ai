@@ -1,0 +1,172 @@
+/* ==========================================================================
+   EcoVision Sentinel -- desktop shell (setup / launch / optimize windows)
+   --------------------------------------------------------------------------
+   These windows are the first thing anyone sees, so they follow the same
+   Command Console rules as app/globals.css rather than inventing a second
+   look. Carried over verbatim from there:
+
+     - the token values themselves, so a change to the dashboard's palette is
+       a change here too rather than a slow drift into two products;
+     - color reserved STRICTLY for status semantics. The old installer used a
+       green accent, green gradients and a green glow on every button, which
+       meant green carried no information at all. Here accent-blue marks the
+       one action to take, and green/amber/red appear only when something IS
+       nominal, degraded or wrong;
+     - no gradients and no idle animation. The single exception the design
+       system grants is the pulsing status dot, kept for the same reason it
+       exists in the dashboard: a live/working indicator has to read instantly.
+
+   The three windows share this file so they cannot diverge. Window-specific
+   rules live in each page's own <style>.
+   ========================================================================== */
+:root {
+  --bg:        #0A0C10;
+  --panel:     #111419;
+  --panel-2:   #161A21;
+  --line:      #232936;
+  --line-2:    #2E3644;
+
+  --text:      #DDE3EC;
+  --text-2:    #8892A4;
+  --text-3:    #5C6474;
+
+  --accent:    #2D6FF7;
+  --critical:  #E5342F;
+  --warn:      #E08A00;
+  --ok:        #1FA34A;
+
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-size: 13px;
+  padding: 28px 30px;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ---- masthead ---------------------------------------------------------- */
+.masthead { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+.masthead img { width: 40px; height: auto; flex: none; }
+.masthead .wordmark { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
+.masthead .product  { font-size: 10.5px; color: var(--text-3); margin-top: 1px; }
+
+/* ---- type ------------------------------------------------------------- */
+h1 { font-size: 16px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.01em; }
+.subtitle { font-size: 12px; color: var(--text-2); margin: 0 0 22px; line-height: 1.55; }
+.label {
+  font-size: 9px; line-height: 1; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--text-2); margin-bottom: 9px;
+}
+.data { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ---- panels ----------------------------------------------------------- */
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 14px 15px;
+}
+.panel + .panel { margin-top: 10px; }
+
+/* ---- buttons ---------------------------------------------------------- */
+.btn {
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  border-radius: 7px; padding: 11px 16px; cursor: pointer;
+  border: 1px solid transparent; transition: background 0.12s, border-color 0.12s;
+}
+.btn:disabled { opacity: 0.38; cursor: default; }
+.btn-primary { background: var(--accent); color: #fff; width: 100%; }
+.btn-primary:not(:disabled):hover { background: #4581ff; }
+.btn-secondary { background: var(--panel-2); color: var(--text); border-color: var(--line-2); }
+.btn-secondary:not(:disabled):hover { border-color: var(--text-3); }
+.btn-ghost {
+  background: none; border: none; color: var(--text-2); font-size: 11px;
+  padding: 8px 0; cursor: pointer; text-align: left; width: fit-content;
+  font-family: inherit;
+}
+.btn-ghost:hover { color: var(--text); }
+.actions { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding-top: 16px; }
+.actions-row { display: flex; gap: 8px; }
+.actions-row .btn { flex: 1; width: auto; }
+
+/* ---- inputs ----------------------------------------------------------- */
+.input {
+  flex: 1; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 7px; padding: 10px 12px; font-size: 11.5px; color: var(--text);
+  font-family: var(--mono); outline: none; text-overflow: ellipsis; min-width: 0;
+}
+.input:focus { border-color: var(--accent); }
+.input::placeholder { color: var(--text-3); }
+.hint { font-size: 10.5px; color: var(--text-3); margin: 8px 0 0; line-height: 1.5; }
+.hint.error { color: var(--critical); }
+
+/* ---- progress --------------------------------------------------------- */
+.status-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+.status-text { font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.pct { font-size: 11px; color: var(--text-2); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* The one sanctioned glow, matching .status-dot in app/globals.css. */
+.dot {
+  width: 6px; height: 6px; border-radius: 9999px; flex: none;
+  background: var(--accent); box-shadow: 0 0 7px var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.status-text.error { color: var(--critical); }
+.status-text.error .dot { background: var(--critical); box-shadow: 0 0 7px var(--critical); animation: none; }
+.status-text.done { color: var(--ok); }
+.status-text.done .dot { background: var(--ok); box-shadow: 0 0 7px var(--ok); animation: none; }
+
+.bar-track { width: 100%; height: 4px; background: var(--panel-2); border-radius: 9999px; overflow: hidden; }
+.bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.35s ease; border-radius: 9999px; }
+.bar-fill.error { background: var(--critical); }
+.bar-fill.done  { background: var(--ok); }
+
+/* ---- step list -------------------------------------------------------- */
+.steps { display: flex; flex-direction: column; gap: 1px; margin-top: 18px; }
+.step {
+  display: flex; align-items: center; gap: 10px; font-size: 12px;
+  color: var(--text-3); padding: 8px 0;
+}
+.step .mark {
+  width: 14px; height: 14px; flex: none; border-radius: 9999px;
+  border: 1.5px solid var(--line-2); display: flex; align-items: center;
+  justify-content: center; font-size: 9px; font-weight: 700;
+}
+.step .meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+.step.active { color: var(--text); }
+.step.active .mark { border-color: var(--accent); background: var(--accent); }
+.step.done { color: var(--text-2); }
+.step.done .mark { border-color: var(--ok); background: var(--ok); color: #06210f; }
+.step.error { color: var(--critical); }
+.step.error .mark { border-color: var(--critical); background: var(--critical); color: #fff; }
+.step.skipped { color: var(--text-3); }
+
+/* ---- log -------------------------------------------------------------- */
+.log {
+  display: none; background: #06080B; border: 1px solid var(--line);
+  border-radius: 7px; padding: 11px 12px; font-family: var(--mono);
+  font-size: 10px; line-height: 1.65; color: var(--text-3);
+  overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  max-height: 150px; user-select: text;
+}
+.log.open { display: block; }
+.log::-webkit-scrollbar { width: 5px; }
+.log::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 9999px; }
+.log-line.err { color: var(--critical); }
+
+/* ---- misc ------------------------------------------------------------- */
+.scroll { overflow-y: auto; }
+.scroll::-webkit-scrollbar { width: 5px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 9999px; }
+.screen { display: none; flex-direction: column; flex: 1; min-height: 0; }
+.screen.on { display: flex; }

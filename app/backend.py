@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -1967,6 +1967,153 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
         },
         "incidents_by_location": incidents_by_location,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Detection models — read state and measured performance, toggle on/off
+#
+# config.json is the single source of truth. The measured numbers are served
+# from there rather than duplicated into the frontend: retraining a model
+# changes one file, and a copy in TypeScript would silently keep showing the
+# old accuracy long after the model behind it changed.
+#
+# A toggle takes effect on the next detector start, not immediately. The AI core
+# reads config.json once at import; making it hot-reloadable would mean
+# rebuilding model state mid-stream, and a detector that swaps models while a
+# clip buffer is half full is a much worse failure than one that needs a
+# restart. The response says so explicitly so the UI can tell the user.
+# ──────────────────────────────────────────────────────────────────────────────
+DETECTION_CLASSES = ("violence", "robbery", "vandalism")
+
+
+def _read_config_file():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+@app.get("/api/devteam/detection-models")
+async def list_detection_models(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+
+    try:
+        cfg = _read_config_file()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cannot read config.json: {e}")
+
+    det = cfg.get("detection", {})
+    out = []
+    for name in DETECTION_CLASSES:
+        block = det.get(name)
+        if not isinstance(block, dict):
+            continue
+        # violence keys its live values under scene_* because it runs in scene
+        # mode; robbery and vandalism use the plain names.
+        threshold = block.get("scene_confidence_threshold",
+                              block.get("confidence_threshold"))
+        consecutive = block.get("scene_consecutive_required",
+                                block.get("consecutive_required"))
+        model_path = block.get("scene_model_path", block.get("model_path"))
+        weights_ok = bool(model_path) and os.path.exists(
+            os.path.join(BASE_DIR, model_path))
+
+        out.append({
+            "name": name,
+            "display_name": block.get("display_name", name.title()),
+            # violence has no explicit flag historically -- absent means on.
+            "enabled": bool(block.get("enabled", True)),
+            "experimental": bool(block.get("experimental", False)),
+            "threshold": threshold,
+            "consecutive_required": consecutive,
+            "model_path": model_path,
+            "weights_present": weights_ok,
+            "metrics": block.get("metrics"),
+            # The long "_why_*" prose keys, surfaced so the reasoning travels
+            # with the switch rather than living only in the file.
+            "notes": {k: v for k, v in block.items()
+                      if k.startswith("_") and isinstance(v, str)},
+        })
+    return {"models": out, "requires_restart": True}
+
+
+@app.patch("/api/devteam/detection-models/{name}")
+async def set_detection_model(
+    name: str,
+    body: dict = Body(...),
+    authorization: Optional[str] = Header(None),
+):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+
+    if name not in DETECTION_CLASSES:
+        raise HTTPException(status_code=404, detail=f"Unknown detection class: {name}")
+
+    try:
+        cfg = _read_config_file()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cannot read config.json: {e}")
+
+    block = cfg.get("detection", {}).get(name)
+    if not isinstance(block, dict):
+        raise HTTPException(status_code=404, detail=f"No config block for {name}")
+
+    changed = {}
+
+    if "enabled" in body:
+        want = bool(body["enabled"])
+        # Refuse to enable a class whose weights are not on disk. Letting this
+        # through would produce a detector that crashes the AI core at startup,
+        # and the user would see the dashboard fail to come up with no
+        # connection to the switch they just flipped.
+        if want:
+            model_path = block.get("scene_model_path", block.get("model_path"))
+            if not model_path or not os.path.exists(os.path.join(BASE_DIR, model_path)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot enable {name}: weights not found at {model_path!r}.")
+        block["enabled"] = want
+        changed["enabled"] = want
+
+    if "threshold" in body:
+        try:
+            t = float(body["threshold"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="threshold must be a number")
+        if not 0.0 < t < 1.0:
+            raise HTTPException(status_code=400, detail="threshold must be between 0 and 1")
+        key = "scene_confidence_threshold" if "scene_confidence_threshold" in block \
+            else "confidence_threshold"
+        block[key] = t
+        changed[key] = t
+
+    if not changed:
+        raise HTTPException(status_code=400, detail="Nothing to change")
+
+    # Write via a temp file in the same directory, then replace. A partial
+    # write here leaves config.json unparseable, which takes down the backend
+    # AND the detector on next start -- the one file where a torn write is
+    # unrecoverable without a manual edit.
+    tmp = CONFIG_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp, CONFIG_PATH)
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail=f"Could not save config.json: {e}")
+
+    return {
+        "ok": True,
+        "name": name,
+        "changed": changed,
+        "requires_restart": True,
+        "message": "Saved. Restart detection for this to take effect.",
+    }
+
 
 if __name__ == "__main__":
     preferred_port = sys_config["backend"]["port"]
