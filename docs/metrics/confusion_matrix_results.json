@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Violence (daynight checkpoint)",
+    "weights": "x3d_xs_violence_scene_daynight.pt",
+    "threshold": 0.5,
+    "tp": 549,
+    "fp": 24,
+    "tn": 631,
+    "fn": 106,
+    "n": 1310,
+    "accuracy": 0.9007633587786259,
+    "precision": 0.9581151832460733,
+    "recall": 0.8381679389312977,
+    "fpr": 0.0366412213740458,
+    "f1": 0.8941368078175895
+  },
+  {
+    "name": "Robbery",
+    "weights": "x3d_xs_robbery_scene.pt",
+    "threshold": 0.7,
+    "tp": 32,
+    "fp": 5,
+    "tn": 85,
+    "fn": 17,
+    "n": 139,
+    "accuracy": 0.841726618705036,
+    "precision": 0.8648648648648649,
+    "recall": 0.6530612244897959,
+    "fpr": 0.05555555555555555,
+    "f1": 0.7441860465116279
+  },
+  {
+    "name": "Vandalism (currently disabled in config)",
+    "weights": "x3d_xs_vandalism_scene.pt",
+    "threshold": 0.9,
+    "tp": 22,
+    "fp": 3,
+    "tn": 5,
+    "fn": 7,
+    "n": 37,
+    "accuracy": 0.7297297297297297,
+    "precision": 0.88,
+    "recall": 0.7586206896551724,
+    "fpr": 0.375,
+    "f1": 0.8148148148148148
+  }
+]

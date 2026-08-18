@@ -16,6 +16,7 @@ It also times CPU-only inference, which is what decides whether a discrete GPU
 is a hard requirement or merely strongly recommended.
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -24,6 +25,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent   # this file lives in tools/
 sys.path.insert(0, str(REPO / "maincode"))
+
+_CONFIG = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
+_VIOLENCE_SCENE_WEIGHT = Path(_CONFIG["detection"]["violence"]["scene_model_path"]).name
 
 
 def smi_process_mb():
@@ -52,7 +56,7 @@ def bench(device, frames, wdir):
     pose = YOLO(str(wdir / "yolo11s-pose.pt"))
     objd = YOLO(str(wdir / "weapon_signs.pt"))
     viol = SceneViolenceDetector(
-        model_path=str(wdir / "x3d_xs_violence_scene_corpus_neg.pt"), device=device)
+        model_path=str(wdir / _VIOLENCE_SCENE_WEIGHT), device=device)
     robb = SceneViolenceDetector(
         model_path=str(wdir / "x3d_xs_robbery_scene.pt"),
         device=device, threshold=0.7, consecutive=3)

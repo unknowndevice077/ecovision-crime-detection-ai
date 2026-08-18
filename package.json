@@ -66,22 +66,10 @@
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        { "target": "portable", "arch": ["x64"] }
+        { "target": "dir", "arch": ["x64"] }
       ]
     },
-    "compression": "maximum",
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "allowElevation": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "artifactName": "EcoVisionSentinel-Setup-${version}.exe"
-    },
-    "portable": {
-      "artifactName": "EcoVisionSentinel-${version}-portable.exe"
-    },
+    "compression": "store",
     "files": [
       "electron/**/*",
       ".next/**/*",
@@ -91,35 +79,82 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "python-env", "to": "python-env", "filter": ["**/*"] },
-      { "from": "app/backend.py", "to": "backend/backend.py" },
-      { "from": "app/db.py", "to": "backend/db.py" },
-      { "from": "app/port_utils.py", "to": "backend/port_utils.py" },
-      { "from": "app/port_utils.py", "to": "maincode/port_utils.py" },
-      { "from": "app/schema_final.sql", "to": "backend/schema_final.sql" },
-      { "from": "app/schema_sqlite.sql", "to": "backend/schema_sqlite.sql" },
-      { "from": "maincode/main.py", "to": "maincode/main.py" },
-      { "from": "maincode/robbery_vandalism.py", "to": "maincode/robbery_vandalism.py" },
-      { "from": "maincode/x3d_violence_detector.py", "to": "maincode/x3d_violence_detector.py" },
-      { "from": "preflight.py", "to": "preflight.py" },
-      { "from": "optimize_weights.py", "to": "optimize_weights.py" },
+      {
+        "from": "python-env",
+        "to": "python-env",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "app/backend.py",
+        "to": "backend/backend.py"
+      },
+      {
+        "from": "app/db.py",
+        "to": "backend/db.py"
+      },
+      {
+        "from": "app/port_utils.py",
+        "to": "backend/port_utils.py"
+      },
+      {
+        "from": "app/port_utils.py",
+        "to": "maincode/port_utils.py"
+      },
+      {
+        "from": "app/schema_final.sql",
+        "to": "backend/schema_final.sql"
+      },
+      {
+        "from": "app/schema_sqlite.sql",
+        "to": "backend/schema_sqlite.sql"
+      },
+      {
+        "from": "maincode/main.py",
+        "to": "maincode/main.py"
+      },
+      {
+        "from": "maincode/robbery_vandalism.py",
+        "to": "maincode/robbery_vandalism.py"
+      },
+      {
+        "from": "maincode/x3d_violence_detector.py",
+        "to": "maincode/x3d_violence_detector.py"
+      },
+      {
+        "from": "preflight.py",
+        "to": "preflight.py"
+      },
+      {
+        "from": "optimize_weights.py",
+        "to": "optimize_weights.py"
+      },
       {
         "from": "weights",
         "to": "weights",
         "filter": [
           "yolo11s-pose.pt",
           "weapon_signs.pt",
-          "x3d_xs_violence_scene_corpus_neg.pt",
-          "x3d_xs_violence_scene_corpus_neg.pt.meta.json",
+          "x3d_xs_violence_best.pt",
+          "x3d_xs_violence_scene_daynight.pt",
+          "x3d_xs_violence_scene_daynight.pt.meta.json",
           "x3d_xs_robbery_scene.pt",
           "x3d_xs_robbery_scene.pt.meta.json",
           "x3d_xs_vandalism_scene.pt",
           "x3d_xs_vandalism_scene.pt.meta.json"
         ]
       },
-      { "from": "config.json", "to": "config.json" },
-      { "from": "config.production.json", "to": "config.production.json" },
-      { "from": "requirements.txt", "to": "requirements.txt" }
+      {
+        "from": "config.json",
+        "to": "config.json"
+      },
+      {
+        "from": "config.production.json",
+        "to": "config.production.json"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "requirements.txt"
+      }
     ]
   }
 }

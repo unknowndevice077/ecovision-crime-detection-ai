@@ -5,6 +5,7 @@ const http = require("http");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
+const crypto = require("crypto");
 
 app.disableHardwareAcceleration();
 
@@ -37,15 +38,26 @@ function isWritable(dir) {
   }
 }
 
+// Returns { dir, usedFallback }. Only matters for an unpackaged/dev run, or
+// a packaged install whose own folder somehow isn't writable (e.g. the user
+// hand-picked Program Files during NSIS setup without keeping elevation for
+// every future launch). The normal packaged case never calls this: NSIS's
+// own "choose install location" page already picked the one folder
+// everything lives in, and RESOURCES_ROOT IS that folder.
 function resolveVenvInstallDir() {
   if (isWritable(RESOURCES_ROOT)) {
-    return RESOURCES_ROOT;
+    return { dir: RESOURCES_ROOT, usedFallback: false };
   }
   const fallback = path.join(app.getPath("userData"), "EcoVisionRuntime");
   fs.mkdirSync(fallback, { recursive: true });
-  return fallback;
+  return { dir: fallback, usedFallback: true };
 }
 
+// ONE environment, not split. python-env ships as a complete, ready-to-run
+// Python (see build_release.bat / setup.bat: the official embeddable
+// distribution + pip install, NOT `python -m venv`) copied verbatim via
+// extraResources -- there is nothing to build on the target machine, so
+// there is nothing that needs splitting by package weight.
 function getVenvDir() {
   if (fs.existsSync(CONFIG_PATH)) {
     try {
@@ -70,10 +82,22 @@ function getAppDataDir() {
   return RESOURCES_ROOT;
 }
 
+// Everything mutable -- database, credentials file, logs, runtime_ports.json,
+// engines the optimizer writes -- lives INSIDE the same folder as the static
+// app files (a "data" subfolder next to backend/maincode/weights/python-env),
+// not in %APPDATA% on the system drive. That split (static files in one
+// place, all the actual data on C:) is what made the install look scattered
+// across drives instead of being the one folder a user could point at, back
+// up, or move. Falls back to userData only if the install folder itself
+// truly isn't writable, and that fallback is one consolidated folder too,
+// not a second scattering.
 function getWritableDataDir() {
-  const dir = path.join(app.getPath("userData"), "EcoVisionData");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  const installRoot = getAppDataDir();
+  const primary = path.join(installRoot, "data");
+  if (isWritable(primary)) return primary;
+  const fallback = path.join(app.getPath("userData"), "EcoVisionData");
+  fs.mkdirSync(fallback, { recursive: true });
+  return fallback;
 }
 
 function getRuntimePortsPath() {
@@ -90,7 +114,24 @@ function readRuntimePorts() {
   }
 }
 
-function getPythonExe(venvDir = getVenvDir()) {
+// python-env (the shipped, packaged case) is the official embeddable
+// distribution with packages pip installed straight into it -- see
+// build_release.bat -- NOT a `python -m venv`, so python.exe sits at the
+// env's ROOT, not under Scripts\. (A venv's own python.exe is a stub tied to
+// whatever system Python created it -- its pyvenv.cfg records the exact
+// machine path -- which is exactly why the previous build broke on any
+// machine other than the one that built it. The embeddable distribution has
+// no such pointer; it IS the interpreter, not a wrapper around one.)
+//
+// The dev/unpackaged fallback path (runFirstTimeSetup, below) still creates
+// a real `python -m venv`, where python.exe DOES live under Scripts\ -- so
+// this checks root first and falls back to the venv layout, transparently
+// supporting whichever kind of environment is actually at venvDir.
+function getPythonExe(venvDir) {
+  const root = process.platform === "win32"
+    ? path.join(venvDir, "python.exe")
+    : path.join(venvDir, "bin", "python3");
+  if (fs.existsSync(root)) return root;
   return process.platform === "win32"
     ? path.join(venvDir, "Scripts", "python.exe")
     : path.join(venvDir, "bin", "python");
@@ -113,6 +154,7 @@ function getWeightsDir() {
 let setupWindow = null;
 let launchWindow = null;
 let errorWindow = null;
+let splashWindow = null;
 
 // scriptArgs is passed through unquoted to spawn(), which does not go via a
 // shell -- so arguments containing spaces or quotes need no escaping here.
@@ -120,7 +162,7 @@ function spawnPython(scriptPath, cwd, extraEnv = {}, scriptArgs = []) {
   if (!fs.existsSync(scriptPath)) {
     throw new Error(`Expected script not found: ${scriptPath}`);
   }
-  const pythonExe = getPythonExe();
+  const pythonExe = getPythonExe(getVenvDir());
   const writableDir = getWritableDataDir();
 
   // -u: the optimizer streams "@@"-prefixed progress that the setup window
@@ -134,6 +176,14 @@ function spawnPython(scriptPath, cwd, extraEnv = {}, scriptArgs = []) {
       ECOVISION_WRITABLE_DIR: writableDir,
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1",
+      // Our python-env is meant to be fully self-contained. Without this,
+      // Python's `site` module also scans %APPDATA%\Python\Python311\
+      // site-packages -- a per-USER folder outside our control that can hold
+      // anything (or nothing) depending on whose machine this runs on. Left
+      // enabled, behavior can silently vary machine to machine based on
+      // whatever's sitting in that folder; disabled, every install runs the
+      // exact same package set we shipped, deterministically.
+      PYTHONNOUSERSITE: "1",
       HOST,
       ...extraEnv,
     },
@@ -262,8 +312,44 @@ async function createWindow(url) {
   mainWindow.loadURL(url);
 }
 
+// Shown the instant the process starts, before we've even decided whether
+// this is a setup run or a launch run. It has no preload and no logic of its
+// own -- it exists purely so double-clicking the app produces an on-screen
+// result immediately instead of a silent wait while whenReady/fs checks run.
+function openSplashWindow() {
+  const win = new BrowserWindow({
+    width: 320,
+    height: 160,
+    icon: path.join(__dirname, "logo.png"),
+    frame: false,
+    resizable: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#0A0C10",
+    show: false,
+    alwaysOnTop: true,
+    webPreferences: { contextIsolation: true },
+  });
+  splashWindow = win;
+  // Capture `win` locally rather than reading the mutable `splashWindow`
+  // module variable inside this closure. The 8s failsafe timer (see
+  // splashFailsafe below) or another window's own ready-to-show can call
+  // closeSplash() -- which sets splashWindow = null -- before THIS
+  // ready-to-show fires. Reading the shared variable at that point crashed
+  // the main process with "Cannot read properties of null (reading 'show')"
+  // (an uncaught exception, not the graceful in-window error UI). `win` is
+  // never reassigned, so this is race-proof.
+  win.once("ready-to-show", () => { if (!win.isDestroyed()) win.show(); });
+  win.loadFile(path.join(__dirname, "splash.html"));
+  return win;
+}
+
+function closeSplash() {
+  if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
+  splashWindow = null;
+}
+
 function openLaunchWindow() {
-  launchWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 500,
     height: 560,
     icon: path.join(__dirname, "logo.png"),
@@ -278,9 +364,12 @@ function openLaunchWindow() {
       backgroundThrottling: false,
     },
   });
-  launchWindow.once("ready-to-show", () => launchWindow.show());
-  launchWindow.loadFile(path.join(__dirname, "launch.html"));
-  return launchWindow;
+  launchWindow = win;
+  // See openSplashWindow() for why this captures `win` locally instead of
+  // reading the mutable `launchWindow` variable inside the closure.
+  win.once("ready-to-show", () => { if (!win.isDestroyed()) win.show(); closeSplash(); });
+  win.loadFile(path.join(__dirname, "launch.html"));
+  return win;
 }
 
 function sendLaunchProgress(pct, label) {
@@ -323,7 +412,7 @@ function openErrorWindow(message) {
 }
 
 function openSetupWindow() {
-  setupWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     // Taller than the old 560: the flow now ends on a before/after table that
     // has to show four models plus the combined figure without scrolling.
     width: 580,
@@ -340,9 +429,12 @@ function openSetupWindow() {
       backgroundThrottling: false,
     },
   });
-  setupWindow.once("ready-to-show", () => setupWindow.show());
-  setupWindow.loadFile(path.join(__dirname, "setup.html"));
-  return setupWindow;
+  setupWindow = win;
+  // See openSplashWindow() for why this captures `win` locally instead of
+  // reading the mutable `setupWindow` variable inside the closure.
+  win.once("ready-to-show", () => { if (!win.isDestroyed()) win.show(); closeSplash(); });
+  win.loadFile(path.join(__dirname, "setup.html"));
+  return win;
 }
 
 function sendProgress(pct, label) {
@@ -383,6 +475,11 @@ function runPowerShellScript(scriptText, cwd) {
   });
 }
 
+// Only used for an unpackaged/dev run (`npm run desktop` without a
+// pre-built python-env/ present) -- a normal packaged install ships a
+// complete, ready-to-run environment via extraResources and never reaches
+// this at all. Searches the system for something to build a throwaway venv
+// with, purely for local development convenience.
 async function findCompatiblePython() {
   const candidates = process.platform === "win32"
     ? [["py", ["-3.11"]], ["py", ["-3.12"]], ["python", []], ["python3", []]]
@@ -460,11 +557,24 @@ async function runFirstTimeSetup(targetVenvDir, requirementsPath) {
   sendProgress(30, "Upgrading pip...");
   await runStep(pythonExe, ["-m", "pip", "install", "--upgrade", "pip"], RESOURCES_ROOT);
 
-  sendProgress(40, "Installing dependencies (CPU build)...");
-  await runStep(pythonExe, ["-m", "pip", "install", "-r", requirementsPath], RESOURCES_ROOT);
+  sendProgress(40, "Installing dependencies...");
+  await runStep(
+    pythonExe,
+    ["-m", "pip", "install", "-r", requirementsPath, "--extra-index-url", "https://download.pytorch.org/whl/cu121"],
+    RESOURCES_ROOT
+  );
 
   sendProgress(100, "Setup complete.");
 }
+
+// Lets setup.html show the real default path before Install is even
+// clicked, instead of a vague "Default location" placeholder the user has
+// no way to check -- which is what made the silent AppData/C: fallback feel
+// like a surprise.
+ipcMain.handle("setup:get-default-path", () => {
+  const { dir, usedFallback } = resolveVenvInstallDir();
+  return { path: dir, usedFallback };
+});
 
 ipcMain.handle("setup:select-directory", async () => {
   const result = await dialog.showOpenDialog(setupWindow, {
@@ -482,6 +592,59 @@ ipcMain.handle("setup:select-directory", async () => {
   return { path: installDir };
 });
 
+// The .env shipped in resources is a TEMPLATE, not a file to copy verbatim.
+// It previously was copied byte-for-byte into every install -- meaning
+// SECRET_KEY was IDENTICAL across every machine this app was ever installed
+// on. This generates a fresh SECRET_KEY per install instead.
+//
+// TESTING_PHASE_FIXED_CREDENTIALS -- deliberate, per explicit request (18 Aug):
+// this build ships with a KNOWN DevTeam login instead of a random
+// per-install password, because it's still in a testing phase and needs a
+// login every tester already knows without reading a generated credentials
+// file. backend.py's init_db() treats DEVTEAM_BOOTSTRAP_USERNAME/PASSWORD as
+// "deployer already knows this" and skips writing devteam_credentials.txt
+// when they're set -- so surfaceBootstrapCredentials() below shows THESE
+// values directly instead of trying to read that file.
+//
+// MUST be reverted before any real deployment: flip TESTING_PHASE_FIXED_CREDENTIALS
+// to false (or delete the block) and every install goes back to a unique,
+// randomly generated password shown once and never stored in the repo.
+const TESTING_PHASE_FIXED_CREDENTIALS = true;
+const TESTING_DEVTEAM_USERNAME = "devteam";
+const TESTING_DEVTEAM_PASSWORD = "EcoVision2026Test!";
+
+function randomSecret(bytes = 24) {
+  return crypto.randomBytes(bytes).toString("base64url");
+}
+
+function writeGeneratedEnv(targetDir) {
+  const templatePath = path.join(RESOURCES_ROOT, ".env");
+  let template = fs.existsSync(templatePath) ? fs.readFileSync(templatePath, "utf8") : "";
+
+  const secretKey = randomSecret(32);
+
+  const setOrAppend = (content, key, value) => {
+    const line = `${key}=${value}`;
+    const re = new RegExp(`^${key}=.*$`, "m");
+    return re.test(content) ? content.replace(re, line) : content + `\n${line}\n`;
+  };
+  const removeLine = (content, key) => content.replace(new RegExp(`^${key}=.*$\\n?`, "m"), "");
+
+  let out = template;
+  out = out.replace(/^APP_ENV=.*$/m, "APP_ENV=production");
+  out = setOrAppend(out, "SECRET_KEY", secretKey);
+  if (TESTING_PHASE_FIXED_CREDENTIALS) {
+    out = setOrAppend(out, "DEVTEAM_BOOTSTRAP_USERNAME", TESTING_DEVTEAM_USERNAME);
+    out = setOrAppend(out, "DEVTEAM_BOOTSTRAP_PASSWORD", TESTING_DEVTEAM_PASSWORD);
+  } else {
+    out = removeLine(out, "DEVTEAM_BOOTSTRAP_USERNAME");
+    out = removeLine(out, "DEVTEAM_BOOTSTRAP_PASSWORD");
+  }
+
+  fs.writeFileSync(path.join(targetDir, ".env"), out, "utf8");
+  sendLog("Generated a unique secret key for this install.");
+}
+
 // Was fs.cpSync -- fully synchronous, so copying "weights" (large ML model
 // files) blocked the Electron main process for the whole duration, which
 // also stalls the setup window's IPC (sendLog/sendProgress calls queued
@@ -492,6 +655,8 @@ async function copyAppResourcesInto(targetDir) {
     { from: path.join(RESOURCES_ROOT, "backend"), to: path.join(targetDir, "backend") },
     { from: path.join(RESOURCES_ROOT, "maincode"), to: path.join(targetDir, "maincode") },
     { from: path.join(RESOURCES_ROOT, "weights"), to: path.join(targetDir, "weights") },
+    // .env is intentionally NOT in this list -- see writeGeneratedEnv, called
+    // separately so secrets are generated, not copied.
     { from: path.join(RESOURCES_ROOT, "config.json"), to: path.join(targetDir, "config.json") },
     { from: path.join(RESOURCES_ROOT, "requirements.txt"), to: path.join(targetDir, "requirements.txt") },
     // Both are run from the install directory, not from RESOURCES_ROOT: they
@@ -505,21 +670,38 @@ async function copyAppResourcesInto(targetDir) {
     sendLog(`Copying ${path.basename(from)}...`);
     await fsp.cp(from, to, { recursive: true, force: true });
   }
+  writeGeneratedEnv(targetDir);
 }
 
-// Writes DEVTEAM bootstrap credentials to a plain text file next to the
-// install folder AND shows a blocking dialog, instead of only printing to
-// a console window that closes on exit.
-function surfaceBootstrapCredentials(appDataDir) {
+// Shows the DevTeam login in a blocking dialog on first run, instead of
+// only printing to a console window that closes on exit.
+//
+// Two modes, matching writeGeneratedEnv above: with TESTING_PHASE_FIXED_CREDENTIALS,
+// backend.py was TOLD the username/password (via .env) and does NOT write
+// devteam_credentials.txt -- so this shows the known fixed values directly,
+// every time, since they're the same on every install by design. Once that
+// flag is reverted, backend.py generates a random password and writes it to
+// devteam_credentials.txt in the WRITABLE data dir (getWritableDataDir(),
+// NOT the install dir -- a previous version of this function checked the
+// wrong folder and the dialog silently never appeared), and this falls back
+// to reading and showing that file, once, since a random password can't be
+// known ahead of time here.
+function surfaceBootstrapCredentials() {
   try {
-    const ports = readRuntimePorts();
-    const backendPort = ports.backend || BACKEND_DESIRED_PORT;
-    const credFile = path.join(appDataDir, "devteam_credentials.txt");
-    // backend.py prints bootstrap creds to stdout on first run only; we
-    // can't recover them after the fact here, so this just ensures the
-    // *file location* is visible/known. The actual write of this file is
-    // done from backend.py itself on bootstrap (see backend.py's
-    // init_db()) -- if it exists, surface it prominently.
+    if (TESTING_PHASE_FIXED_CREDENTIALS) {
+      dialog.showMessageBoxSync({
+        type: "info",
+        title: "EcoVision Sentinel — Testing-Phase Login",
+        message: "DevTeam login for this build:",
+        detail: `Username: ${TESTING_DEVTEAM_USERNAME}\nPassword: ${TESTING_DEVTEAM_PASSWORD}\n\n` +
+          `This is a FIXED testing credential, the same on every install of this build -- ` +
+          `not a per-install secret. Do not ship it in a real deployment.`,
+        buttons: ["OK"],
+      });
+      return;
+    }
+    const writableDir = getWritableDataDir();
+    const credFile = path.join(writableDir, "devteam_credentials.txt");
     if (fs.existsSync(credFile)) {
       const contents = fs.readFileSync(credFile, "utf8");
       dialog.showMessageBoxSync({
@@ -537,7 +719,21 @@ function surfaceBootstrapCredentials(appDataDir) {
 
 ipcMain.on("setup:start", async (_event, targetInstallDir) => {
   try {
-    const appDataDir = targetInstallDir || resolveVenvInstallDir();
+    let appDataDir = targetInstallDir;
+    if (!appDataDir) {
+      const resolved = resolveVenvInstallDir();
+      appDataDir = resolved.dir;
+      if (resolved.usedFallback) {
+        // Previously silent. The user is told exactly where their data is
+        // going and why, instead of it just landing in AppData with no trace.
+        sendLog(
+          `Note: the app's own folder isn't writable here, so runtime data ` +
+          `(python environments, weights, database) is being installed to ` +
+          `${appDataDir} instead. Pick "Choose..." on the previous screen to ` +
+          `install somewhere else.`
+        );
+      }
+    }
     const venvDir = path.join(appDataDir, ".venv");
 
     fs.mkdirSync(appDataDir, { recursive: true });
@@ -700,6 +896,25 @@ async function launchMainApp() {
     const { backendDir, backendScript, maincodeDir, aiScript } = getScriptPaths();
     const appDataDir = getAppDataDir();
 
+    // BUG FOUND 2026-08-18: writeGeneratedEnv() was only ever called from the
+    // old setup.html copy-flow (copyAppResourcesInto), which a normal
+    // packaged install never runs -- python-env ships complete, so setup is
+    // skipped and launchMainApp() runs directly. That meant .env was NEVER
+    // written on a normal install: DEVTEAM_BOOTSTRAP_USERNAME/PASSWORD never
+    // reached backend.py's environment, so init_db() fell through to the
+    // RANDOM-password branch and wrote a DIFFERENT password to
+    // devteam_credentials.txt -- while surfaceBootstrapCredentials() (below,
+    // after backend starts) unconditionally displayed the FIXED testing
+    // password regardless, because it never checked whether .env had
+    // actually been written. The dialog showed a login that did not work.
+    // Written once per install (guarded by existsSync) so SECRET_KEY -- and
+    // therefore every issued login session -- stays stable across restarts
+    // instead of invalidating on every launch.
+    const envPath = path.join(appDataDir, ".env");
+    if (!fs.existsSync(envPath)) {
+      writeGeneratedEnv(appDataDir);
+    }
+
     sendLaunchProgress(5, "Checking this machine...");
     const pre = await runPreflight();
     if (pre) {
@@ -797,7 +1012,7 @@ async function launchMainApp() {
       throw new Error(`${portErr.message}\n\nNext.js Output (last 2000 chars):\n${nextLog.slice(-2000)}`);
     }
 
-    surfaceBootstrapCredentials(appDataDir);
+    surfaceBootstrapCredentials();
 
     await createWindow(`http://${HOST}:${frontendPort}`);
     if (launchWindow && !launchWindow.isDestroyed()) launchWindow.close();
@@ -811,12 +1026,29 @@ ipcMain.on("launch:start", () => {
 });
 
 app.whenReady().then(async () => {
-  const pythonExe = getPythonExe();
+  // Shown immediately -- before deciding setup vs. launch -- so double-
+  // clicking the app produces an on-screen result right away instead of a
+  // silent wait while the fs checks below run.
+  openSplashWindow();
+  // Failsafe: the splash is always-on-top, so if setup/launch window creation
+  // ever throws before reaching its own ready-to-show handler, don't leave an
+  // always-on-top window covering the screen forever.
+  const splashFailsafe = setTimeout(closeSplash, 8000);
+
+  // python-env ships as a complete, ready-to-run environment via
+  // extraResources (see build_release.bat) -- there is nothing to build or
+  // extract here. This existing on a normal install means setup is skipped
+  // entirely and we go straight to launch; it's absent only for an
+  // unpackaged/dev run or a genuinely broken install, either of which needs
+  // the setup flow to build one.
+  const pythonExe = getPythonExe(getVenvDir());
   const { backendScript } = getScriptPaths();
   if (!fs.existsSync(pythonExe) || !fs.existsSync(backendScript)) {
+    clearTimeout(splashFailsafe);
     openSetupWindow();
     return;
   }
+  clearTimeout(splashFailsafe);
 
   openLaunchWindow();
 });

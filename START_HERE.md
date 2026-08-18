@@ -10,9 +10,9 @@ the traps. Current as of 14 Aug 2026.
 | Goal | Command | Notes |
 |---|---|---|
 | **Run everything on this PC** | `run_dev_system.bat` | Backend + detector + dashboard, hot reload. Uses `.venv`. |
-| **Build the installer** | `build_release.bat` | → `dist\EcoVisionSentinel-1.0.0-portable.exe` (1.63 GB). ~30 min. |
+| **Build the installer** | `build_release.bat` | → `dist\EcoVisionSentinel-Setup-1.0.0.exe` **and** `dist\EcoVisionSentinel-1.0.0-portable.exe`. ~30 min. |
 | …with the GPU optimizer bundled | `build_release.bat --with-tensorrt` | Adds ~3.2 GB. Only if the target PC has no internet and you want the optimize step there. |
-| **Install on another PC** | copy the `.exe`, double-click | No Python, no pip, no terminal, no internet. |
+| **Install on another PC** | copy `EcoVisionSentinel-Setup-1.0.0.exe`, run it once | Ship **Setup**, not portable — see trap #9. No Python, no pip, no terminal, no internet. |
 | **Check a machine can run it** | `.venv\Scripts\python.exe preflight.py` | Weights, schema, GPU, RAM, throughput. |
 | **Speed up models for this GPU** | `.venv\Scripts\python.exe optimize_weights.py` | Optional. Prints before/after. `--revert` undoes it. |
 | **Turn a detector on/off** | Dashboard → **AI Models** tab | DevTeam login. Restart detection to apply. |
@@ -149,6 +149,21 @@ once at startup. Hot-reloading would mean swapping models with a half-full clip
 buffer.
 
 **8. Never commit unless asked.**
+
+**9. The portable `.exe` re-extracts its whole ~5+ GB payload on every single
+launch** — that's a self-extraction happening before any of our Electron code
+runs, not a bug in `main.js`. It now shows `build/splash.bmp` while that
+happens (`portable.splashImage` in `package.json`, confirmed against the real
+template at `node_modules/app-builder-lib/templates/nsis/portable.nsi`: the
+NSIS `BgImage` plugin draws it, `HideWindow` keeps the rest of the wizard
+chrome suppressed, `BgImage::Destroy` closes it right before the app
+launches) — but it is a **static image**, not a progress bar, because nothing
+in that extraction step can report real progress into it. The NSIS `Setup`
+build (now the primary target — `package.json`'s `win.target` had `nsis`
+configured but unused; `build_release.bat` was hardcoding `--win portable`,
+fixed 15 Aug) pays the extraction cost once at install time instead. Ship
+Setup; keep portable, splash and all, only for a machine that can't run an
+installer.
 
 ---
 

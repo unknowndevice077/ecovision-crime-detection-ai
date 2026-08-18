@@ -47,7 +47,24 @@ like-for-like:
 | | recall | FPR | precision |
 |---|---|---|---|
 | previous checkpoint | 87.1% | 13.5% | 91.8% |
-| **deployed** | **91.4%** | **12.9%** | **92.5%** |
+| corpus_neg (deployed until 18 Aug) | 91.4% | 12.9% | 92.5% |
+
+**Deployed since 18 Aug 2026: `x3d_xs_violence_scene_daynight.pt`.** Same
+threshold (0.50) and `consecutive` (3) as corpus_neg; strictly better at the
+real-camera operating point (§2.4). Confusion matrix on the daynight
+manifest's own held-out TEST split (1,310 clips, 655 positive), at the
+deployed threshold:
+
+| | Predicted violent | Predicted not violent |
+|---|---|---|
+| **Actually violent** | TP = 549 | FN = 106 |
+| **Actually not violent** | FP = 24 | TN = 631 |
+
+accuracy 90.1%, precision 95.8%, recall 83.8%, FPR 3.7%, F1 89.4%. Measured
+20 Aug 2026 by running the deployed `SceneViolenceDetector` code path directly
+(not a reimplementation) against every TEST-split clip, one forward pass per
+clip. Cross-checked against the checkpoint's own `.meta.json`, recorded at
+training time (18 Aug 2026) — identical to three decimal places.
 
 ### 2.3 Detection rate on continuous footage
 
@@ -139,6 +156,16 @@ safe to include, which took the class from 15 usable sources to 43.
 quarter of normal clips misfire, which is the alert-fatigue failure this
 project spent most of its effort on for violence.
 
+Confusion matrix at the deployed threshold (0.7), same 139 clips:
+
+| | Predicted robbery | Predicted not robbery |
+|---|---|---|
+| **Actually robbery** | TP = 32 | FN = 17 |
+| **Actually not robbery** | FP = 5 | TN = 85 |
+
+F1 = 74.4%. Measured 18 Aug 2026 the same way as violence (§2.2) — the
+deployed detector code path, one forward pass per test clip.
+
 ### 3.3 Caveats
 
 - **8 test scenes, not 139 independent samples.**
@@ -185,6 +212,17 @@ It fires on **7 of the 8 normal clips**. Its 70.3% accuracy is *below* the
 78.4% obtainable by labelling everything vandalism. Validation confirmed it
 during training: accuracy fell 42% → 33% while training accuracy climbed to
 86% — memorisation of 11 scenes.
+
+Confusion matrix at the least-bad threshold (0.9), the 37-clip test split:
+
+| | Predicted vandalism | Predicted not vandalism |
+|---|---|---|
+| **Actually vandalism** | TP = 22 | FN = 7 |
+| **Actually not vandalism** | FP = 3 | TN = 5 |
+
+F1 = 81.5%. Note the denominator: only **8 actual negatives** in this test
+split, so the 37.5% FPR is 3 misfires out of 8, not a stable rate. Measured 18
+Aug 2026, same method as violence and robbery above.
 
 The test set is 3 scenes and 8 negatives, so it is simultaneously **too small
 to measure anything reliably** and bad at what little it measures. Neither

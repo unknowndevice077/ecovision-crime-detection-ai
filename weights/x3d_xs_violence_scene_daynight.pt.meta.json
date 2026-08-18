@@ -15,7 +15,7 @@
   "best_val_acc": 0.8779,
   "best_epoch": 1,
   "epochs_run": 7,
-  "status": "STAGED, NOT DEPLOYED -- candidate replacement for x3d_xs_violence_scene_corpus_neg.pt",
+  "status": "DEPLOYED 2026-08-18, replacing corpus_neg. See config.json's detection.violence._scene_model_path_rollback for the full deployment note.",
 
   "val_acc_caveat": "0.8779 vs the deployed model's 0.8814 made this look like a REGRESSION, and it was reported as one. That was wrong: val is a model-SELECTION split on a different manifest, and the two checkpoints are calibrated differently, so comparing them at one fixed threshold measures calibration rather than quality. Every figure below is from the test split or from real footage instead.",
 
@@ -62,5 +62,5 @@
 
   "recommendation": "Deploy as a drop-in at the SAME threshold (0.50) and consecutive (3): recall unchanged at 95.0%, real-camera alarms 12.75 -> 4.50/hr, no config change beyond the model path. Do NOT lower the threshold -- 0.45 was measured and rejected above.",
 
-  "not_deployed_because": "The user asked that the shipping MVP not be replaced yet. config.json still points at x3d_xs_violence_scene_corpus_neg.pt. To adopt: set detection.violence.scene_model_path to weights/x3d_xs_violence_scene_daynight.pt and restart detection."
+  "deployed_note": "Adopted 2026-08-18 per the recommendation above -- config.json's detection.violence.scene_model_path now points here. Roll back by setting it back to weights/x3d_xs_violence_scene_corpus_neg.pt."
 }

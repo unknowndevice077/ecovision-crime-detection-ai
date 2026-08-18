@@ -20,4 +20,7 @@ pillow==12.2.0
 tqdm==4.67.3
 pandas==3.0.3
 psutil==7.2.2
-tensorrt-cu12
+# TensorRT is NOT installed here. It's ~3.2 GB and optional -- build_release.bat
+# --with-tensorrt installs it straight into python-env-detector after this file,
+# pinned there to match the base image's CUDA toolkit. Pinning an unpinned
+# "tensorrt-cu12" in a locked requirements file defeats the point of locking.

@@ -22,6 +22,9 @@ env/
 # own internal .gitignore, but that alone is fragile (lost if the venv is ever
 # regenerated wholesale), so the root file is authoritative too.
 python-env/
+python-env*/
+.venv/
+.venv*/
 
 # ---- Build outputs (regenerable) --------------------------------------------
 .next/
@@ -29,6 +32,12 @@ out/
 # dist/ holds the 1.63 GB portable .exe. Ship it as a GitHub Release asset,
 # never as a tracked file -- GitHub rejects blobs over 100 MB.
 dist/
+# dist_installer/ is the Inno Setup output (the real installer, ~3 GB single
+# .exe, since the MSI/NSIS pivot) -- same reasoning as dist/ above. This got
+# missed once already: a build was committed here before this line existed
+# and had to be stripped back out of history. Ship it as a GitHub Release
+# asset, never as a tracked file.
+dist_installer/
 *.egg-info/
 pip-wheel-metadata/
 tsconfig.tsbuildinfo
@@ -139,3 +148,9 @@ Thumbs.db
 # from the repo, so it is kept.)
 docs/media/_preview_*.png
 docs/media/_chk.png
+
+# Word/Office lock files -- created while a .docx is open, one per viewer,
+# never meant to be committed (and conflicts if two people have it open).
+~$*.doc*
+~$*.xls*
+~$*.ppt*

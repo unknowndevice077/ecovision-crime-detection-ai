@@ -70,7 +70,7 @@ the target machine.** There are two machines with two different jobs:
 |---|---|---|
 | needs Python + Node | yes | **no** |
 | needs internet | yes, to fetch packages | **no** |
-| what you do | run `build_release.bat` once | **double-click the .exe** |
+| what you do | run `build_release.bat` once | **run the Setup .exe once** |
 
 ### On this PC, once
 
@@ -80,13 +80,34 @@ build_release.bat
 
 It verifies weights, schema and database mode via preflight, builds the
 frontend, and packages everything — including a complete Python environment
-with PyTorch, the four model weights, and the SQLite schema — into a single
-portable executable in `dist\`.
+with PyTorch, the four model weights, and the SQLite schema — into **two**
+files in `dist\`:
 
-### On the laptop
+| file | use it for |
+|---|---|
+| `EcoVisionSentinel-Setup-<version>.exe` | **the one to ship.** Extracts once, into a real folder. Every launch after that starts instantly. |
+| `EcoVisionSentinel-<version>-portable.exe` | a machine that flatly cannot run an installer (locked-down/no-admin). **Slow every time**, not just the first — see the note below. |
 
-1. Copy the `.exe` from `dist\` across.
-2. Double-click it.
+### On the laptop (Setup, recommended)
+
+1. Copy `EcoVisionSentinel-Setup-<version>.exe` across.
+2. Run it, click through (it's a normal Windows installer — pick a folder,
+   Next, Install).
+3. Launch it from the shortcut it creates. Every launch after the first is
+   fast: nothing is re-extracted.
+
+### On the laptop (portable, only if Setup truly isn't an option)
+
+Double-click the portable `.exe`. A splash screen appears while it silently
+unpacks its entire ~5+ GB Python/PyTorch environment into a temp folder —
+that extraction happens **before our own code starts running**, so the
+splash is a static "please wait" image, not a live progress bar (NSIS has no
+way to report extraction progress into it). Expect it to sit there for a
+while on a spinning disk or a loaded machine. It happens on **every** launch,
+not just the first, because portable never leaves anything installed —
+that's the real cost portable pays for leaving no footprint. Setup does this
+extraction exactly once, which is why it's the better default for anything
+other than a machine you truly cannot install on.
 
 That is the whole procedure. On first launch the app:
 

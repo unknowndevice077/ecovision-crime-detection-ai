@@ -185,6 +185,21 @@
 
   let selectedPath = '';
 
+  /* ---------- show the real default path up front ----------
+     Previously this field just said "Default location" with no way to check
+     what that actually resolved to, so a silent AppData/C: fallback (when
+     the app's own folder isn't writable) looked like nothing happened. Now
+     it's shown before Install is even clicked. */
+  (async () => {
+    const def = await window.setupBridge.getDefaultPath();
+    if (!def || !def.path) return;
+    el('pathInput').value = def.path;
+    el('pathInput').placeholder = def.path;
+    el('pathHint').textContent = def.usedFallback
+      ? 'Default: ' + def.path + ' (the app folder itself isn\'t writable here, so this goes to your user data folder instead). Choose a different location below if you\'d rather.'
+      : 'Default: ' + def.path + '. Choose a different location below if you\'d rather.';
+  })();
+
   /* ---------- shared log helper ---------- */
   function makeLog(logId, toggleId) {
     const log = el(logId), toggle = el(toggleId);

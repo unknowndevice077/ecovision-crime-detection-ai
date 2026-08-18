@@ -3,6 +3,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("setupBridge", {
   selectDirectory: () => ipcRenderer.invoke("setup:select-directory"),
+  // Lets setup.html show the real default install path up front, instead of
+  // a vague placeholder -- so nothing about where files land is a surprise.
+  getDefaultPath: () => ipcRenderer.invoke("setup:get-default-path"),
   startSetup: (targetPath) => ipcRenderer.send("setup:start", targetPath),
   onLog: (cb) => ipcRenderer.on("setup:log", (_e, line) => cb(line)),
   onProgress: (cb) => ipcRenderer.on("setup:progress", (_e, pct, label) => cb(pct, label)),

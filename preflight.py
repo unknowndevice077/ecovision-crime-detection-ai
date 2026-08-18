@@ -24,6 +24,7 @@ WHAT IT CHECKS, in order of how likely it is to be the thing that breaks:
 Nothing here writes to the database or the network. Safe to run anywhere.
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -31,6 +32,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "maincode"))
+
+_CONFIG = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
+_VIOLENCE_SCENE_WEIGHT = Path(_CONFIG["detection"]["violence"]["scene_model_path"]).name
+_ROBBERY_WEIGHT = Path(_CONFIG["detection"]["robbery"]["model_path"]).name
 
 GREEN, RED, YELLOW, RESET = "\033[92m", "\033[91m", "\033[93m", "\033[0m"
 
@@ -119,11 +124,16 @@ def main():
 
     # ---- 4. Weights -----------------------------------------------------
     print("\n[4] Model weights")
+    # Read from config.json rather than hardcoded -- these two are exactly the
+    # checkpoint filenames that change whenever a retrained model is deployed
+    # (see config.json's own _scene_model_path_rollback history). A hardcoded
+    # name here silently drifts from what's actually deployed and reports a
+    # false MISSING for the correct, present file on every single install.
     required = {
         "yolo11s-pose.pt": "person + pose detection",
         "weapon_signs.pt": "weapon / sign detection",
-        "x3d_xs_violence_scene_corpus_neg.pt": "violence (scene mode)",
-        "x3d_xs_robbery_scene.pt": "robbery",
+        _VIOLENCE_SCENE_WEIGHT: "violence (scene mode)",
+        _ROBBERY_WEIGHT: "robbery",
     }
     wdir = REPO / "weights"
     for f, why in required.items():
@@ -178,10 +188,10 @@ def main():
             pose = YOLO(str(wdir / "yolo11s-pose.pt"))
             objd = YOLO(str(wdir / "weapon_signs.pt"))
             viol = SceneViolenceDetector(
-                model_path=str(wdir / "x3d_xs_violence_scene_corpus_neg.pt"),
+                model_path=str(wdir / _VIOLENCE_SCENE_WEIGHT),
                 device=device)
             robb = SceneViolenceDetector(
-                model_path=str(wdir / "x3d_xs_robbery_scene.pt"),
+                model_path=str(wdir / _ROBBERY_WEIGHT),
                 device=device, threshold=0.7, consecutive=3)
             print(f"        4 models loaded in {time.time()-t0:.1f}s")
 

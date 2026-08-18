@@ -37,6 +37,9 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parent
+_CONFIG = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
+_VIOLENCE_SCENE_STEM = Path(_CONFIG["detection"]["violence"]["scene_model_path"]).stem
+_ROBBERY_STEM = Path(_CONFIG["detection"]["robbery"]["model_path"]).stem
 sys.path.insert(0, str(REPO / "maincode"))
 WEIGHTS = REPO / "weights"
 
@@ -228,9 +231,16 @@ def build_yolo_engine(pt_path, imgsz=416, workspace_gb=1.0):
 
 # ---------------------------------------------------------------------------
 TARGETS = [
-    {"stem": "x3d_xs_violence_scene_corpus_neg", "kind": "x3d",
+    # Stems read from config.json rather than hardcoded -- these are exactly
+    # the checkpoints that change on every retrain/redeploy (see config.json's
+    # own _scene_model_path_rollback history). A hardcoded stem here silently
+    # stops building an engine for whatever model is ACTUALLY deployed the
+    # moment config.json moves on, with no error -- it would just quietly
+    # optimize a checkpoint nothing uses anymore. Same bug class as the one
+    # found in preflight.py's weight check.
+    {"stem": _VIOLENCE_SCENE_STEM, "kind": "x3d",
      "label": "Violence detector", "batches": [1, 17]},
-    {"stem": "x3d_xs_robbery_scene", "kind": "x3d",
+    {"stem": _ROBBERY_STEM, "kind": "x3d",
      "label": "Robbery detector", "batches": [1]},
     {"stem": "yolo11s-pose", "kind": "yolo", "task": "pose",
      "label": "Person / pose detection"},

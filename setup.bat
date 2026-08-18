@@ -29,6 +29,9 @@ if errorlevel 1 goto :error
 
 echo.
 echo [3/5] Creating dev environment (.venv) -- this is what run_dev_system.bat uses...
+REM Dev keeps the full monolithic requirements.txt: local hot-reload wants
+REM backend + detector + plotting + onnx/tensorrt export tooling all in one
+REM interpreter so nothing needs juggling while iterating. Nothing here ships.
 if exist .venv (
     echo  =^> .venv already exists, skipping creation. Delete it first to rebuild from scratch.
 ) else (
@@ -40,16 +43,18 @@ call .venv\Scripts\pip install -r requirements.txt --extra-index-url https://dow
 if errorlevel 1 goto :error
 
 echo.
-echo [4/5] Creating portable-build environment (python-env) -- this is what gets
-echo       bundled into the installer by build_release.bat...
-if exist python-env (
-    echo  =^> python-env already exists, skipping creation. Delete it first to rebuild from scratch.
-) else (
-    python -m venv python-env
-    if errorlevel 1 goto :error
-)
-call python-env\Scripts\pip install --upgrade pip
-call python-env\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+echo [4/5] Building python-env -- the runtime that gets bundled into the
+echo       installer by build_release.bat.
+echo.
+echo       NOT a venv, deliberately: a `python -m venv` records the exact path
+echo       of the interpreter that created it and breaks on any other machine
+echo       (see tools\build_python_env.ps1 for the full story -- this shipped
+echo       once and broke the app on every machine except the dev box).
+echo       Built on the official embeddable Python distribution instead,
+echo       which is genuinely relocatable, then verified as such before this
+echo       script reports success.
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_python_env.ps1
 if errorlevel 1 goto :error
 
 echo.
