@@ -106,7 +106,21 @@ export default function EcoVisionSentinel() {
   // for the resolved config instead of racing it.
   useEffect(() => {
     const savedUser = localStorage.getItem('ecoUser');
-    if (!savedUser) {
+    // Checking ecoUser's presence alone let a stale-but-present ecoUser with
+    // a missing or invalid ecoToken straight through to the dashboard, where
+    // every real API call then 401s with no way back except manually
+    // clearing storage. ecoUser has no expiry of its own and, unlike
+    // ecoToken, is never invalidated by a SECRET_KEY change (writeGeneratedEnv
+    // in electron/main.js generates a fresh one per install) -- so the two
+    // can go out of sync across reinstalls even though Electron's localStorage
+    // persists in the app's userData path independent of which install wrote
+    // it. This only catches the token being entirely absent; an actually
+    // invalid-but-present token is still caught downstream when a real
+    // request 401s (see DevteamView's fetchOverview).
+    const savedToken = localStorage.getItem('ecoToken');
+    if (!savedUser || !savedToken) {
+      localStorage.removeItem('ecoUser');
+      localStorage.removeItem('ecoToken');
       router.push('/loginpage/login');
       return;
     }
