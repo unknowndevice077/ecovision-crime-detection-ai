@@ -631,7 +631,23 @@ function writeGeneratedEnv(targetDir) {
   const removeLine = (content, key) => content.replace(new RegExp(`^${key}=.*$\\n?`, "m"), "");
 
   let out = template;
-  out = out.replace(/^APP_ENV=.*$/m, "APP_ENV=production");
+  // BUG FOUND 2026-08-18: this used to force APP_ENV=production. Both
+  // backend.py and maincode/main.py select config.<APP_ENV>.json over
+  // config.json when that file exists -- a real, intentional feature for
+  // Docker Compose (docker-compose.yml sets APP_ENV=production there on
+  // purpose, to ship different settings in a container). But config.
+  // production.json is a DOCKER-ONLY artifact: violence only, no robbery or
+  // vandalism blocks at all, stale track-mode threshold/model_path. Forcing
+  // APP_ENV=production here made the DESKTOP app silently load that file
+  // instead of config.json on every single packaged install -- every model
+  // swap and every robbery/vandalism config change this project has made
+  // was invisible to the actual shipped app, which is why the AI Models
+  // admin page only ever showed Violence. config.development.json (the
+  // previous default) is equally stale and equally wrong for this app.
+  // "desktop" matches neither Docker env file, by design, so this always
+  // falls through to plain config.json -- the only file the desktop build
+  // is meant to read.
+  out = out.replace(/^APP_ENV=.*$/m, "APP_ENV=desktop");
   out = setOrAppend(out, "SECRET_KEY", secretKey);
   if (TESTING_PHASE_FIXED_CREDENTIALS) {
     out = setOrAppend(out, "DEVTEAM_BOOTSTRAP_USERNAME", TESTING_DEVTEAM_USERNAME);
