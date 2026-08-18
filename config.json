@@ -94,6 +94,15 @@
         "caveat": "The 45/hr flyover camera is the worst case and the only one whose venue does not also appear in training -- it is the least flattering figure and the most trustworthy. Recall on the deployment cameras themselves is unmeasured: no labelled incident has been recorded on them."
       }
     },
+    "weapon": {
+      "display_name": "Weapons & Signs",
+      "enabled": true,
+      "confidence_threshold": 0.38,
+      "consecutive_required": 1,
+      "model_path": "weights/weapon_signs.pt",
+      "_why_no_smoothing": "Single-frame YOLO object detector, not the temporal SceneViolenceDetector the other three classes use -- there is no multi-frame confirmation to tune. consecutive_required=1 documents that plainly rather than implying a EMA/smoothing stage that doesn't exist for this class.",
+      "_added": "2026-08-19: previously ran unconditionally with no enable/disable switch anywhere in the app -- added for parity with violence/robbery/vandalism, all of which already had one. See maincode/main.py's WEAPON_DETECTION_ENABLED gate on the _weapon_exec submit call."
+    },
     "static_weapon_filter": {
       "enabled": true,
       "window_observations": 45,

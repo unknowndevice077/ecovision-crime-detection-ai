@@ -47,9 +47,10 @@ The system runs three integrated components, packaged as one desktop application
 - ✅ **ESP32 device integration** — hardware connectivity and live telemetry (battery, solar voltage, temperature) + remote siren activation
 - ✅ **Two-organization access control** — barangay and PNP hierarchies with database-enforced scope; see [Organization & Roles](#organization--roles)
 - ✅ **Runtime-selectable camera index** — no hardcoded camera number, switchable from the dashboard
-- ✅ **Self-contained desktop app** — portable release (`electron-builder`, `win.target: portable`), ships its own Python runtime (`python-env/`), no separate Python or Node install needed on the target machine
+- ✅ **Self-contained desktop app** — single Inno Setup installer (`electron-builder` packages `win.target: dir`, `installer/EcoVisionSentinel.iss` wraps it), ships its own Python runtime (`python-env/`, the official embeddable distribution — not a venv), no separate Python or Node install needed on the target machine
 - ✅ **Docker deployment option** — `docker-compose.yml` / `dockerfile.combined` / `dockerfile.detector` / `Dockerfile.backend` for a non-Electron, containerized deployment (Postgres-backed)
-- 🚧 **Robbery/vandalism detection** — rule logic exists, not yet actively tuned/validated with real data
+- ✅ **Robbery detection** — trained X3D-XS classifier, enabled by default (threshold 0.70, 65.3% recall / 86.5% precision on held-out clips)
+- 🚧 **Vandalism detection** — trained, but ships disabled by default (37.5% false-positive rate at its best threshold) — blocked on training-scene count, not architecture; see `docs/vandalism_data_collection.md`. Toggleable from the AI Models admin tab regardless.
 
 ## Organization & Roles
 
@@ -118,7 +119,7 @@ EcoVisionCode/
 ├── docs/USER_HIERARCHY_PLAN.md # Organization/role design rationale
 ├── weights/                    # Model weights (gitignored, added manually)
 ├── optimize_weights.py         # Exports .pt -> TensorRT .engine
-├── python-env/                 # Bundled runtime for the portable build (gitignored)
+├── python-env/                 # Bundled runtime for the installer, built by tools/build_python_env.ps1 (gitignored)
 ├── config.json / config.development.json / config.production.json
 ├── requirements.txt / requirements-backend.txt / requirements-detector.txt
 ├── docker-compose.yml, dockerfile.combined, dockerfile.detector, Dockerfile.backend
@@ -149,7 +150,7 @@ This command:
 1. Installs frontend dependencies (`npm install`)
 2. Builds the frontend (`npm run build`)
 3. Creates `.venv` and installs `requirements.txt` — this is what `run_dev_system.bat` uses
-4. Creates `python-env/` and installs the same requirements — this is what `build_release.bat` bundles into the portable exe
+4. Creates `python-env/` (via `tools/build_python_env.ps1`, the official embeddable Python distribution) and installs the same requirements — this is what `build_release.bat` bundles into the installer
 5. Prints what to run next
 
 Both installs pass `--extra-index-url https://download.pytorch.org/whl/cu121`, which `requirements.txt` also declares, because plain `torch==2.5.1` on PyPI is the CPU build. Steps 3 and 4 skip if the directory already exists — delete it to rebuild from scratch.
@@ -247,7 +248,7 @@ Training itself happens outside this repo, against a separate training-data chec
 
 ## Building a Release
 
-Releases are created via GitHub Actions and produce a portable Windows build. `build_release.bat` does the same thing locally, bundling `python-env/`.
+Releases are created via GitHub Actions and produce a single Inno Setup installer. `build_release.bat` does the same thing locally, bundling `python-env/`.
 
 ### Trigger a Release Build
 
@@ -258,7 +259,8 @@ git push origin v1.0.0
 
 Pushing a `v*` tag triggers the workflow, which:
 - Builds the frontend
-- Packages with electron-builder into a **portable single `.exe`** (no install wizard, no admin elevation — just download and run)
+- Packages with electron-builder into a plain unpacked folder (`win.target: dir`)
+- Compiles that folder into one installer with Inno Setup (`installer/EcoVisionSentinel.iss`)
 
 Download from:
 - The workflow run's **Artifacts** tab (there is no auto-created GitHub Release — download the artifact and create/attach a Release yourself if you want one)
@@ -267,17 +269,16 @@ You can also manually trigger a build from the **Actions** tab without pushing a
 
 ### Run a Release Build
 
-Run `EcoVisionSentinel-<version>-portable.exe` directly — no unzip, no install step. The app:
+Run `EcoVisionSentinel-Setup-<version>.exe` directly. One folder-choice screen, then it installs like any normal Windows application. The app:
 - Spawns backend and AI processes locally
 - Waits for both to be ready
 - Opens the dashboard
-- Runs standalone with no installation required
 
 ## Important Deployment Notes
 
 ⚠️ **GPU Recommended** — Violence detector and detection models use CUDA if available, CPU inference may not keep up with 24/7 live feeds
 
-⚠️ **Build Size** — The bundled python-env (CUDA PyTorch + Ultralytics + PyTorchVideo + TensorRT) alone is several GB; expect a finished portable exe in the 3–5GB+ range. This is normal for ML-heavy applications, but it is not a small download.
+⚠️ **Build Size** — The bundled python-env (CUDA PyTorch + Ultralytics + PyTorchVideo, TensorRT optional via `--with-tensorrt`) alone is several GB; expect a finished installer in the 3 GB range. This is normal for ML-heavy applications, but it is not a small download. It's shipped as a Release asset or a separate link (Google Drive, etc.), never committed to the repo — GitHub rejects any tracked blob over 100 MB, and `dist_installer/` is gitignored specifically to prevent this from happening by accident.
 
 ⚠️ **Unsigned Build** — Not code-signed; Windows SmartScreen may show a warning on first run
 

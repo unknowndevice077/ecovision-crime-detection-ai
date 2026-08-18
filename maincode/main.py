@@ -147,6 +147,11 @@ else:
 POSE_IMGSZ          = 416
 WEAPON_IMGSZ        = 416
 WEAPON_CONF         = sys_config["detection"].get("confidence_threshold", 0.38)
+# Previously had no switch at all -- weapon detection ran unconditionally
+# every DETECTION_INTERVAL frames regardless of config. Added 2026-08-19 for
+# parity with violence/robbery/vandalism, which were each individually
+# toggleable from the AI Models admin page while this one silently never was.
+WEAPON_DETECTION_ENABLED = sys_config["detection"].get("weapon", {}).get("enabled", True)
 DETECTION_INTERVAL  = sys_config["detection"].get("detection_interval", 5)
 
 # There is deliberately no POSE_CONF here. A `POSE_CONF = 0.30` constant used
@@ -1626,7 +1631,7 @@ while _running:
     frame_count += 1
     fps_frame_count += 1
 
-    if frame_count % DETECTION_INTERVAL == 0:
+    if WEAPON_DETECTION_ENABLED and frame_count % DETECTION_INTERVAL == 0:
         if _weapon_future is None or _weapon_future.done():
             _weapon_future = _weapon_exec.submit(_run_weapon_detection, frame.copy())
 

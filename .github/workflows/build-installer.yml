@@ -18,12 +18,13 @@ jobs:
           lfs: true   # needed if weights/*.pt is tracked via Git LFS
 
       # windows-latest runners only have ~14GB free by default. A CUDA
-      # torch/torchvision + openvino + ultralytics + roboflow venv, plus a
-      # full node_modules + Electron binary, plus the pip/npm caches, can
-      # blow past that -- and when the disk fills up mid-write, the NSIS
-      # 7z archive gets truncated, which is exactly what "failed creating
-      # mmap" means (it's not a permissions/signing error, it's a corrupt
-      # file). Free up as much known-safe space as possible before the heavy steps.
+      # torch/torchvision + ultralytics python-env, plus a full node_modules +
+      # Electron binary, plus the pip/npm caches, can blow past that. This no
+      # longer risks a corrupt NSIS archive the way it used to (the installer
+      # is Inno Setup now, which streams via CAB rather than memory-mapping
+      # one combined archive -- see installer/EcoVisionSentinel.iss and
+      # START_HERE.md trap #9 for the full NSIS/MSI/Inno history), but running
+      # out of disk mid-build still just fails outright, so the cleanup stays.
       - name: Free up disk space aggressively
         shell: powershell
         run: |
@@ -56,14 +57,15 @@ jobs:
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # ---------------------------------------------------------------
-      # 1. PYTHON SIDE -- build a real venv that gets shipped as-is
-      #    (this matches your package.json's extraFiles: "python-env/**/*")
+      # 1. PYTHON SIDE -- the official embeddable distribution, NOT a venv.
+      #    A `python -m venv` bakes the exact machine/path that created it
+      #    into pyvenv.cfg and silently breaks on every other machine --
+      #    this shipped once, broke the app on every install except the one
+      #    that built it, and cost real time tracking down (see
+      #    tools/build_python_env.ps1's own header for the full story, and
+      #    START_HERE.md trap #9). Same script the local build_release.bat
+      #    uses, so CI and a local build produce the same python-env.
       # ---------------------------------------------------------------
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Cache pip downloads
         uses: actions/cache@v4
         with:
@@ -72,44 +74,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Create venv and install dependencies
-        run: |
-          python -m venv python-env
-          python-env\Scripts\pip install --upgrade pip
-          python-env\Scripts\pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
-          # NCCL is for multi-GPU distributed training/inference -- this is a
-          # single-GPU edge inference app, so it's dead weight (~200-300MB).
-          python-env\Scripts\pip uninstall -y nvidia-nccl-cu12
-
-      - name: Prune python-env to minimum size
+      - name: Build python-env (embeddable distribution)
         shell: powershell
-        run: |
-          Write-Host "=== python-env size BEFORE pruning ==="
-          $sizeBefore = (Get-ChildItem "python-env" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
-          Write-Host "$([math]::Round($sizeBefore, 2)) GB"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_python_env.ps1
 
-          Remove-Item -Recurse -Force "python-env\Lib\site-packages\pip*" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "python-env\Scripts\pip*" -ErrorAction SilentlyContinue
-
-          Get-ChildItem "python-env" -Directory -Filter "__pycache__" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem "python-env" -Filter "*.pyc" -Recurse | Remove-Item -Force
-          Get-ChildItem "python-env" -Directory -Filter "tests" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem "python-env" -Directory -Filter "test" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem "python-env" -Directory -Filter "docs" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem "python-env" -Directory -Filter "doc" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem "python-env" -Directory -Filter "examples" -Recurse | Remove-Item -Recurse -Force
-          Get-ChildItem "python-env" -Filter "*.whl" -Recurse | Remove-Item -Force
-
-          Remove-Item -Recurse -Force "python-env\Lib\site-packages\torch\include" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "python-env\Lib\site-packages\torch\share" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "python-env\Lib\site-packages\torch\lib\*.h" -ErrorAction SilentlyContinue
-          Get-ChildItem "python-env\Lib\site-packages" -Directory -Filter "nvcc" -Recurse | Remove-Item -Recurse -Force
-
-          Write-Host "=== python-env size AFTER pruning ==="
-          $sizeAfter = (Get-ChildItem "python-env" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1GB
-          Write-Host "$([math]::Round($sizeAfter, 2)) GB"
-
-      - name: Check disk space after venv install
+      - name: Check disk space after python-env build
         shell: powershell
         run: |
           Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pip\Cache" -ErrorAction SilentlyContinue
@@ -154,16 +123,25 @@ jobs:
           Write-Host "$([math]::Round($sizeAfter, 2)) GB"
 
       # ---------------------------------------------------------------
-      # 3. ELECTRON -- package into a portable single .exe (package.json's
-      #    "win.target" is "portable" -- no install wizard, no admin
-      #    elevation, just download-and-run, matching what README.md
-      #    documents). extraResources includes "python-env" and
-      #    "config.production.json", so this .exe ships the fully-built
-      #    GPU environment and the right runtime config -- no internet/
-      #    Python-install step needed on the end user's machine.
+      # 3. ELECTRON -- package.json's "win.target" is "dir": electron-builder
+      #    only produces the plain dist\win-unpacked folder here. extraResources
+      #    includes "python-env" and "config.json" (NOT config.production.json
+      #    -- that file is Docker-only; APP_ENV is fixed to "desktop" precisely
+      #    so the packaged app never picks it up, see electron/main.js), so
+      #    win-unpacked ships the fully-built GPU environment and the right
+      #    runtime config with no internet/Python-install step needed on the
+      #    end user's machine. installer/EcoVisionSentinel.iss then wraps that
+      #    folder into the actual installer with Inno Setup.
       # ---------------------------------------------------------------
-      - name: Package Electron app (portable exe)
-        run: npx electron-builder --win portable --publish never
+      - name: Package Electron app (unpacked)
+        run: npx electron-builder --win --dir --publish never
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer with Inno Setup
+        shell: cmd
+        run: '"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\EcoVisionSentinel.iss'
 
       - name: Check disk space after packaging
         shell: powershell
@@ -174,8 +152,8 @@ jobs:
       #    run's Artifacts tab and create/attach the GitHub Release
       #    yourself, on your own schedule, with your own notes.
       # ---------------------------------------------------------------
-      - name: Upload portable exe artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EcoVisionSentinel-Portable
-          path: dist/EcoVisionSentinel-*-portable.exe
+          name: EcoVisionSentinel-Setup
+          path: dist_installer\EcoVisionSentinel-Setup-*.exe

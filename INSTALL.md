@@ -17,7 +17,15 @@ Derived from measurement on a GTX 1660 SUPER, not from spec sheets.
 | **CPU** | 4 cores | 6+ cores |
 | **Disk** | 8 GB free | 20 GB (recordings grow) |
 | **OS** | Windows 10/11 64-bit | — |
-| **Python** | 3.9+ | 3.11 |
+| **Python** | none needed | — |
+
+The installer ships a complete, self-contained Python runtime
+(`python-env\`, built from the official embeddable distribution) inside the
+one folder you choose — nothing to install, no separate download, no PATH
+setup. You do not need Python on the machine at all. (This wasn't always
+true: an earlier build used `python -m venv`, whose `pyvenv.cfg` hardcodes the
+exact machine and path that created it, so it silently broke on every other
+machine. Fixed 18 Aug.)
 
 ### What was actually measured
 
@@ -80,34 +88,28 @@ build_release.bat
 
 It verifies weights, schema and database mode via preflight, builds the
 frontend, and packages everything — including a complete Python environment
-with PyTorch, the four model weights, and the SQLite schema — into **two**
-files in `dist\`:
+with PyTorch, the four model weights, and the SQLite schema — into **one**
+file in `dist_installer\`:
 
 | file | use it for |
 |---|---|
-| `EcoVisionSentinel-Setup-<version>.exe` | **the one to ship.** Extracts once, into a real folder. Every launch after that starts instantly. |
-| `EcoVisionSentinel-<version>-portable.exe` | a machine that flatly cannot run an installer (locked-down/no-admin). **Slow every time**, not just the first — see the note below. |
+| `EcoVisionSentinel-Setup-<version>.exe` | **the only one shipped.** ~3 GB, single file, built with Inno Setup. One folder-choice screen; everything — app, weights, Python runtime, database, config, logs — lands inside the one folder you pick. No admin/UAC needed for this testing-phase build. |
 
-### On the laptop (Setup, recommended)
+There used to be a second, "portable" variant that re-extracted its entire
+Python/PyTorch environment on every launch (slow, and it left nothing
+installed between runs). It's gone — replaced entirely by the single Inno
+Setup installer above on 18-19 Aug, after the NSIS-based toolchain that built
+both variants turned out to have a hard ~2 GB build-time size ceiling. See
+`START_HERE.md` trap #9 for the full story if you're curious.
+
+### On the laptop
 
 1. Copy `EcoVisionSentinel-Setup-<version>.exe` across.
 2. Run it, click through (it's a normal Windows installer — pick a folder,
    Next, Install).
 3. Launch it from the shortcut it creates. Every launch after the first is
-   fast: nothing is re-extracted.
-
-### On the laptop (portable, only if Setup truly isn't an option)
-
-Double-click the portable `.exe`. A splash screen appears while it silently
-unpacks its entire ~5+ GB Python/PyTorch environment into a temp folder —
-that extraction happens **before our own code starts running**, so the
-splash is a static "please wait" image, not a live progress bar (NSIS has no
-way to report extraction progress into it). Expect it to sit there for a
-while on a spinning disk or a loaded machine. It happens on **every** launch,
-not just the first, because portable never leaves anything installed —
-that's the real cost portable pays for leaving no footprint. Setup does this
-extraction exactly once, which is why it's the better default for anything
-other than a machine you truly cannot install on.
+   fast: nothing is re-extracted, because nothing was extracted at launch time
+   in the first place — it all happened once, during install.
 
 That is the whole procedure. On first launch the app:
 
@@ -195,7 +197,7 @@ open. If detection then misbehaves, that output is the first place to look.
 |---|---|---|
 | YOLO11s-pose | `weights/yolo11s-pose.pt` | person detection and tracking |
 | weapon/sign | `weights/weapon_signs.pt` | Gun / Knife / Sign |
-| X3D violence | `weights/x3d_xs_violence_scene_corpus_neg.pt` | physical injury |
+| X3D violence | `weights/x3d_xs_violence_scene_daynight.pt` | physical injury |
 | X3D robbery | `weights/x3d_xs_robbery_scene.pt` | robbery |
 
 Each may be accompanied by a `.engine` file built by the optimize step above.

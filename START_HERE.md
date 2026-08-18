@@ -1,7 +1,7 @@
 # Start here
 
 The one page. What to run, which models are live, where everything lives, and
-the traps. Current as of 14 Aug 2026.
+the traps. Current as of 19 Aug 2026.
 
 ---
 
@@ -10,18 +10,23 @@ the traps. Current as of 14 Aug 2026.
 | Goal | Command | Notes |
 |---|---|---|
 | **Run everything on this PC** | `run_dev_system.bat` | Backend + detector + dashboard, hot reload. Uses `.venv`. |
-| **Build the installer** | `build_release.bat` | → `dist\EcoVisionSentinel-Setup-1.0.0.exe` **and** `dist\EcoVisionSentinel-1.0.0-portable.exe`. ~30 min. |
+| **Build the installer** | `build_release.bat` | → `dist_installer\EcoVisionSentinel-Setup-1.0.0.exe`, ~3 GB, single file. ~15 min (`--dir` packaging) + ~7 min (Inno Setup compile). |
 | …with the GPU optimizer bundled | `build_release.bat --with-tensorrt` | Adds ~3.2 GB. Only if the target PC has no internet and you want the optimize step there. |
-| **Install on another PC** | copy `EcoVisionSentinel-Setup-1.0.0.exe`, run it once | Ship **Setup**, not portable — see trap #9. No Python, no pip, no terminal, no internet. |
+| **Install on another PC** | copy `EcoVisionSentinel-Setup-1.0.0.exe`, run it once | One installer, one folder-choice screen, everything lands in the folder you pick. No Python, no pip, no terminal, no internet needed at install time. Requires Inno Setup 6 on the *build* machine only — see trap #9. |
 | **Check a machine can run it** | `.venv\Scripts\python.exe preflight.py` | Weights, schema, GPU, RAM, throughput. |
 | **Speed up models for this GPU** | `.venv\Scripts\python.exe optimize_weights.py` | Optional. Prints before/after. `--revert` undoes it. |
-| **Turn a detector on/off** | Dashboard → **AI Models** tab | DevTeam login. Restart detection to apply. |
+| **Turn a detector on/off** | Dashboard → **AI Models** tab | DevTeam login. All four classes are toggleable now — violence, robbery, vandalism, and weapon/sign detection (added 19 Aug; previously weapon detection had no switch at all). Restart detection to apply. |
 | **Rebuild paper figures** | `.venv\Scripts\python.exe tools\make_defense_figures.py` | → `docs\figures\` |
 | **Rebuild explainer GIFs** | `.venv\Scripts\python.exe tools\make_explainer_gifs.py` | → `docs\media\` |
 | **Rebuild the defense PDF** | `node_modules\electron\dist\electron.exe tools\html_to_pdf.js docs\model_behavior_defense.html docs\EcoVision_Defense_Reference.pdf` | See trap #5 below. |
 
-**First-run credentials** are written once to `devteam_credentials.txt` in the
-writable directory, and shown in a dialog. Not shown again.
+**First-run credentials, testing phase:** `TESTING_PHASE_FIXED_CREDENTIALS` in
+`electron/main.js` is `true`, so every install shows the same fixed login —
+`devteam` / `EcoVision2026Test!` — in a dialog on first run, rather than a
+random per-install password. **Must be reverted before any real deployment**
+(flip that flag to `false`); the random-password path still exists and falls
+back to writing `devteam_credentials.txt` once, shown in a dialog and never
+again, exactly as before.
 
 ---
 
@@ -32,17 +37,17 @@ writable directory, and shown in a dialog. Not shown again.
 | File | Loaded by | Role |
 |---|---|---|
 | `yolo11s-pose.pt` | `main.py`, hardcoded name | People + 17 body keypoints |
-| `weapon_signs.pt` | `main.py`, hardcoded name | Gun / Knife / Sign |
-| `x3d_xs_violence_scene_corpus_neg.pt` | `detection.violence.scene_model_path` | **Deployed violence model.** Mode is `scene`, threshold 0.50, confirmations 3 |
+| `weapon_signs.pt` | `main.py`, hardcoded name; toggle at `detection.weapon.enabled` (added 19 Aug) | Gun / Knife / Sign |
+| `x3d_xs_violence_scene_daynight.pt` | `detection.violence.scene_model_path` | **Deployed violence model** (since 18 Aug, replacing corpus_neg). Mode is `scene`, threshold 0.50, confirmations 3. Same 95.0% recall as corpus_neg; real-camera alarms 12.75 → 4.50/hr, driven almost entirely by the flyover camera (45 → 6/hr) — the camera outside Lyn's Restaurant gets *worse* (6 → 12/hr), not a uniform win. Full evidence in its `.meta.json`. |
 | `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery, threshold 0.70 |
 
 ### Present but not running
 
 | File | Why it is here |
 |---|---|
-| `x3d_xs_violence_scene_daynight.pt` | **Measured better than the deployed model, not yet adopted.** Same 95.0% recall, real-camera alarms 12.75 → 4.50/hr, flyover 45 → 6/hr. Adopt by pointing `scene_model_path` at it. Full evidence in its `.meta.json`. |
+| `x3d_xs_violence_scene_corpus_neg.pt` | **Previously deployed**, superseded by daynight on 18 Aug. Kept for rollback — see config.json's `_scene_model_path_rollback` note. |
 | `x3d_xs_violence_best.pt` | `detection.violence.model_path` — the **per-track** model. Only loads if `mode` is `track` or `both`. `run_dev_system.bat` also checks for it. |
-| `x3d_xs_vandalism_scene.pt` | Ships so vandalism can be switched on and inspected. **Disabled** — 37.5% FPR at its best threshold. |
+| `x3d_xs_vandalism_scene.pt` | Ships so vandalism can be switched on and inspected from the AI Models tab. **Disabled by default** — 37.5% FPR at its best threshold (0.90); 87.5% at 0.50. Blocked on scene count (11 training scenes vs robbery's 26), not architecture — see `docs/vandalism_data_collection.md`. |
 
 `weights/archive/` holds 14 superseded files (173 MB), moved rather than deleted.
 `weights/README.md` explains each. **Nothing in `archive/` is loadable.**
@@ -150,20 +155,42 @@ buffer.
 
 **8. Never commit unless asked.**
 
-**9. The portable `.exe` re-extracts its whole ~5+ GB payload on every single
-launch** — that's a self-extraction happening before any of our Electron code
-runs, not a bug in `main.js`. It now shows `build/splash.bmp` while that
-happens (`portable.splashImage` in `package.json`, confirmed against the real
-template at `node_modules/app-builder-lib/templates/nsis/portable.nsi`: the
-NSIS `BgImage` plugin draws it, `HideWindow` keeps the rest of the wizard
-chrome suppressed, `BgImage::Destroy` closes it right before the app
-launches) — but it is a **static image**, not a progress bar, because nothing
-in that extraction step can report real progress into it. The NSIS `Setup`
-build (now the primary target — `package.json`'s `win.target` had `nsis`
-configured but unused; `build_release.bat` was hardcoding `--win portable`,
-fixed 15 Aug) pays the extraction cost once at install time instead. Ship
-Setup; keep portable, splash and all, only for a machine that can't run an
-installer.
+**9. There is no NSIS build and no portable `.exe` anymore — both were
+replaced by Inno Setup on 18-19 Aug.** `package.json`'s `win.target` is `dir`
+now; electron-builder only produces the plain `dist\win-unpacked` folder, and
+`installer\EcoVisionSentinel.iss` wraps that into the one real installer.
+Reasons, in order of discovery:
+  - **NSIS** (`nsis` and `portable` targets both): `makensis.exe` is a 32-bit
+    process that mmaps the entire combined payload into one archive at BUILD
+    time — a hard ~2 GB ceiling. Hit twice (8.65 GB and again at 5.4 GB
+    python-env).
+  - **MSI**: got past the build, but failed to *install* on real machines with
+    error 2755 — a known electron-builder/WiX weak point with large payloads,
+    not fixable from `package.json` config.
+  - **Inno Setup** has no such ceiling (streams via CAB, not memory-mapped)
+    and is what much commercial Windows software ships with. Requires
+    Inno Setup 6 on the **build machine only** — `build_release.bat` looks for
+    `ISCC.exe` at the usual install paths and tells you where to get it
+    (jrsoftware.org/isdl.php, free, ~10 MB, no admin needed) if it's missing.
+  - `PrivilegesRequired=lowest` in the `.iss` — no UAC needed for this testing
+    build, and any drive/folder the account can write to works. Flip to
+    `admin` before a real production rollout.
+
+**9b. Two more installer bugs found and fixed 18-19 Aug, worth knowing if
+something in this area looks broken again:**
+  - `writeGeneratedEnv()` forced `APP_ENV=production`, which made the app
+    silently load `config.production.json` (a Docker-only file — violence
+    only, no robbery/vandalism, stale settings) instead of `config.json`, on
+    *every* packaged install. Fixed by using `APP_ENV=desktop` instead — a
+    value that matches neither `config.development.json` nor
+    `config.production.json`, so it always falls through to plain
+    `config.json`. It was set in **two places** (the generated `.env` *and* an
+    explicit override in `launchMainApp()`'s `spawnPython()` calls, which wins
+    since it's set before `load_dotenv()` runs) — both must stay in sync.
+  - Backend/AI-core ports (8000/8001) are still hardcoded with no retry, only
+    the frontend searches for a free port. `launchMainApp()` now checks both
+    before spawning anything and fails with a specific "already in use,
+    probably a leftover process" message instead of a silent 60s timeout.
 
 ---
 

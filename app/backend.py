@@ -1983,7 +1983,7 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
 # clip buffer is half full is a much worse failure than one that needs a
 # restart. The response says so explicitly so the UI can tell the user.
 # ──────────────────────────────────────────────────────────────────────────────
-DETECTION_CLASSES = ("violence", "robbery", "vandalism")
+DETECTION_CLASSES = ("violence", "robbery", "vandalism", "weapon")
 
 
 def _read_config_file():
