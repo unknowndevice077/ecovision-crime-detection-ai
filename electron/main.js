@@ -959,6 +959,30 @@ async function launchMainApp() {
     // an old port before the fresh processes have written their own.
     try { fs.unlinkSync(getRuntimePortsPath()); } catch {}
 
+    // Backend/AI-core ports are fixed (8000/8001), unlike the frontend's
+    // findFreePortForFrontend below -- changing that is a bigger change
+    // (the chosen port has to thread through to the AI core's BACKEND_URL
+    // and the frontend's runtime config) than is safe to make right now.
+    // What IS safe and directly addresses the actual failure mode: killAll()
+    // above only stops THIS Electron instance's own tracked processes, so it
+    // does nothing about a previous run's backend.py/main.py left running
+    // after a crash, a force-quit, or a killed process that didn't exit
+    // cleanly -- exactly what happened repeatedly while testing this build
+    // today. Previously that produced a generic 60-second timeout
+    // ("gave up waiting for backend to appear") with no indication of why.
+    // This turns that into an immediate, specific, actionable message.
+    for (const [label, port] of [["backend", BACKEND_DESIRED_PORT], ["AI detection core", AI_CORE_DESIRED_PORT]]) {
+      if (!(await isPortFree(port, HOST))) {
+        throw new Error(
+          `Port ${port} (${label}) is already in use.\n\n` +
+          `This almost always means a previous copy of EcoVision Sentinel is ` +
+          `still running from a session that didn't close cleanly -- check ` +
+          `Task Manager for EcoVisionSentinel.exe or python.exe and end it, ` +
+          `then relaunch.`
+        );
+      }
+    }
+
     let backendLog = "";
     let nextLog = "";
 
