@@ -6,8 +6,8 @@
   "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build && node tools/copy_standalone_assets.js",
+    "start": "node .next/standalone/server.js",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",

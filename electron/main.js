@@ -229,7 +229,14 @@ function writeRuntimeConfigForFrontend(apiUrl, aiUrl) {
   // The dashboard fetches this at load time (see lib/runtime-config.ts) to
   // discover the real ports the backend/AI core landed on, instead of
   // hardcoding localhost:8000/8001.
-  const publicDir = path.join(getAppRoot(), "public");
+  //
+  // Must be the STANDALONE server's public/ folder, not the source tree's --
+  // the running server (see spawnNextServer) is `.next/standalone/server.js`,
+  // which serves static files from its own copied public/ directory
+  // (tools/copy_standalone_assets.js put it there at build time). Writing to
+  // the original project-root public/ at runtime, as this used to, is
+  // invisible to that process; the running server never sees the file.
+  const publicDir = path.join(getAppRoot(), ".next", "standalone", "public");
   try {
     fs.mkdirSync(publicDir, { recursive: true });
     fs.writeFileSync(
@@ -244,19 +251,28 @@ function writeRuntimeConfigForFrontend(apiUrl, aiUrl) {
 
 function spawnNextServer(port) {
   const appRoot = getAppRoot();
-  let nextBin = path.join(appRoot, "node_modules", "next", "dist", "bin", "next");
 
-  if (!fs.existsSync(nextBin) && app.isPackaged) {
-    const unpackedBin = path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", "next", "dist", "bin", "next");
-    if (fs.existsSync(unpackedBin)) {
-      nextBin = unpackedBin;
-    }
+  // BUG FOUND 2026-08-19: this used to run `next start` via the full Next.js
+  // CLI. next.config.ts sets output: "standalone", and Next.js prints (but
+  // does not hard-fail on) "next start does not work with output: standalone
+  // configuration -- use node .next/standalone/server.js instead" -- so this
+  // went unnoticed. The standalone server is what's actually meant to run:
+  // it needs PORT/HOSTNAME env vars rather than next start's -H/-p flags,
+  // and it only serves public/ and static assets correctly once
+  // tools/copy_standalone_assets.js has copied them in at build time (see
+  // that script's own header for why Next.js doesn't do this itself).
+  const serverJs = path.join(appRoot, ".next", "standalone", "server.js");
+  if (!fs.existsSync(serverJs)) {
+    throw new Error(
+      `Standalone Next.js server not found at ${serverJs}. ` +
+      `Run "npm run build" (which now also runs tools/copy_standalone_assets.js) before packaging.`
+    );
   }
 
-  const proc = spawn(process.execPath, [nextBin, "start", "-H", HOST, "-p", String(port)], {
-    cwd: appRoot,
+  const proc = spawn(process.execPath, [serverJs], {
+    cwd: path.dirname(serverJs),
     windowsHide: true,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", PORT: String(port), HOSTNAME: HOST },
   });
   const tag = "next";
   proc.stdout.on("data", (d) => console.log(`[${tag}] ${d}`));
