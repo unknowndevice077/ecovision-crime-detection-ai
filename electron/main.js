@@ -965,7 +965,18 @@ async function launchMainApp() {
     sendLaunchProgress(10, "Starting backend API...");
     sendLaunchStep("backend", "active");
     backendProc = spawnPython(backendScript, backendDir, {
-      APP_ENV: "production",
+      // MUST match writeGeneratedEnv()'s APP_ENV value. This is passed as an
+      // explicit child-process env var, which is already set in os.environ
+      // before backend.py's load_dotenv() ever runs -- and load_dotenv()'s
+      // default (override=False) does NOT replace a variable that's already
+      // set. So THIS value wins over whatever .env says, silently. It was
+      // "production" here until 2026-08-19, independently of writeGeneratedEnv
+      // also forcing "production" -- fixing only one of the two still left
+      // the desktop app loading the Docker-only config.production.json (see
+      // the writeGeneratedEnv fix from 2026-08-18 for the full story). Two
+      // sources of truth for the same value is exactly how that stayed
+      // broken after the first fix; "desktop" is now set in both places.
+      APP_ENV: "desktop",
       PORT: String(BACKEND_DESIRED_PORT),
     });
     backendProc.stderr.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
@@ -985,7 +996,8 @@ async function launchMainApp() {
 
     sendLaunchStep("ai", "active");
     aiProc = spawnPython(aiScript, maincodeDir, {
-      APP_ENV: "production",
+      // See the matching comment on the backend spawn above.
+      APP_ENV: "desktop",
       AI_CORE_PORT: String(AI_CORE_DESIRED_PORT),
       WEIGHTS_DIR: getWeightsDir(),
       BACKEND_URL: `http://${HOST}:${backendPort}`,
