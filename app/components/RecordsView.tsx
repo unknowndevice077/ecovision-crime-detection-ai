@@ -3,7 +3,7 @@
 import React, { useState, useRef } from 'react';
 import {
   ShieldAlert, Clapperboard, Edit3, Save, Play,
-  ListFilter, Calendar, Clock, Scissors, AlertCircle
+  ListFilter, Calendar, Clock, Scissors, AlertCircle, Download, Trash2
 } from 'lucide-react';
 import { useLiveChannel } from '../context/WebSocketContext';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
@@ -106,28 +106,56 @@ export default function RecordsView() {
     }
   };
 
+  // BUG FOUND 2026-08-19: this used to POST to /api/records/register_clip with
+  // a fabricated filename and NEVER CUT ANY VIDEO -- it created a database row
+  // pointing at a file that was never written, so every "extracted" clip
+  // appeared in the archive and then failed to play, permanently. It now calls
+  // the real trim endpoint, which runs ffmpeg against the source file.
+  const [extracting, setExtracting] = useState(false);
   const handleExtractClip = async () => {
     if (!activePlayback) return;
+    setExtracting(true);
+    setError('');
     try {
-      const res = await fetch(`${API_URL}/api/records/register_clip`, {
+      const res = await fetch(`${API_URL}/api/records/${activePlayback.id}/extract`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({
-          filename: `EXTRACT_${Date.now()}_${activePlayback.filename}`,
-          duration: "Custom Range",
-          type: "CLIP",
-          crime_time_marker: startTime,
-          notes: `Manually extracted sequence boundary from segment ${activePlayback.filename}.`,
-          associated_incident_id: activePlayback.associated_incident_id || null,
-        })
+        body: JSON.stringify({ start: startTime, end: endTime }),
       });
+      const body = await res.json().catch(() => ({}));
       if (res.ok) {
         fetchRecordsAndCrimes();
       } else {
-        setError('Could not extract segment.');
+        setError(body.detail || 'Could not extract segment.');
       }
     } catch (e) {
       console.error("Clip extraction request failed:", e);
+      setError('Backend connection failure.');
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const handleDeleteRecord = async (rec: VideoRecord) => {
+    if (!window.confirm(`Delete "${rec.filename}"?\n\nThis removes the video file from disk as well. It cannot be undone.`)) return;
+    try {
+      const res = await fetch(`${API_URL}/api/records/${rec.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (activePlayback?.id === rec.id) setActivePlayback(null);
+        // Surface the partial case honestly: the row is gone but the file
+        // survived (locked by another process, permissions), rather than
+        // reporting a clean success.
+        if (body.file_removed === false) setError('Record removed, but the video file could not be deleted from disk.');
+        fetchRecordsAndCrimes();
+      } else {
+        setError(body.detail || 'Could not delete recording.');
+      }
+    } catch (e) {
+      console.error("Record delete failed:", e);
       setError('Backend connection failure.');
     }
   };
@@ -297,14 +325,26 @@ export default function RecordsView() {
                     />
                   </div>
                 </div>
-                <button
-                  title="Extract this time range as a new clip"
-                  onClick={handleExtractClip}
-                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white flex items-center gap-1.5 transition-opacity hover:opacity-90"
-                  style={{ background: 'var(--accent)' }}
-                >
-                  <Scissors size={11} /> Extract
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <a
+                    href={`${API_URL}/static/recordings/${encodeURIComponent(activePlayback.filename)}`}
+                    download={activePlayback.filename}
+                    title="Download the full recording"
+                    className="px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 transition-colors hover:bg-white/5"
+                    style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                  >
+                    <Download size={11} /> Download
+                  </a>
+                  <button
+                    title="Cut this time range into a new clip"
+                    onClick={handleExtractClip}
+                    disabled={extracting}
+                    className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white flex items-center gap-1.5 transition-opacity hover:opacity-90 disabled:opacity-50"
+                    style={{ background: 'var(--accent)' }}
+                  >
+                    <Scissors size={11} /> {extracting ? 'Cutting…' : 'Extract'}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
@@ -356,14 +396,37 @@ export default function RecordsView() {
                           {track.recorded_at} · {track.duration}
                         </div>
                       </div>
-                      <button
-                        title="Play this recording"
-                        onClick={() => setActivePlayback(track)}
-                        className="p-1.5 shrink-0 text-white transition-opacity hover:opacity-90"
-                        style={{ background: 'var(--accent)' }}
-                      >
-                        <Play size={11} />
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          title="Play this recording"
+                          onClick={() => setActivePlayback(track)}
+                          className="p-1.5 text-white transition-opacity hover:opacity-90"
+                          style={{ background: 'var(--accent)' }}
+                        >
+                          <Play size={11} />
+                        </button>
+                        {/* Plain anchor with `download`, not a fetch+blob: the
+                            file is already served by the backend's /static
+                            mount, so the browser can stream it straight to
+                            disk without buffering a whole video in memory. */}
+                        <a
+                          href={`${API_URL}/static/recordings/${encodeURIComponent(track.filename)}`}
+                          download={track.filename}
+                          title="Download this recording"
+                          className="p-1.5 border transition-colors hover:bg-white/5"
+                          style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                        >
+                          <Download size={11} />
+                        </a>
+                        <button
+                          title="Delete this recording (removes the file from disk)"
+                          onClick={() => handleDeleteRecord(track)}
+                          className="p-1.5 border transition-colors hover:bg-[rgba(229,52,47,0.12)]"
+                          style={{ borderColor: 'var(--line-2)', color: 'var(--critical)' }}
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="mt-2 p-2 border" style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}>

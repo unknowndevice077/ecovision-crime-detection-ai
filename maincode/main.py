@@ -166,6 +166,10 @@ WEAPON_CONF         = sys_config["detection"].get("confidence_threshold", 0.38)
 WEAPON_DETECTION_ENABLED = sys_config["detection"].get("weapon", {}).get("enabled", True)
 DETECTION_INTERVAL  = sys_config["detection"].get("detection_interval", 5)
 
+VANDAL_MARK_IMGSZ = 416
+VANDAL_MARK_CONF  = sys_config["detection"].get("vandalism", {}).get(
+    "marks_confidence_threshold", 0.5)
+
 # There is deliberately no POSE_CONF here. A `POSE_CONF = 0.30` constant used
 # to sit at this spot, never passed to anything -- and wiring it into the
 # pose_model.track() call below would actively hurt.
@@ -474,6 +478,25 @@ violence_model, weapon_file_name = load_model_with_fallback(
     "weapon_signs.engine", "weapon_signs.pt", "detect", WEIGHTS_DIR
 )
 
+# Vandalism-marks detector (graffiti/tag). Separate small YOLO model, not part
+# of weapon_signs.pt -- see detection.vandalism.marks_model_path in config.json.
+# Guarded on file existence (unlike load_model_with_fallback's other callers)
+# because this is a custom weight name Ultralytics has no hub fallback for; a
+# missing file must disable the signal, not attempt a network download that
+# will just fail.
+_VANDAL_MARKS_PATH = os.path.join(WEIGHTS_DIR, sys_config["detection"].get("vandalism", {})
+                                   .get("marks_model_path", "vandalism_marks.pt"))
+vandal_mark_model = None
+if os.path.exists(_VANDAL_MARKS_PATH):
+    try:
+        vandal_mark_model = YOLO(_VANDAL_MARKS_PATH, task="detect")
+        print(f"📦 Loaded vandalism-marks model: {os.path.basename(_VANDAL_MARKS_PATH)}")
+    except Exception as e:
+        print(f"⚠️  Failed to load vandalism-marks model: {str(e)[:100]}")
+else:
+    print(f"🚫 Vandalism-marks model not found at {_VANDAL_MARKS_PATH} -- "
+          f"static_targets for the vandalism rule will be empty")
+
 # Comes from detection.violence.model_path in config.json, not a literal here.
 # This line used to hardcode weights/x3d_xs_violence_best.pt, which happened to
 # equal the configured value -- so the config key looked like it worked while
@@ -547,8 +570,9 @@ else:
 VANDALISM_ON = bool(sys_config.get("detection", {})
                     .get("vandalism", {}).get("enabled", False))
 if not VANDALISM_ON:
-    print("🚫 Vandalism: disabled (rule scored 0% recall on 40 labelled "
-          "clips; see config detection.vandalism._why_disabled)")
+    print("🚫 Vandalism: disabled -- see config detection.vandalism._why_disabled "
+          "(the sign-detector bug that made the rule score 0% recall is now fixed; "
+          "pending held-out validation of vandalism_marks.pt before re-enabling)")
 
 _ROBBERY_CFG = sys_config.get("detection", {}).get("robbery", {})
 ROBBERY_ON = bool(_ROBBERY_CFG.get("enabled", False))
@@ -601,14 +625,19 @@ print("✅ Dynamic relative weights successfully loaded and warmed up.")
 # 5. THREAD POOL EXECUTORS
 # ──────────────────────────────────────────────────────────────────────────────
 _weapon_exec   = ThreadPoolExecutor(max_workers=1, thread_name_prefix="weapon")
+_vandal_exec   = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vandal_marks")
 _encode_exec   = ThreadPoolExecutor(max_workers=1, thread_name_prefix="encode")
 _alert_exec    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="alert")
 
 _weapon_future = None
+_vandal_future = None
 _encode_future = None
 
 _weapon_lock  = threading.Lock()
 _weapon_cache = {"weapons": [], "vboxes": []}
+
+_vandal_mark_lock  = threading.Lock()
+_vandal_mark_cache = {"boxes": []}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 6. VIOLENCE-BOX TEMPORAL TRACKER
@@ -793,6 +822,24 @@ def _run_weapon_detection(frame_copy):
     with _weapon_lock:
         _weapon_cache["weapons"] = weapons
         _weapon_cache["vboxes"]  = vboxes
+
+def _run_vandal_mark_detection(frame_copy):
+    """Single-frame graffiti/tag detector -- feeds score_vandalism()'s
+    static_targets, replacing weapon_signs.pt's "sign" class, which fired
+    zero times in 4,800 measured frames because it detects road signs, not
+    walls/gates/shutters (see the VANDALISM FILTER ANALYSIS comment below).
+    """
+    res = vandal_mark_model.predict(frame_copy, verbose=False, conf=VANDAL_MARK_CONF,
+                                     imgsz=VANDAL_MARK_IMGSZ, half=USE_CUDA)
+    boxes = []
+    if res[0].boxes:
+        for box in res[0].boxes:
+            raw_conf = float(box.conf[0].cpu())
+            if raw_conf >= VANDAL_MARK_CONF:
+                xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                boxes.append(xyxy)
+    with _vandal_mark_lock:
+        _vandal_mark_cache["boxes"] = boxes
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 9. MATH / SCORING HELPERS
@@ -1870,6 +1917,11 @@ while _running:
         if _weapon_future is None or _weapon_future.done():
             _weapon_future = _weapon_exec.submit(_run_weapon_detection, frame.copy())
 
+    if (VANDALISM_ON and vandal_mark_model is not None
+            and frame_count % DETECTION_INTERVAL == 0):
+        if _vandal_future is None or _vandal_future.done():
+            _vandal_future = _vandal_exec.submit(_run_vandal_mark_detection, frame.copy())
+
     with _weapon_lock:
         raw_weapons = list(_weapon_cache["weapons"])
         raw_vboxes  = list(_weapon_cache["vboxes"])
@@ -2043,27 +2095,39 @@ while _running:
                                                         "event": "ROBBERY"})
 
         # ─── VANDALISM FILTER ANALYSIS ───
-        # Disabled by default -- see detection.vandalism._why_disabled in
-        # config.json. Measured against 40 labelled outdoor vandalism clips:
-        # fired 0 times, because condition 1 needs a YOLO "sign" box and
-        # weapon_signs.pt produced zero Sign detections in 4,800 frames.
-        # Left in place rather than deleted so it can be re-measured once
-        # filmed data exists (docs/vandalism_data_collection.md).
+        # Was permanently dead: static_targets came from weapon_signs.pt's
+        # "sign" class (road signs), which fired zero times in 4,800 measured
+        # frames because vandalism targets are walls/gates/shutters, not road
+        # signs -- the wrong detector for the job, not a broken rule. Fixed
+        # 2026-08-19 by swapping in a purpose-built graffiti/tag detector
+        # (detection.vandalism.marks_model_path) -- see train_vandalism_marks.py
+        # in the training repo. score_vandalism()'s wrist-velocity/no-victim
+        # logic itself is unchanged.
         if not VANDALISM_ON:
             sign_boxes = []
         else:
-            sign_boxes = [w["box"] for w in tracked_weapons if w["name"] == "sign"]
+            with _vandal_mark_lock:
+                sign_boxes = list(_vandal_mark_cache["boxes"])
         _draw_sign_boxes(frame, sign_boxes)
         
         for tid, joints, p_box in zip(ids, kpts, boxes):
             if tid not in vandal_states:
                 vandal_states[tid] = VandalismTrackState()
-            sweep_hist = vandal_sweep_history.setdefault(tid, deque(maxlen=45))
 
-            # Use the PRE-overwrite snapshot, not the live `prev_joints`
-            # dict (which now holds this frame's wrist positions).
+            # score_vandalism's 4th param is the OUTER per-track dict -- it
+            # calls sweep_history_dict.setdefault(tid, deque(...)) on it
+            # internally. Passing a pre-resolved deque here (vandal_sweep_
+            # history.setdefault(tid, ...)) crashes the instant condition 1
+            # (a wrist near a static target) is ever satisfied, with
+            # AttributeError: 'collections.deque' object has no attribute
+            # 'setdefault'. Never hit in production because condition 1 was
+            # itself dead (weapon_signs.pt's "sign" class never fired) --
+            # found only once the vandalism-marks detector made condition 1
+            # reachable for the first time. Use the PRE-overwrite snapshot
+            # for prev_joints, not the live `prev_joints` dict (which now
+            # holds this frame's wrist positions).
             is_vandal, target = score_vandalism(
-                tid, joints, prev_joints_snapshot, sweep_hist,
+                tid, joints, prev_joints_snapshot, vandal_sweep_history,
                 static_targets=sign_boxes, all_person_boxes=boxes, my_box=p_box
             )
             v_state_res = vandal_states[tid].update(is_vandal)

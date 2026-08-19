@@ -7,6 +7,7 @@ import { useRuntimeConfig } from './hooks/useRuntimeConfig';
 import { useLiveChannel } from './context/WebSocketContext';
 import { usePermissions } from './hooks/usePermissions';
 import PTZControls from './components/PTZControls';
+import AiModelsPanel from './components/AiModelsPanel';
 import {
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin,
   Maximize2, X, Sun, User,
@@ -553,9 +554,22 @@ const fetchCameras = async (userObj: any) => {
               <>
                 <NavSectionLabel>Operations</NavSectionLabel>
                 <NavItem label="Live Monitor" icon={<Activity size={16} />} active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
-                <NavItem label="Incident Map" icon={<MapPin size={16} />} active={activeTab === 'crime-reports'} onClick={() => setActiveTab('crime-reports')} badge={sqlReportCount} badgeTone="neutral" />
-                <NavItem label="Recordings" icon={<Film size={16} />} active={activeTab === 'records'} onClick={() => { setActiveTab('records'); setVideoRecordSearchQuery(""); }} />
-                <NavItem label="Incident Log" icon={<AlertOctagon size={16} />} active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} badge={pendingAlerts.length} badgeTone="critical" />
+                {/* Admin tiers always pass these three; PNP_OFFICER has
+                    granular per-user toggles that can be off. Previously
+                    these showed regardless and clicking one surfaced the raw
+                    backend 403 text ("Missing permission: view_map or
+                    view_history") as an error banner instead of the tab
+                    simply not being there -- can() already existed for
+                    exactly this, it just wasn't wired to the nav. */}
+                {can('view_map') && (
+                  <NavItem label="Incident Map" icon={<MapPin size={16} />} active={activeTab === 'crime-reports'} onClick={() => setActiveTab('crime-reports')} badge={sqlReportCount} badgeTone="neutral" />
+                )}
+                {can('view_records') && (
+                  <NavItem label="Recordings" icon={<Film size={16} />} active={activeTab === 'records'} onClick={() => { setActiveTab('records'); setVideoRecordSearchQuery(""); }} />
+                )}
+                {can('view_history') && (
+                  <NavItem label="Incident Log" icon={<AlertOctagon size={16} />} active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} badge={pendingAlerts.length} badgeTone="critical" />
+                )}
               </>
             )}
             {isBarangay && (
@@ -790,6 +804,13 @@ const fetchCameras = async (userObj: any) => {
                   onUpdate={fetchStats}
                   currentUserRole={currentUser.role}
                   onDeepLink={(crimeId: string) => {
+                    // view_map and view_records are separate permissions --
+                    // a user can have one without the other, and this link
+                    // lives inside the map (view_map-gated) but jumps to the
+                    // Recordings tab (view_records-gated). Same bug as the
+                    // nav items above in a different shape: don't navigate
+                    // somewhere the click would just 403.
+                    if (!can('view_records')) return;
                     setVideoRecordSearchQuery(crimeId);
                     setActiveTab('records');
                   }}
@@ -821,6 +842,12 @@ const fetchCameras = async (userObj: any) => {
                     <MetricPanel label="Application CPU" value={`${telemetry.tempCPU}°C`} icon={<Thermometer size={16} />} tone={tempTone(telemetry.tempCPU)} />
                     <MetricPanel label="Edge MCU" value={`${telemetry.tempESP}°C`} icon={<Zap size={16} />} tone={tempTone(telemetry.tempESP)} />
                   </div>
+                  {/* Barangay-admin only, not staff -- owning the hardware is
+                      what earns this, same split as manage_cameras. See
+                      backend.py's MODEL_VIEW_ROLES comment for the full
+                      reasoning on why optimize is here but the on/off
+                      switches are not. */}
+                  {currentUser.role === 'BARANGAY_ADMIN' && <AiModelsPanel />}
                 </div>
               )}
 

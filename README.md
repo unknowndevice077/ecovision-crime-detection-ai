@@ -4,7 +4,9 @@ Real-time AI-powered security monitoring and threat detection system. It watches
 
 Built for **always-on deployment**: the intended use case is a dedicated machine (with a GPU) running continuously, watching a camera feed 24/7 and flagging incidents automatically for review.
 
-> **Status:** core pipeline, backend, and dashboard are wired up and connectivity-tested (dynamic port negotiation, CORS, runtime config all fixed and consistent), but the app has not yet been smoke-tested as a full end-to-end launch on this machine. The organization hierarchy (barangays, police stations, jurisdictions) has been redesigned and migrated — see [docs/USER_HIERARCHY_PLAN.md](docs/USER_HIERARCHY_PLAN.md). Robbery detection logic exists (`robbery_vandalism.py`) but is not actively tuned — no labeled robbery dataset yet. Violence detection is actively being iterated on (see `maincode/eval_history.csv` for the accuracy trail).
+> **Status (as of 19 Aug 2026):** full pipeline runs end-to-end — backend, AI core, and dashboard, dynamic port negotiation, CORS, and runtime config all consistent. The organization hierarchy (barangays, police stations, jurisdictions) has been redesigned and migrated — see [docs/USER_HIERARCHY_PLAN.md](docs/USER_HIERARCHY_PLAN.md). All four detection classes — violence, robbery, vandalism, weapon/sign — are trained, measured, and individually toggleable from the AI Models admin tab. See [START_HERE.md](START_HERE.md) for the live model table and the honest numbers behind each one; the short version is below. `maincode/eval_history.csv` has the full violence accuracy trail.
+
+
 
 ## What It Does
 
@@ -13,9 +15,11 @@ The system runs three integrated components, packaged as one desktop application
 ### 1. **AI/Vision Core** (`maincode/main.py`)
 - Pulls frames from a camera feed — camera index is runtime-selectable (not hardcoded), via `/available_cameras` and `/set_camera_index`
 - Runs YOLO11-pose for multi-person tracking (each tracked person gets an independent detection state — not limited to one person on screen)
-- YOLO-based weapon/sign detector (gun, knife, sign classes) feeding an independent "ARMED" alert path
-- X3D-XS clip classifier for violence detection, with EMA smoothing + hysteresis to reduce flapping
-- Rule-based robbery and vandalism detection on top of the same pose/weapon tracks
+- YOLO-based weapon/sign detector (gun, knife, sign classes) feeding an independent "ARMED" alert path — individually toggleable (`detection.weapon.enabled`)
+- X3D-XS scene (whole-frame) classifiers for violence and robbery, each with its own confidence threshold and consecutive-frame confirmation
+- Composite robbery rule (armed/violent state + sustained proximity between two people) as a secondary, model-free signal alongside the trained robbery classifier
+- Vandalism: a wrist-motion FSM (`robbery_vandalism.py`) gated on a purpose-built graffiti/tag YOLO detector (`weights/vandalism_marks.pt`) — fires on sustained sweeping wrist motion near a detected mark, with no other person nearby (to distinguish spraying from a scuffle). Ships **disabled by default** — see the Key Features list below for both vandalism tracks and their real numbers.
+- "Episode" tracking per track/pair so a continuously-active state (e.g. one ongoing assault) mints one incident, not one every frame
 - GPU (CUDA) used automatically when available, with `.engine` (TensorRT) preferred over `.pt` when present; falls back to CPU
 - Configured through `config.json`, **not** through `.env` — the AI core never loads a `.env` file
 
@@ -43,13 +47,16 @@ The system runs three integrated components, packaged as one desktop application
 
 - ✅ **Real-time detection pipeline** — pose tracking, weapon/sign detection, and violence classification, all per-person (multi-person scenes supported)
 - ✅ **Severity-tagged alerts** — incidents ranked LOW → CRITICAL with confidence scores
-- ✅ **Records & DVR view** — auto-captured incident clips, 24/7 recordings, custom time range extraction
-- ✅ **ESP32 device integration** — hardware connectivity and live telemetry (battery, solar voltage, temperature) + remote siren activation
+- ✅ **Records & DVR view** — auto-captured incident clips (H.264, browser-playable), real ffmpeg-based clip extraction and delete from the Recordings tab. 24/7 continuous archive is **not real yet** — the writer currently saves a black placeholder frame with a timestamp overlay rather than the actual camera feed, and never registers a `video_records` row, so the 24/7 tab is empty by construction, not by bug. Flagged, not fixed.
+- ✅ **ESP32 device integration** — hardware connectivity and live telemetry (battery, solar voltage, temperature), remote siren activation with a dashboard emergency-stop, a physical panic button that posts a real incident, and auto-discovery (the board self-registers its IP with the backend on boot and every 30s, so a DHCP lease change doesn't strand it)
 - ✅ **Two-organization access control** — barangay and PNP hierarchies with database-enforced scope; see [Organization & Roles](#organization--roles)
-- ✅ **Runtime-selectable camera index** — no hardcoded camera number, switchable from the dashboard
+- ✅ **Runtime-selectable camera index** — no hardcoded camera number, switchable from the dashboard; `camera.source` also accepts a video file path for deterministic, machine-independent replay/testing
 - ✅ **Self-contained desktop app** — single Inno Setup installer (`electron-builder` packages `win.target: dir`, `installer/EcoVisionSentinel.iss` wraps it), ships its own Python runtime (`python-env/`, the official embeddable distribution — not a venv), no separate Python or Node install needed on the target machine
-- ✅ **Robbery detection** — trained X3D-XS classifier, enabled by default (threshold 0.70, 65.3% recall / 86.5% precision on held-out clips)
-- 🚧 **Vandalism detection** — trained, but ships disabled by default (37.5% false-positive rate at its best threshold) — blocked on training-scene count, not architecture; see `docs/vandalism_data_collection.md`. Toggleable from the AI Models admin tab regardless.
+- ✅ **Weapon/sign detection** — Gun/Knife/Sign YOLO detector, independently toggleable (previously had no on/off switch at all)
+- ✅ **Robbery detection** — trained X3D-XS scene classifier, enabled by default (threshold 0.70). Deployed checkpoint: 84.2% accuracy / 65.3% recall / 86.5% precision on 8 held-out scenes. A retrain adding 11 verified CamNuvem street-robbery sources is built and measured but **not deployed** — it regressed held-out recall to ~19–52% depending on threshold on the larger, reshuffled test split, so the original checkpoint stays live pending a controlled re-run. See `docs/detection_performance_report.md`.
+- 🚧 **Vandalism detection** — two separate tracks, both documented honestly:
+  - The original whole-clip X3D scene classifier is trained but ships **disabled** (37.5% FPR at its best threshold) — blocked on training-scene count (11 vs. robbery's 26), not architecture; self-filming ~20 real scenes is the documented fix (`docs/vandalism_data_collection.md`) and has not been done.
+  - A newer detector+rule hybrid (`weights/vandalism_marks.pt`, a YOLO graffiti/tag detector feeding the existing wrist-motion FSM) was built and measured 19 Aug: mAP50 0.741 / recall 0.625 / precision 0.806 on a genuine held-out test split. This replaces a structurally-dead prior version of the same rule, which gated on `weapon_signs.pt`'s "sign" class (road signs) and so could never fire on a wall or gate. Wired into `main.py`; ships **disabled** pending an end-to-end recall/false-positive measurement on labelled footage before flipping it on.
 
 ## Organization & Roles
 
@@ -154,11 +161,16 @@ Both installs pass `--extra-index-url https://download.pytorch.org/whl/cu121`, w
 
 ### Add Model Weights
 
-Manually place trained model weights into the `weights/` directory (gitignored due to size):
+Manually place trained model weights into the `weights/` directory (gitignored due to size). `START_HERE.md` has the full live/not-running table; the summary:
 - `yolo11s-pose.pt` (or `.engine`) — YOLO11 pose detection
-- `weapon_signs.pt` (or `.engine`) — Weapon and sign detection
-- `x3d_xs_violence_best.pt` — Per-track (person-crop) violence classification, used when `detection.violence.mode` is `"track"`
-- The path in `detection.violence.scene_model_path` (`config.json`) — whole-frame violence classification, used in `"scene"` mode (**the default**) and `"both"`. Currently `weights/x3d_xs_violence_scene_3way_nll.pt`.
+- `weapon_signs.pt` (or `.engine`) — Gun/Knife/Sign detection, toggle at `detection.weapon.enabled`
+- `x3d_xs_violence_best.pt` — Per-track (person-crop) violence classification, used when `detection.violence.mode` is `"track"` or `"both"`
+- The path in `detection.violence.scene_model_path` (`config.json`) — whole-frame violence classification, used in `"scene"` mode (**the default**) and `"both"`. Currently `weights/x3d_xs_violence_scene_daynight.pt`.
+- The path in `detection.robbery.model_path` — whole-frame robbery classification. Currently `weights/x3d_xs_robbery_scene.pt`.
+- The path in `detection.vandalism.model_path` — whole-frame vandalism classification (the whole-clip approach). Present but **disabled** — see Key Features above.
+- `vandalism_marks.pt` (path at `detection.vandalism.marks_model_path`) — single-class graffiti/tag YOLO detector feeding the vandalism wrist-motion rule. Present but **disabled** — see Key Features above.
+
+Two weight lists have to stay in step whenever you add or rename a model: `package.json`'s `extraResources` filter and `preflight.py`'s `required` dict. An earlier release build shipped 200MB of dead checkpoints and this machine's `.engine` files because the whole `weights/` folder was copied instead of an explicit list.
 
 `main.py` prefers `.engine` over `.pt` when both are present. Generate the `.engine` files with `optimize_weights.py`. They are version-, GPU- and platform-locked, so regenerate them after any PyTorch/TensorRT/driver change — a stale `.engine` fails at load, and the `.pt` fallback is what keeps the app running.
 

@@ -102,7 +102,48 @@
       "consecutive_required": 1,
       "model_path": "weights/weapon_signs.pt",
       "_why_no_smoothing": "Single-frame YOLO object detector, not the temporal SceneViolenceDetector the other three classes use -- there is no multi-frame confirmation to tune. consecutive_required=1 documents that plainly rather than implying a EMA/smoothing stage that doesn't exist for this class.",
-      "_added": "2026-08-19: previously ran unconditionally with no enable/disable switch anywhere in the app -- added for parity with violence/robbery/vandalism, all of which already had one. See maincode/main.py's WEAPON_DETECTION_ENABLED gate on the _weapon_exec submit call."
+      "_added": "2026-08-19: previously ran unconditionally with no enable/disable switch anywhere in the app -- added for parity with violence/robbery/vandalism, all of which already had one. See maincode/main.py's WEAPON_DETECTION_ENABLED gate on the _weapon_exec submit call.",
+      "_per_class_thresholds": "The 0.38 above is a legacy top-level fallback, not what's actually enforced -- CONF_BY_CLASS in main.py applies Gun 0.52, Knife 0.45, Sign 0.40 per detection, and WEAPON_YOLO_CONF_FLOOR takes the min of those and this value so YOLO's own conf= cutoff never discards a detection a per-class check would have kept. A bug found 19 Aug had this backwards (YOLO's conf= used the flat 0.6 top-level value directly, silently dropping every Knife/Sign detection between 0.40 and 0.60 before the per-class check ever saw them -- 11 of 58 in a 60-image sample); fixed by routing through the min().",
+      "metrics": {
+        "status": "deployed",
+        "headline": {
+          "label": "Precision",
+          "value": 99.3,
+          "unit": "%"
+        },
+        "stats": [
+          {
+            "label": "Accuracy",
+            "value": 88.4,
+            "unit": "%",
+            "note": "3,001 test images across 5 datasets",
+            "good": true
+          },
+          {
+            "label": "Precision",
+            "value": 99.3,
+            "unit": "%",
+            "note": "when this model reports a weapon, it is almost always right",
+            "good": true
+          },
+          {
+            "label": "Recall",
+            "value": 88.7,
+            "unit": "%",
+            "note": "dragged down almost entirely by one dataset (67.8% recall there)",
+            "good": true
+          },
+          {
+            "label": "False-positive rate",
+            "value": 21.2,
+            "unit": "%",
+            "note": "18 FPs off just 85 true negatives -- small-denominator artifact, not comparable to violence's 7.4%",
+            "good": false
+          }
+        ],
+        "measured_on": "3,001 test images, 5 datasets (Gun detection v4, Gun and knife detection v1, knife-dataset v2, Traffic and Road Signs v1, CCTV Knife Detection v1)",
+        "caveat": "Recall is dragged down almost entirely by one dataset (237 of 330 total misses in 'gun detection v4' alone, 67.8% recall there); Knife performance is strong (97.4%) and Sign is perfect on its own dataset. These are still object-detection datasets, not CCTV -- the one genuinely CCTV-framed set here has 11 test images. Performance at real pole-camera distance is unmeasured, same caveat as violence and robbery. Signs also produced zero detections across 4,800 sampled frames of this project's own outdoor footage (see vandalism's _why_disabled) -- both results are true at once: it works on what it was trained on and does not fire on these deployment cameras."
+      }
     },
     "static_weapon_filter": {
       "enabled": true,

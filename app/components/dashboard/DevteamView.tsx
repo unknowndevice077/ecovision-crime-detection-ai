@@ -5,7 +5,7 @@ import {
   ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
   Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
   Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus, ChevronDown,
-  Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff
+  Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff, Gauge, Undo2
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketContext';
@@ -82,6 +82,41 @@ type DetectionModel = {
   weights_present: boolean;
   metrics?: ModelMetrics;
   notes?: Record<string, string>;
+};
+
+type OptimizeStep = {
+  index: number;
+  total?: number;
+  label: string;
+  state: 'start' | 'building' | 'done' | 'skipped' | 'failed';
+  before_ms?: number;
+  after_ms?: number;
+  speedup?: number;
+  reason?: string;
+  error?: string;
+};
+
+type OptimizeSummaryRow = {
+  label: string;
+  before_ms?: number;
+  after_ms?: number;
+  speedup?: number;
+  error?: string;
+};
+
+type OptimizeSummary =
+  | { kind: 'summary'; results: OptimizeSummaryRow[]; combined: number | null }
+  | { kind: 'reverted'; files: string[] };
+
+type OptimizeState = {
+  running: boolean;
+  steps: OptimizeStep[];
+  summary: OptimizeSummary | null;
+  preconditions: { ok: boolean; detail: string } | null;
+  returncode: number | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
 type Station = { id: string; name: string; barangay_ids: string[]; staff_count: number };
@@ -294,6 +329,40 @@ export default function DevteamView() {
       flash('Could not reach the server');
     } finally {
       setModelBusy(null);
+    }
+  };
+
+  // ── Optimize weights (TensorRT, this machine only) ─────────────────────────
+  // Wraps optimize_weights.py: builds .engine files compiled against THIS
+  // GPU + this TensorRT version. optimize_weights.py refuses to install an
+  // engine whose verdicts disagree with the .pt it came from, so a run
+  // either speeds things up or changes nothing -- never changes an answer.
+  const [optimizeState, setOptimizeState] = useState<OptimizeState | null>(null);
+  const [optimizeBusy, setOptimizeBusy] = useState(false);
+
+  const fetchOptimizeStatus = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/optimize_weights/status`, { headers: authHeaders() });
+      if (res.ok) setOptimizeState(await res.json());
+    } catch { /* leave the previous panel up */ }
+  };
+
+  useLiveChannel("optimize_weights", fetchOptimizeStatus);
+
+  const startOptimize = async (revert: boolean) => {
+    setOptimizeBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/optimize_weights${revert ? '/revert' : ''}`, {
+        method: 'POST', headers: authHeaders(),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { flash(d.detail || 'Could not start'); return; }
+      await fetchOptimizeStatus();
+      flash(revert ? 'Reverting to .pt weights…' : 'Optimizing for this machine…');
+    } catch {
+      flash('Could not reach the server');
+    } finally {
+      setOptimizeBusy(false);
     }
   };
 
@@ -573,7 +642,7 @@ export default function DevteamView() {
           icon={<Brain size={12} />}
           label="AI Models"
           active={tab === 'models'}
-          onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); }}
+          onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); }}
         />
       </div>
 
@@ -1104,6 +1173,84 @@ export default function DevteamView() {
               </p>
             </div>
           )}
+
+          {/* OPTIMIZE WEIGHTS -- machine-level, not per-model */}
+          <div className="border border-[var(--line)]">
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+              <Gauge size={13} className="text-[var(--accent)]" />
+              <div className="min-w-0 flex-1">
+                <span className="text-[11px] tracking-[0.12em] uppercase text-[#fff]">Optimize weights for this PC</span>
+                <p className="text-[9.5px] leading-relaxed text-[var(--text-2)] mt-1">
+                  Compiles a TensorRT engine for each model, tuned to this machine's GPU.
+                  Optional and reversible — the .pt weights keep working the whole time, and
+                  a faster engine is refused unless it agrees with the original model on real
+                  input. Takes a few minutes; re-run after a GPU or driver change.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => startOptimize(true)}
+                  disabled={optimizeBusy || !!optimizeState?.running}
+                  title="Delete every .engine file, returning to the .pt weights"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[9.5px] tracking-[0.1em] uppercase border border-[var(--line-2)] text-[var(--text-2)] hover:border-[var(--text-3)] hover:text-[#fff] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Undo2 size={11} /> Revert
+                </button>
+                <button
+                  onClick={() => startOptimize(false)}
+                  disabled={optimizeBusy || !!optimizeState?.running}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[9.5px] tracking-[0.1em] uppercase border border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Gauge size={11} /> {optimizeState?.running ? 'Running…' : 'Optimize'}
+                </button>
+              </div>
+            </div>
+
+            {optimizeState?.preconditions && !optimizeState.preconditions.ok && (
+              <div className="flex items-start gap-2 px-4 py-3 border-b border-[var(--line)]">
+                <AlertTriangle size={11} className="text-[var(--warn)] mt-0.5 shrink-0" />
+                <p className="text-[9.5px] leading-relaxed text-[var(--text-2)]">
+                  <span className="text-[var(--warn)] font-bold">Not available on this machine: </span>
+                  {optimizeState.preconditions.detail}
+                </p>
+              </div>
+            )}
+
+            {(optimizeState?.running || optimizeState?.steps?.length) ? (
+              <div className="divide-y divide-[var(--panel-2)]">
+                {optimizeState.steps.map(s => (
+                  <div key={s.label} className="flex items-center justify-between px-4 py-2 text-[9.5px] font-mono">
+                    <span className="text-[var(--text-2)]">{s.label}</span>
+                    {s.state === 'done' ? (
+                      <span className="text-[var(--ok)]">
+                        {s.before_ms?.toFixed(1)}ms → {s.after_ms?.toFixed(1)}ms
+                        <span className="text-[#fff]"> ({s.speedup?.toFixed(2)}x)</span>
+                      </span>
+                    ) : s.state === 'failed' ? (
+                      <span className="text-[var(--critical)] truncate max-w-[50%]" title={s.error}>failed: {s.error}</span>
+                    ) : s.state === 'skipped' ? (
+                      <span className="text-[var(--text-3)]">skipped — {s.reason}</span>
+                    ) : s.state === 'building' ? (
+                      <span className="text-[var(--warn)]">building…</span>
+                    ) : (
+                      <span className="text-[var(--text-3)]">starting…</span>
+                    )}
+                  </div>
+                ))}
+                {optimizeState.summary?.kind === 'summary' && optimizeState.summary.combined != null && (
+                  <div className="flex items-center justify-between px-4 py-2.5 bg-[var(--accent)]/[0.04]">
+                    <span className="text-[9.5px] tracking-[0.1em] uppercase text-[var(--text-2)]">Combined model time</span>
+                    <span className="text-[13px] font-mono tabular-nums text-[var(--ok)]">{optimizeState.summary.combined.toFixed(2)}x faster</span>
+                  </div>
+                )}
+                {optimizeState.summary?.kind === 'reverted' && (
+                  <div className="px-4 py-2.5 text-[9.5px] text-[var(--text-2)]">
+                    Removed {optimizeState.summary.files.length} engine file(s). Back on the .pt weights.
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
 
           <p className="text-[10px] leading-relaxed text-[var(--text-2)]">
             Every figure below was measured on footage the model never trained on.

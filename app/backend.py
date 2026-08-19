@@ -36,6 +36,7 @@ import threading
 import collections
 import requests
 import asyncio
+import subprocess
 from datetime import datetime, timedelta
 import time
 import hashlib
@@ -514,6 +515,16 @@ ADMIN_CREATES_ROLE = {"PNP_ADMIN": "PNP_OFFICER", "BARANGAY_ADMIN": "BARANGAY_ST
 ALL_ROLES = ADMIN_ROLES | STANDARD_ROLES | {"DEVTEAM"}
 ADMIN_OR_DEVTEAM = ADMIN_ROLES | {"DEVTEAM"}
 POLICE_SIDE_ROLES = {"PNP_OFFICER", "PNP_ADMIN", "DEVTEAM"}
+# Viewing + optimizing AI models is barangay-only (not PNP_ADMIN, despite
+# both being in ADMIN_ROLES): the models run on hardware the barangay owns
+# and installed, same reasoning as manage_cameras being barangay-only.
+# Toggling a model on/off is deliberately NOT in this set -- that stays
+# DEVTEAM-only (see set_detection_model below), matching START_HERE.md's
+# "read-only visibility + request-and-approve, not a direct switch" call on
+# giving barangay users control over detection itself. Optimizing changes
+# speed only (the script refuses to install a disagreeing engine), which is
+# why it's safe to extend where toggling isn't.
+MODEL_VIEW_ROLES = {"DEVTEAM", "BARANGAY_ADMIN"}
 BARANGAY_SIDE_ROLES = {"BARANGAY_ADMIN", "BARANGAY_STAFF"}
 PNP_SIDE_ROLES = {"PNP_ADMIN", "PNP_OFFICER"}
 VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cameras", "confirm_dismiss_alerts"}
@@ -1414,6 +1425,161 @@ async def get_video_records(authorization: Optional[str] = Header(None)):
     conn.close()
     return [_row_to_record_dict(r) for r in rows]
 
+def _ffmpeg_exe():
+    """Same resolution order as maincode/main.py: bundled binary first, system
+    ffmpeg only as a fallback. Never assume a system install exists -- a
+    packaged deployment has no way to guarantee one."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        import shutil
+        return shutil.which("ffmpeg")
+
+
+def _parse_timecode(value: str) -> float:
+    """Accepts 'SS', 'MM:SS' or 'HH:MM:SS' and returns seconds.
+
+    The Recordings UI sends MM:SS from its scrub fields; being liberal here
+    means a user typing '90' or '00:01:30' gets what they expect instead of a
+    validation error on an evidence tool.
+    """
+    parts = str(value).strip().split(":")
+    try:
+        parts = [float(p) for p in parts]
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Bad timecode: {value!r}")
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    raise HTTPException(status_code=400, detail=f"Bad timecode: {value!r}")
+
+
+class ExtractRangeSchema(BaseModel):
+    start: str = "00:00"
+    end: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@app.post("/api/records/{record_id}/extract")
+async def extract_record_segment(record_id: str, data: ExtractRangeSchema,
+                                 authorization: Optional[str] = Header(None)):
+    """Cuts a real sub-clip out of an existing recording.
+
+    BUG FOUND 2026-08-19: the Recordings tab's "Extract Segment" button
+    previously just POSTed to /api/records/register_clip with a made-up
+    filename (`EXTRACT_<timestamp>_<original>.mp4`) and NEVER CUT ANY VIDEO.
+    It created a database row pointing at a file that does not exist, so the
+    extracted "clip" appeared in the archive and then failed to play, forever.
+    This does the actual trim.
+    """
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "view_records")
+
+    sql, params = apply_scope(payload, "SELECT * FROM video_records", [],
+                              extra_where="id = ?", extra_params=[record_id])
+    cursor.execute(sql, tuple(params))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
+
+    src = row["file_path"]
+    if not os.path.exists(src):
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"Source file is missing from disk: {os.path.basename(src)}")
+
+    ffmpeg = _ffmpeg_exe()
+    if not ffmpeg:
+        conn.close()
+        raise HTTPException(status_code=503, detail="ffmpeg unavailable -- cannot cut a segment. `pip install imageio-ffmpeg`.")
+
+    start_s = _parse_timecode(data.start)
+    cmd = [ffmpeg, "-y", "-loglevel", "error", "-ss", str(start_s), "-i", src]
+    if data.end:
+        end_s = _parse_timecode(data.end)
+        if end_s <= start_s:
+            conn.close()
+            raise HTTPException(status_code=400, detail="End must be after start.")
+        cmd += ["-t", str(end_s - start_s)]
+        duration_label = f"{end_s - start_s:.1f}s"
+    else:
+        duration_label = "to end"
+    # Re-encode rather than stream-copy: a copy can only cut on keyframes, so
+    # the clip would silently start seconds away from the requested mark --
+    # unacceptable when the whole point is isolating a moment of evidence.
+    out_name = f"EXTRACT_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.path.basename(src)}"
+    out_path = os.path.join(RECORDINGS_DIR, out_name)
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", "-an", out_path]
+
+    proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=300)
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        conn.close()
+        raise HTTPException(status_code=500,
+                            detail=f"Extraction failed: {proc.stderr.decode('utf-8','replace')[:200]}")
+
+    rid = str(uuid.uuid4())
+    cursor.execute(
+        """INSERT INTO video_records
+           (id, filename, file_path, recorded_at, duration, type, associated_incident_id,
+            crime_time_marker, notes, barangay_id)
+           VALUES (?, ?, ?, ?, ?, 'CLIP', ?, ?, ?, ?)""",
+        (rid, out_name, out_path, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+         duration_label, row["associated_incident_id"], data.start,
+         data.notes or f"Segment {data.start}–{data.end or 'end'} extracted from {row['filename']}.",
+         row["barangay_id"]),
+    )
+    conn.commit()
+    conn.close()
+    await manager.broadcast({"channel": "records", "event": "clip_extracted", "id": rid})
+    return {"status": "extracted", "id": rid, "filename": out_name}
+
+
+@app.delete("/api/records/{record_id}")
+async def delete_record(record_id: str, authorization: Optional[str] = Header(None)):
+    """Removes a recording and its file.
+
+    Restricted to admin tiers/DEVTEAM rather than anyone with view_records:
+    this destroys evidence, which is a materially different action from
+    watching it. Scoped too, so an admin cannot delete another barangay's
+    footage.
+    """
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_OR_DEVTEAM)
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    sql, params = apply_scope(payload, "SELECT * FROM video_records", [],
+                              extra_where="id = ?", extra_params=[record_id])
+    cursor.execute(sql, tuple(params))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
+
+    file_removed = False
+    try:
+        if row["file_path"] and os.path.exists(row["file_path"]):
+            os.remove(row["file_path"])
+            file_removed = True
+    except OSError as e:
+        # Row still goes, so the archive doesn't keep listing something the
+        # user asked to be gone -- but say plainly that the file survived.
+        print(f"⚠️  [RECORDS] Could not delete {row['file_path']}: {e}")
+
+    cursor.execute("DELETE FROM video_records WHERE id = ?", (record_id,))
+    conn.commit()
+    conn.close()
+    await manager.broadcast({"channel": "records", "event": "clip_deleted", "id": record_id})
+    return {"status": "deleted", "id": record_id, "file_removed": file_removed}
+
+
 @app.post("/api/records/register_clip")
 async def register_clip(data: ManualClipSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -2063,6 +2229,53 @@ async def delete_my_user(user_id: int, authorization: Optional[str] = Header(Non
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
 
+@app.post("/api/admin/users/{user_id}/reset_password")
+async def reset_my_users_password(user_id: int, authorization: Optional[str] = Header(None)):
+    """Basic account management for admins: reset a password for a user THEY
+    manage, same ownership rule as delete_my_user (parent_admin_id must be
+    this admin's own id).
+
+    An admin account's OWN password is never resettable through this route --
+    admin accounts are created by DevTeam with parent_admin_id left NULL
+    (see devteam_create_user), so the ownership check above already excludes
+    them for a non-DEVTEAM caller. The explicit role check below is
+    belt-and-suspenders: it makes the refusal a readable 403 instead of a
+    generic "not your user", and holds even if that NULL invariant ever
+    changes. DEVTEAM is the only role that can reset an admin's password --
+    see devteam_edit_user for that path.
+    """
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_OR_DEVTEAM)
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username, role, parent_admin_id FROM users WHERE id = ?", (user_id,))
+    target = cursor.fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload["role"] != "DEVTEAM":
+        if target["role"] in (ADMIN_ROLES | {"DEVTEAM"}):
+            conn.close()
+            raise HTTPException(
+                status_code=403,
+                detail="Admin account passwords can only be reset by DevTeam.")
+        if target["parent_admin_id"] != payload["id"]:
+            conn.close()
+            raise HTTPException(status_code=403, detail="You can only reset passwords for your own users")
+
+    new_password = secrets.token_urlsafe(12)
+    cursor.execute("UPDATE users SET password = ? WHERE id = ?",
+                    (hash_password(new_password), user_id))
+    conn.commit()
+    conn.close()
+    # The new password itself never goes over the broadcast channel -- only
+    # the fact that a reset happened, same reasoning as devteam_credentials.txt
+    # never being re-shown after its one display.
+    await manager.broadcast({"channel": "users", "event": "password_reset", "id": user_id})
+    return {"status": "reset", "id": user_id, "username": target["username"], "new_password": new_password}
+
 # --- DEVTEAM: FULL POWER OVER ANY USER (EDIT / DELETE) ---
 @app.patch("/api/devteam/users/{user_id}")
 async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: Optional[str] = Header(None)):
@@ -2213,7 +2426,7 @@ def _read_config_file():
 @app.get("/api/devteam/detection-models")
 async def list_detection_models(authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    require_role(payload, {"DEVTEAM"})
+    require_role(payload, MODEL_VIEW_ROLES)
 
     try:
         cfg = _read_config_file()
@@ -2332,6 +2545,117 @@ async def set_detection_model(
         "requires_restart": True,
         "message": "Saved. Restart detection for this to take effect.",
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OPTIMIZE WEIGHTS -- builds TensorRT .engine files FOR THIS MACHINE.
+#
+# optimize_weights.py already emits structured "@@{json}" progress lines --
+# its own docstring says they're "for the installer UI", which never
+# actually happened until now. This wraps it as a background subprocess
+# (a full run is several minutes, one ~1min build per model, so it cannot
+# run inline on the request) and re-broadcasts each line over the existing
+# /ws channel so the dashboard gets live progress instead of a spinner.
+#
+# Deliberately a single global run, not per-user: it's a machine-wide,
+# GPU-wide operation (see optimize_weights.py's own docstring on why an
+# engine is tied to one GPU + one TensorRT version), so two runs racing
+# would just corrupt each other's engine files.
+# ──────────────────────────────────────────────────────────────────────────────
+_optimize_state = {
+    "running": False,
+    "steps": [],
+    "summary": None,
+    "preconditions": None,
+    "returncode": None,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
+_optimize_lock = asyncio.Lock()
+
+
+async def _run_optimize_weights(revert: bool):
+    args = [sys.executable, os.path.join(BASE_DIR, "optimize_weights.py")]
+    if revert:
+        args.append("--revert")
+    proc = await asyncio.create_subprocess_exec(
+        *args, cwd=BASE_DIR,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").rstrip("\n")
+            if not text.startswith("@@"):
+                continue
+            try:
+                event = json.loads(text[2:])
+            except json.JSONDecodeError:
+                continue
+            kind = event.get("kind")
+            if kind == "preconditions":
+                _optimize_state["preconditions"] = event
+            elif kind == "step":
+                _optimize_state["steps"].append(event)
+            elif kind == "summary":
+                _optimize_state["summary"] = event
+            elif kind == "reverted":
+                _optimize_state["summary"] = event
+            await manager.broadcast({"channel": "optimize_weights", "event": "progress",
+                                      **event})
+        returncode = await proc.wait()
+    except Exception as e:
+        _optimize_state["error"] = f"{type(e).__name__}: {e}"
+        returncode = -1
+    finally:
+        _optimize_state["running"] = False
+        _optimize_state["returncode"] = returncode
+        _optimize_state["finished_at"] = datetime.utcnow().isoformat()
+        await manager.broadcast({"channel": "optimize_weights", "event": "finished",
+                                  "returncode": returncode,
+                                  "error": _optimize_state["error"]})
+
+
+@app.post("/api/devteam/optimize_weights")
+async def start_optimize_weights(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, MODEL_VIEW_ROLES)
+
+    async with _optimize_lock:
+        if _optimize_state["running"]:
+            raise HTTPException(status_code=409, detail="An optimize run is already in progress")
+        _optimize_state.update(running=True, steps=[], summary=None, preconditions=None,
+                                returncode=None, error=None,
+                                started_at=datetime.utcnow().isoformat(), finished_at=None)
+        asyncio.create_task(_run_optimize_weights(revert=False))
+
+    return {"status": "started"}
+
+
+@app.post("/api/devteam/optimize_weights/revert")
+async def revert_optimize_weights(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, MODEL_VIEW_ROLES)
+
+    async with _optimize_lock:
+        if _optimize_state["running"]:
+            raise HTTPException(status_code=409, detail="An optimize run is already in progress")
+        _optimize_state.update(running=True, steps=[], summary=None, preconditions=None,
+                                returncode=None, error=None,
+                                started_at=datetime.utcnow().isoformat(), finished_at=None)
+        asyncio.create_task(_run_optimize_weights(revert=True))
+
+    return {"status": "started"}
+
+
+@app.get("/api/devteam/optimize_weights/status")
+async def get_optimize_weights_status(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, MODEL_VIEW_ROLES)
+    return _optimize_state
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound, Eye, EyeOff } from 'lucide-react';
+import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound, Eye, EyeOff, RefreshCw, Copy, Check } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonList } from './Skeleton';
@@ -94,6 +94,37 @@ export default function AdminUsersView() {
       setTimeout(() => setError(''), 3000);
     } finally {
       setPendingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  };
+
+  // Generates a new random password server-side and returns it ONCE --
+  // same convention as the DevTeam bootstrap credential (shown once, never
+  // re-fetchable). Every row in `users` here was already scoped by the
+  // backend to this admin's own parent_admin_id, so there's no admin-account
+  // row to accidentally target -- the backend still refuses one either way.
+  const [resetResult, setResetResult] = useState<{ username: string; password: string } | null>(null);
+  const [resetBusyId, setResetBusyId] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleResetPassword = async (u: ManagedUser) => {
+    setResetBusyId(u.id);
+    setError('');
+    try {
+      const res = await fetch(`${API_URL}/api/admin/users/${u.id}/reset_password`, {
+        method: "POST", headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setResetResult({ username: data.username, password: data.new_password });
+      } else {
+        setError(data.detail || "Could not reset that password");
+        setTimeout(() => setError(''), 3000);
+      }
+    } catch {
+      setError("Backend connection failure");
+      setTimeout(() => setError(''), 3000);
+    } finally {
+      setResetBusyId(null);
     }
   };
 
@@ -235,6 +266,15 @@ export default function AdminUsersView() {
                     <KeyRound size={12} />
                   </button>
                   <button
+                    onClick={() => handleResetPassword(u)}
+                    disabled={resetBusyId === u.id}
+                    title="Reset password -- generates a new one, shown once"
+                    className="p-1.5 border transition-colors hover:bg-white/5 disabled:opacity-40"
+                    style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                  >
+                    <RefreshCw size={12} className={resetBusyId === u.id ? 'animate-spin' : ''} />
+                  </button>
+                  <button
                     onClick={() => handleDelete(u.id)}
                     title="Remove user"
                     className="p-1.5 border transition-colors hover:bg-[rgba(229,52,47,0.12)]"
@@ -312,6 +352,62 @@ export default function AdminUsersView() {
                 Create account
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* RESET PASSWORD RESULT -- shown once, same convention as the DevTeam
+          bootstrap credential. Closing this without copying it loses the
+          password for good (the backend never stores or re-returns it). */}
+      {resetResult && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+          <div className="border w-full max-w-sm" style={modalShell}>
+            <div className="h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <span className="label flex items-center gap-1.5" style={{ color: 'var(--text)' }}>
+                <RefreshCw size={12} /> Password reset
+              </span>
+              <button
+                onClick={() => { setResetResult(null); setCopied(false); }}
+                title="Close"
+                className="transition-colors hover:text-white"
+                style={{ color: 'var(--text-3)' }}
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
+                New password for <span className="text-white font-bold">{resetResult.username}</span>.
+                Shown once -- copy it now and hand it to them directly.
+              </p>
+              <div className="flex items-center gap-2">
+                <code
+                  className="flex-1 px-2.5 py-2 text-[12px] font-mono truncate border"
+                  style={{ background: 'var(--bg)', borderColor: 'var(--line-2)', color: 'var(--ok)' }}
+                >
+                  {resetResult.password}
+                </code>
+                <button
+                  onClick={() => {
+                    navigator.clipboard?.writeText(resetResult.password);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  }}
+                  title="Copy to clipboard"
+                  className="p-2 border transition-colors hover:bg-white/5 shrink-0"
+                  style={{ borderColor: 'var(--line-2)', color: copied ? 'var(--ok)' : 'var(--text-2)' }}
+                >
+                  {copied ? <Check size={13} /> : <Copy size={13} />}
+                </button>
+              </div>
+              <button
+                onClick={() => { setResetResult(null); setCopied(false); }}
+                className="w-full py-2.5 text-[10px] tracking-[0.12em] uppercase text-white"
+                style={{ background: 'var(--accent)' }}
+              >
+                Done
+              </button>
+            </div>
           </div>
         </div>
       )}

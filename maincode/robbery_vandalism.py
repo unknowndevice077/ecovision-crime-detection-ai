@@ -37,15 +37,38 @@ ROBBERY_MIN_DURATION     = 90      # frames (~3 sec @ 30fps) -- sustained proxim
 ROBBERY_RELEASE_FRAMES   = 45      # frames of no-evidence before dropping ROBBERY state
 
 # -- Vandalism (new FSM)
-VANDAL_TARGET_PROXIMITY  = 120     # px -- wrist must be within this distance of a Sign/Wall bbox
-VANDAL_MIN_WRIST_VEL     = 20      # px/frame -- lower bar than punching; sweeping motion is slower
-VANDAL_MAX_WRIST_VEL     = 90      # px/frame -- upper bound; faster than this looks like a strike, not a sweep
-VANDAL_MIN_SWEEP_FRAMES  = 10      # consecutive frames of qualifying motion needed
-VANDAL_SWEEP_WINDOW      = 20      # rolling window size for sweep detection
+#
+# MEASURED 2026-08-19, the first real measurement these six constants have
+# ever had (see EcoVisionImagesTraining/sweep_vandalism_band.py). Every
+# number below was guessed before condition 1 (a real static_targets box)
+# was reachable at all -- weapon_signs.pt's "sign" class fired zero times in
+# 4,800 frames, so nothing downstream of it was ever exercised on real data.
+# Once vandalism_marks.pt made condition 1 reachable, the OLD velocity band
+# [20, 90] turned out to overlap punch territory (MIN_PUNCH_VEL=60 in
+# main.py) instead of sitting below it -- backwards for a rule meant to mean
+# "sweeping, not striking" -- and caught only 3.6% of real near-target wrist
+# samples (33/903). True distribution at native frame rate: median 1.1,
+# p75 3.7, max 52 px/frame.
+#
+# A 7-band x 8-sustain-param grid search on 79 labelled vandalism clips + 24
+# same-camera negatives (ucf_clips/vandalism_outdoor, /vandalism_normal)
+# picked the values below by (recall - FPR). Every candidate tested held FPR
+# at a clean 0.0% -- the ceiling is recall, not false alarms. Final:
+# 11.4% recall (9/79), 0.0% FPR (0/24). Up from the 0% recall this rule had
+# with a dead condition 1, but still low enough that this is NOT a
+# recommendation to enable detection.vandalism.enabled -- see config.json's
+# _why_disabled, updated with this same figure.
+VANDAL_TARGET_PROXIMITY  = 120     # px -- wrist must be within this distance of a detected mark
+VANDAL_MIN_WRIST_VEL     = 0.3     # px/frame -- was 20 (in punch territory); real sweeping motion is far slower
+VANDAL_MAX_WRIST_VEL     = 8.0     # px/frame -- was 90; well under MIN_PUNCH_VEL=60, as "not a punch" requires
+VANDAL_MIN_SWEEP_FRAMES  = 2       # consecutive frames of qualifying motion needed -- was 10
+VANDAL_SWEEP_WINDOW      = 6       # rolling window size for sweep detection -- was 20
 VANDAL_NO_VICTIM_DIST    = 200     # px -- no OTHER person may be closer than this to count as vandalism,
                                     # not assault (this is what separates spraying from punching)
 VANDAL_CONFIRM_FRAMES    = 20      # consecutive qualifying frames to confirm VANDALISM state
 VANDAL_RELEASE_FRAMES    = 60      # frames of no evidence before dropping VANDALISM state
+VANDAL_SWEEP_FRACTION    = 0.30    # share of the last VANDAL_MIN_SWEEP_FRAMES that must be in-band --
+                                    # was hardcoded 0.7 inline in score_vandalism, never swept until now
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -229,7 +252,7 @@ def score_vandalism(tid, joints, prev_joints_dict, sweep_history_dict,
         return False, None
 
     recent = list(sweep_buf)[-VANDAL_MIN_SWEEP_FRAMES:]
-    if sum(recent) >= int(VANDAL_MIN_SWEEP_FRAMES * 0.7):   # 70% of recent frames qualify
+    if sum(recent) >= int(VANDAL_MIN_SWEEP_FRAMES * VANDAL_SWEEP_FRACTION):
         return True, nearest_target
 
     return False, None
