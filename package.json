@@ -93,6 +93,10 @@
         "to": "backend/db.py"
       },
       {
+        "from": "app/ptz_control.py",
+        "to": "backend/ptz_control.py"
+      },
+      {
         "from": "app/port_utils.py",
         "to": "backend/port_utils.py"
       },

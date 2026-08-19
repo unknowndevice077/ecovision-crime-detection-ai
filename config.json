@@ -20,7 +20,8 @@
     "type": "sqlite",
     "path": "./data",
     "backup_interval": 3600,
-    "_type_note": "This key is DOCUMENTATION ONLY -- nothing reads it. It said 'postgres' while every standalone run used SQLite, which is the kind of mismatch that costs an hour when someone trusts it. The real switch is the DATABASE_URL environment variable, read in app/db.py: set -> Postgres, unset -> SQLite at database.path. A packaged install must leave it UNSET.",
+    "_type_note": "This key is DOCUMENTATION ONLY -- nothing reads it. It said 'postgres' while every standalone run used SQLite, which is the kind of mismatch that costs an hour when someone trusts it. The real switch is the DATABASE_URL environment variable, read in app/db.py: set -> Postgres, unset -> SQLite. A packaged install must leave it UNSET.",
+    "_path_note": "BUG FOUND 2026-08-19: 'path' below is ALSO dead -- db.py's SQLite branch never reads database.path at all, it opens ECOVISION_WRITABLE_DIR/ecovision.db directly (flat, no subfolder). backend.py used to compute its own DATA_DIR from this key too, but that DATA_DIR/DB_PATH pair was itself unused dead code (removed) -- its only real effect was silently creating an empty, never-written writable-dir/data/ folder on every startup, which is why this specific field looked load-bearing but wasn't. Left here as a record, not a live setting.",
     "_offline": "Fully local by design: SQLite file on disk, no network calls, no cloud service. If Supabase is adopted later it would replace the db.py backend behind the same interface; offline-first would need its local cache, since this system must keep detecting when the link drops."
   },
   "detection": {
@@ -223,21 +224,32 @@
   },
   "camera": {
     "index": 0,
+    "_index_note": "2026-08-19: this DESKTOP needs index 5 (index 0 doesn't open here), but 0 is the conventional built-in webcam on a laptop and on most end-user machines, which is what ships. Either way main.py probes 0-9 when the configured index fails, so a wrong value costs a second of startup, not a broken camera -- set it explicitly per machine if you want that second back.",
     "source": "",
+    "camera_id": "1",
+    "_camera_id_note": "2026-08-19: this physical camera's row id in the `cameras` table (see the Cameras tab / DevTeam console -- 1 is the seeded 'Main Entrance Hub', 2 is 'Sector B Gate'). main.py resolves the REAL, current name for this id via GET /api/camera_name/{id} once at startup, so renaming a camera in the Cameras tab is what actually changes what shows on incidents -- not this file. Set this to whichever registered camera index 5 actually is; if it's neither, register it first.",
+    "name": "Cogon Core Smartpole Node",
+    "_name_note": "Fallback ONLY, used if camera_id above is unset or doesn't resolve (e.g. backend unreachable at AI-core startup). Not the live source of truth anymore.",
     "default_resolution": "1280x720",
     "fps": 30,
     "buffer_size": 50
   },
   "esp32": {
-    "enabled": false,
+    "enabled": true,
+    "_enabled_note": "Turned on 2026-08-19 for siren/panic-button hardware testing. Set back to false if running without the pole attached -- with it true, every Confirm/Dismiss click makes a real HTTP call to ip_override below and blocks up to 2s on a connect timeout when nothing answers.",
+    "ip_override": "192.168.254.152",
+    "_ip_recovered": "2026-08-19: recovered from git history. This is the ONLY ESP32 address this project has ever used -- unchanged from commit 2bee1ef (2 Jun 2026) onward, first as a hardcoded ESP32_IP, later as this override's fallback. Recorded here so it stops living only in a hardcoded default in backend.py.",
+    "_not_actually_static": "WARNING: the firmware does NOT set a static IP. hardware/esp32_smartpole_tracker.ino calls WiFi.begin(ssid, password) with no WiFi.config(), i.e. plain DHCP -- so .152 was whatever the router leased, or a DHCP reservation configured on the router itself (outside this repo). If the router was reset or its lease table cleared, this address can change and the siren will silently stop working. See _how_to_make_robust below.",
+    "_how_to_make_robust": "Three options, worst to best: (1) keep this override and re-check the IP whenever the router changes; (2) add WiFi.config() to the sketch for a real static IP -- must sit OUTSIDE the router's DHCP pool or it will collide; (3) restore auto-discovery, which this project USED to have and lost in a refactor: the old POST /panic did `global ESP32_IP; ESP32_IP = request.client.host`, so the pole taught the backend its own address the first time its panic button was pressed. The current /api/panic_trigger dropped the `request: Request` parameter and no longer does this. Option 3 needs no IP configured anywhere and survives any DHCP change.",
     "heartbeat_interval": 30,
     "timeout": 60,
     "max_devices": 100,
     "auto_registration": true
   },
   "networking": {
-    "websocket_url": "ws://backend:8000/ws",
-    "api_url": "http://backend:8000",
+    "_fixed_2026-08-19": "These were the Docker-compose-only 'backend' hostname, which does not resolve outside a compose network. Docker support (docker-compose.yml, which was the only thing overriding this to a real address for local runs) was removed from this repo -- so this JSON value is now what maincode/main.py actually uses whenever nothing overrides it, and every AI-triggered alert (violence/robbery/vandalism/weapons) was silently failing to reach the backend as a result. electron/main.js still overrides this correctly for the packaged desktop app (via the BACKEND_URL env var, now actually read -- see the matching comment in maincode/main.py), but a plain `python maincode/main.py` / run_dev_system.bat run had nothing to override it, so it needs to be correct here too.",
+    "websocket_url": "ws://127.0.0.1:8000/ws",
+    "api_url": "http://127.0.0.1:8000",
     "timeout": 5,
     "retries": 3
   },

@@ -122,11 +122,18 @@
       state === 'done' ? '✓' : state === 'error' ? '✕' : '';
   }
 
-  el('startBtn').addEventListener('click', () => {
+  // This screen used to require a "Start Sentinel" click on EVERY launch,
+  // not just the first one -- there was nothing here to confirm (no choice
+  // being made, same three ports every time), so it was pure friction
+  // repeated forever. Now it starts itself; the button stays as a manual
+  // fallback in case a user lands here after a retry.
+  function begin() {
     screenStart.classList.remove('on');
     screenProgress.classList.add('on');
     window.launchBridge.startLaunch();
-  });
+  }
+  el('startBtn').addEventListener('click', begin);
+  begin();
 
   window.launchBridge.onStepStatus((step, state) => markStep(step, state));
 

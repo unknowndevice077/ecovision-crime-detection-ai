@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound } from 'lucide-react';
+import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound, Eye, EyeOff } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonList } from './Skeleton';
+import { permissionRowsFor, permissionNoteFor, onlyEditablePermissions } from '../../lib/permissions';
 
 type ManagedUser = {
   id: number;
@@ -15,14 +16,6 @@ type ManagedUser = {
   parent_admin_id: number | null;
   permissions: string; // JSON string from backend
 };
-
-const PERMISSION_KEYS = [
-  { key: "view_map", label: "View Crime Map" },
-  { key: "view_records", label: "View Video Records" },
-  { key: "view_history", label: "View Crime History" },
-  { key: "manage_cameras", label: "Manage Cameras" },
-  { key: "confirm_dismiss_alerts", label: "Confirm / Dismiss Alerts" },
-];
 
 function authHeaders() {
   const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
@@ -35,6 +28,7 @@ export default function AdminUsersView() {
   const [isLoading, setIsLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newUser, setNewUser] = useState({ username: '', password: '', assignment: '' });
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [editingPerms, setEditingPerms] = useState<ManagedUser | null>(null);
   const [permsDraft, setPermsDraft] = useState<Record<string, boolean>>({});
   const [error, setError] = useState('');
@@ -118,14 +112,15 @@ export default function AdminUsersView() {
   const savePermissions = async () => {
     if (!editingPerms) return;
     const snapshot = users;
-    const updatedPermsJson = JSON.stringify(permsDraft);
+    const editablePerms = onlyEditablePermissions(editingPerms.role, permsDraft);
+    const updatedPermsJson = JSON.stringify(editablePerms);
     setUsers(prev => prev.map(u => u.id === editingPerms.id ? { ...u, permissions: updatedPermsJson } : u));
     setEditingPerms(null);
     try {
       const res = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/permissions`, {
         method: "PATCH",
         headers: authHeaders(),
-        body: JSON.stringify({ permissions: permsDraft }),
+        body: JSON.stringify({ permissions: editablePerms }),
       });
       if (!res.ok) {
         setUsers(snapshot);
@@ -277,13 +272,25 @@ export default function AdminUsersView() {
               </div>
               <div>
                 <label className="label block mb-1.5">Password</label>
-                <input
-                  type="password" placeholder="Password" required
-                  value={newUser.password}
-                  onChange={e => setNewUser({ ...newUser, password: e.target.value })}
-                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
-                  style={inputStyle}
-                />
+                <div className="relative">
+                  <input
+                    type={showNewPassword ? 'text' : 'password'} placeholder="Password" required
+                    value={newUser.password}
+                    onChange={e => setNewUser({ ...newUser, password: e.target.value })}
+                    className="data w-full border p-2.5 pr-9 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                    style={inputStyle}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(s => !s)}
+                    title={showNewPassword ? 'Hide password' : 'Show password'}
+                    tabIndex={-1}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 transition-colors"
+                    style={{ color: 'var(--text-3)' }}
+                  >
+                    {showNewPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </button>
+                </div>
               </div>
               <div>
                 <label className="label block mb-1.5">Assignment</label>
@@ -325,17 +332,31 @@ export default function AdminUsersView() {
             <div className="p-4">
               <div className="data text-[11px] mb-3" style={{ color: 'var(--text-2)' }}>{editingPerms.username}</div>
 
+              {permissionNoteFor(editingPerms.role) && (
+                <p className="text-[10px] leading-relaxed mb-3" style={{ color: 'var(--text-3)' }}>{permissionNoteFor(editingPerms.role)}</p>
+              )}
+
               <div className="space-y-px mb-4">
-                {PERMISSION_KEYS.map(p => (
+                {permissionRowsFor(editingPerms.role).map(p => (
                   <label
                     key={p.key}
-                    className="flex items-center justify-between p-2.5 border cursor-pointer transition-colors hover:bg-white/[0.02]"
-                    style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
+                    title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
+                    className="flex items-center justify-between p-2.5 border transition-colors"
+                    style={{
+                      background: 'var(--panel-2)', borderColor: 'var(--line)',
+                      cursor: p.status === 'editable' ? 'pointer' : 'not-allowed',
+                      opacity: p.status === 'editable' ? 1 : 0.4,
+                    }}
                   >
-                    <span className="text-[11px]" style={{ color: 'var(--text)' }}>{p.label}</span>
+                    <span className="text-[11px]" style={{ color: 'var(--text)' }}>
+                      {p.label}
+                      {p.status === 'banned' && <span className="ml-1.5 text-[9px] uppercase tracking-wide" style={{ color: 'var(--critical)' }}>locked</span>}
+                      {p.status === 'always' && <span className="ml-1.5 text-[9px] uppercase tracking-wide" style={{ color: 'var(--ok)' }}>automatic</span>}
+                    </span>
                     <input
                       type="checkbox"
-                      checked={!!permsDraft[p.key]}
+                      checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!permsDraft[p.key]}
+                      disabled={p.status !== 'editable'}
                       onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
                       className="w-4 h-4"
                       style={{ accentColor: 'var(--accent)' }}

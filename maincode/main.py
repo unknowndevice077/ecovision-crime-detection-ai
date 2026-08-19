@@ -2,6 +2,18 @@ import os
 import re
 import sys
 import logging
+import subprocess
+
+# Same fix as backend.py's stream reconfigure at its own top -- see that
+# comment for the full story. Applies here too: this file's own console
+# logging (🔥, 🎬, ✅, ⚠️, ...) hits the identical crash risk under a plain
+# cmd.exe console, and PYTHONIOENCODING/PYTHONUTF8 alone weren't reliable
+# enough to trust across however this process actually gets spawned.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SYSTEM LOG NOISE FILTERS (Permanently silences the 'half' deprecation warnings)
@@ -190,8 +202,21 @@ CONF_BY_CLASS = {
     "violence": 0.40,
     "fight":    0.40,
     "assault":  0.40,
-    "sign":     0.40,   
+    "sign":     0.40,
 }
+# BUG FOUND 2026-08-19, computing weapon_signs.pt's first-ever confusion
+# matrix: _run_weapon_detection passed WEAPON_CONF (0.6, the top-level
+# detection.confidence_threshold) straight to YOLO's own `conf=` argument,
+# which discards every box below that BEFORE CONF_BY_CLASS's per-class
+# check ever sees it. Knife (0.45) and sign (0.40) are both below 0.6, so
+# their "lower" thresholds were unreachable dead code -- confirmed directly:
+# 11 of 58 sampled detections on real test images landed in the 0.25-0.6
+# gap, including gun detections at 0.583 and 0.592 (above the intended 0.52
+# gun threshold) that were silently dropped. This floor is the lowest value
+# anything in CONF_BY_CLASS (or the WEAPON_CONF fallback) could ever need,
+# so nothing that could pass the real per-class check downstream gets cut
+# off before reaching it.
+WEAPON_YOLO_CONF_FLOOR = min(min(CONF_BY_CLASS.values()), WEAPON_CONF)
 WEAPON_CONF_GUN_SUSTAINED = 0.35
 
 VBOX_ASSAULT_THRESHOLD = 0.15
@@ -265,16 +290,22 @@ GRIP_STICKY_MARGIN     = 0.80
 
 ESP32_IP    = sys_config["esp32"].get("ip_override") or "192.168.254.152"
 
-# config.production.json's networking.api_url is "127.0.0.1" because that's
-# correct for the shipped Electron desktop build (backend + detector are
-# local processes on the same machine). Under docker-compose, backend and
-# detector are separate containers and "127.0.0.1" wouldn't resolve to the
-# backend container at all -- BACKEND_API_URL_OVERRIDE (set in
-# docker-compose.yml to the "backend" service hostname) lets that deployment
-# override just this value without the JSON file having to serve both
-# environments' conflicting networking needs. Mirrors CORS_ORIGINS_ENV's
-# override pattern in app/backend.py.
-_BACKEND_API_URL_OVERRIDE = os.environ.get("BACKEND_API_URL_OVERRIDE")
+# BUG FOUND 2026-08-19: this checked BACKEND_API_URL_OVERRIDE, an env var
+# NOTHING has ever set -- docker-compose.yml (which used to set it) was
+# deleted when Docker support was removed, and electron/main.js's
+# spawnPython() call for this process sets a DIFFERENT name, "BACKEND_URL",
+# with exactly the right value (http://127.0.0.1:<actual backend port>).
+# Two names for the same override, only one of them real, is exactly how
+# this stayed silently broken: config.json's networking.api_url is the
+# Docker-only "http://backend:8000" (a hostname that only resolves inside
+# a compose network), the override that was supposed to replace it on the
+# desktop build never fired, and every single call to _post_alert() below
+# -- violence, robbery, vandalism, weapons, all of them -- has been POSTing
+# to an unresolvable host and failing silently (caught by _post_alert's own
+# except, printed to a console window nobody was watching, incident never
+# created). This is almost certainly why "nothing appeared in incident
+# logs" even though the AI itself detected correctly.
+_BACKEND_API_URL_OVERRIDE = os.environ.get("BACKEND_URL")
 if _BACKEND_API_URL_OVERRIDE:
     sys_config.setdefault("networking", {})["api_url"] = _BACKEND_API_URL_OVERRIDE
 
@@ -734,7 +765,7 @@ def _is_static_scene_object(track: dict) -> bool:
 # 8. WEAPON DETECTION THREAD WORKER
 # ──────────────────────────────────────────────────────────────────────────────
 def _run_weapon_detection(frame_copy):
-    res = violence_model.predict(frame_copy, verbose=False, conf=WEAPON_CONF, imgsz=WEAPON_IMGSZ, half=(USE_CUDA and weapon_file_name.endswith(".pt")))
+    res = violence_model.predict(frame_copy, verbose=False, conf=WEAPON_YOLO_CONF_FLOOR, imgsz=WEAPON_IMGSZ, half=(USE_CUDA and weapon_file_name.endswith(".pt")))
     weapons, vboxes = [], []
     if res[0].boxes:
         for box in res[0].boxes:
@@ -846,18 +877,33 @@ def _vbox_overlap_ratio(p_box, vb):
 def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_path: str = None):
     print(f"🔥 [ALERT] Posting {event} event | case_id={incident_id} | conf={conf:.2f}")
     try:
+        # BUG FOUND 2026-08-19: these were camelCase (barangayId,
+        # screenshotPath), but backend.py's AiTriggerSchema declares
+        # barangay_id / screenshot_path and, like every FastAPI/Pydantic
+        # model here, silently ignores unrecognized fields rather than
+        # erroring. barangayId happened to be harmless -- barangay_id
+        # already defaults to "cogon" -- but screenshotPath was silently
+        # dropped every time, so no AI-triggered incident has ever actually
+        # carried its snapshot: CrimeReportsView.tsx's report-filing modal
+        # was always falling back to the picsum placeholder instead.
         payload = {
             "id": str(incident_id),
             "event": event,
             "confidence": round(conf, 4),
-            "barangayId": "cogon",
+            "barangay_id": "cogon",
+            # Was hardcoded in backend.py to "Cogon Core Smartpole Node"
+            # regardless of which camera actually saw this -- every incident
+            # said the same location even with only one real camera running.
+            # Sourced from config.json's camera.name so it's whatever this
+            # camera is actually called instead of a placeholder.
+            "location_name": CAMERA_NAME,
         }
         # screenshot_path is a URL-relative path like "/static/screenshots/snap_XXXX.jpg" --
         # the backend needs to persist this on the incident record so CrimeReportsView.tsx's
-        # `inc.screenshotPath` (and the report-filing modal's `reportImageUrl`) have something
+        # `inc.screenshot_path` (and the report-filing modal's `reportImageUrl`) have something
         # real to render instead of falling back to the picsum placeholder.
         if screenshot_path:
-            payload["screenshotPath"] = screenshot_path
+            payload["screenshot_path"] = screenshot_path
         r = requests.post(BACKEND_URL, json=payload, timeout=2.0)
         print(f"   ✅ Backend {r.status_code}: {r.text[:120]}")
     except Exception as e:
@@ -867,7 +913,8 @@ def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_pat
 # 12. PER-TRACK STATE MACHINE
 # ──────────────────────────────────────────────────────────────────────────────
 class TrackState:
-    __slots__ = ("state", "assault_confirm", "assault_release", "armed_confirm", "armed_release", "evidence_buf", "last_alert_frame")
+    __slots__ = ("state", "assault_confirm", "assault_release", "armed_confirm", "armed_release",
+                 "evidence_buf", "last_alert_frame", "active_incident_id", "episode_end_frame")
     def __init__(self):
         self.state            = "NEUTRAL"
         self.assault_confirm  = 0
@@ -876,6 +923,19 @@ class TrackState:
         self.armed_release    = 0
         self.evidence_buf     = deque(maxlen=EVIDENCE_WINDOW)
         self.last_alert_frame = -ALERT_COOLDOWN_FRAMES
+        # BUG FOUND 2026-08-19: should_alert() below used to fire again every
+        # ALERT_COOLDOWN_FRAMES for as long as `state` stayed ASSAULT/ARMED --
+        # a scene sitting right at the confirm threshold (real observed case:
+        # a fallback webcam scoring ~0.50 continuously) never released, so it
+        # minted a brand-new incident_id, a brand-new clip, and a brand-new DB
+        # row every cooldown period, forever. 239+ incidents from one
+        # continuous "episode" that was never actually 239 separate events.
+        # active_incident_id makes an episode a real, trackable thing: set
+        # once when it starts, held while state stays ASSAULT/ARMED, cleared
+        # only on a genuine release back to NEUTRAL -- so should_alert() can
+        # refuse to fire again for an episode that never ended.
+        self.active_incident_id = None
+        self.episode_end_frame  = -ALERT_COOLDOWN_FRAMES
 
     def update(self, is_assault: bool, is_armed: bool, frame_no: int, override_assault_confirm: int = None) -> str:
         confirm_needed = override_assault_confirm if override_assault_confirm is not None else ASSAULT_CONFIRM_FRAMES
@@ -904,18 +964,33 @@ class TrackState:
         else:
             if self.assault_confirm == 0 and self.armed_confirm == 0:
                 self.state = "NEUTRAL"
+
+        if self.state == "NEUTRAL" and self.active_incident_id is not None:
+            # Genuine release -- this episode is over. The NEXT confirm (if
+            # any) starts a fresh incident, not a continuation of this one.
+            self.active_incident_id = None
+            self.episode_end_frame  = frame_no
         return self.state
 
     def should_alert(self, frame_no: int, scene_last: int, scene_cooldown: int = SCENE_COOLDOWN_ASSAULT) -> bool:
         if self.state != "ASSAULT" and self.state != "ARMED":
             return False
+        if self.active_incident_id is not None:
+            # Same ongoing episode as an already-posted alert -- this is the
+            # fix: no re-fire just because ALERT_COOLDOWN_FRAMES elapsed
+            # while state never actually left ASSAULT/ARMED.
+            return False
         evidence_ok    = True if self.state == "ARMED" else (sum(self.evidence_buf) >= EVIDENCE_THRESHOLD)
-        track_cooldown = (frame_no - self.last_alert_frame) > ALERT_COOLDOWN_FRAMES
+        # Debounces flapping (state dropping to NEUTRAL and immediately back
+        # up on noisy frames) rather than gating a still-continuous episode,
+        # which active_incident_id above already owns.
+        debounce_ok    = (frame_no - self.episode_end_frame) > ALERT_COOLDOWN_FRAMES
         scene_ok       = (frame_no - scene_last) > scene_cooldown
-        return evidence_ok and track_cooldown and scene_ok
+        return evidence_ok and debounce_ok and scene_ok
 
-    def mark_alerted(self, frame_no: int):
-        self.last_alert_frame = frame_no
+    def mark_alerted(self, frame_no: int, incident_id: str):
+        self.last_alert_frame   = frame_no
+        self.active_incident_id = incident_id
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 13. OVERLAY DRAWING
@@ -946,6 +1021,40 @@ def _draw_sign_boxes(frame, sign_boxes):
         x1, y1, x2, y2 = int(sb[0]), int(sb[1]), int(sb[2]), int(sb[3])
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 1)
         cv2.putText(frame, "SIGN", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 200, 0), 1, cv2.LINE_AA)
+
+_ALERT_BANNER_COLOR = {
+    "ASSAULT":      (0, 0, 255),      # red, matches _STATE_CFG's ASSAULT
+    "ARMED THREAT": (0, 165, 255),    # orange, matches _STATE_CFG's ARMED
+    "ROBBERY":      (0, 0, 255),
+    "VANDALISM":    (0, 140, 255),
+}
+
+def _draw_alert_banner(frame, event: str, conf: float):
+    """Stamps the evidence snapshot with the alert that actually fired.
+
+    WHY: the snapshot used to be the raw annotated frame, whose per-person
+    boxes show each TRACK's state -- and a track only turns red after
+    ASSAULT_CONFIRM_FRAMES. Scene-mode alerts (the frame is violent but no
+    track is held long enough, which is the whole reason scene mode exists)
+    therefore produced evidence images with everyone still boxed GREEN, on
+    an incident the system was simultaneously reporting as an assault. The
+    image contradicted the alert attached to it.
+
+    Drawn on a COPY of the frame at snapshot time, never the live frame --
+    stamping the real frame would flash a red border through the operator's
+    video feed and into the event clip for one frame.
+    """
+    color = _ALERT_BANNER_COLOR.get(event, (0, 0, 255))
+    h, w = frame.shape[:2]
+    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, 6)
+    label = f"{event}  {conf * 100:.1f}%"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+    # Offset below the FPS/tracks HUD, which is already drawn at the very
+    # top-left by the time a snapshot is taken.
+    y0 = 30
+    cv2.rectangle(frame, (0, y0), (tw + 24, y0 + th + 18), color, -1)
+    cv2.putText(frame, label, (12, y0 + th + 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
 def _draw_x3d_crop_box(frame, crop_box, is_violent: bool, conf: float):
     if crop_box is None:
@@ -1020,6 +1129,28 @@ _configured_source = (
     or sys_config["camera"].get("index", 5)
 )
 camera_source = _normalise_source(_configured_source)
+
+# Sent with every AI-triggered alert as location_name -- see the comment on
+# _post_alert's payload for why this replaced a hardcoded string.
+#
+# 2026-08-19: resolved from the REAL, currently-registered camera name
+# (GET /api/camera_name/{camera_id}) when camera.camera_id is set, so a
+# barangay renaming a camera in the Cameras tab actually changes what shows
+# on incidents -- config.json's static camera.name is now only the fallback
+# for when that lookup can't happen (no camera_id configured, or the
+# backend isn't reachable yet this early in startup).
+CAMERA_NAME = sys_config["camera"].get("name", "Cogon Core Smartpole Node")
+_camera_id = sys_config["camera"].get("camera_id")
+if _camera_id:
+    try:
+        _resp = requests.get(f"{sys_config['networking']['api_url'].rstrip('/')}/api/camera_name/{_camera_id}", timeout=3.0)
+        if _resp.ok:
+            CAMERA_NAME = _resp.json()["name"]
+            print(f"📷 [CAMERA] Resolved live name for camera_id={_camera_id!r}: {CAMERA_NAME!r}")
+        else:
+            print(f"⚠️  [CAMERA] camera_id={_camera_id!r} not found ({_resp.status_code}) -- using config.json's camera.name fallback: {CAMERA_NAME!r}")
+    except Exception as e:
+        print(f"⚠️  [CAMERA] Could not reach backend to resolve camera_id={_camera_id!r}: {e} -- using config.json's camera.name fallback: {CAMERA_NAME!r}")
 # Kept as a separate name because the 0-9 scanner and the Monitor view's index
 # picker are only meaningful for local devices.
 camera_idx = camera_source if isinstance(camera_source, int) else None
@@ -1409,12 +1540,84 @@ def set_camera_source(payload: CameraSourceRequest):
 RECORDINGS_DIR = os.path.join(PROJECT_ROOT, "recordings")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
-CLIP_PRE_SECONDS  = 5
-CLIP_POST_SECONDS = 5
+# 2026-08-19: changed from 5/5 (10s clips) to a 30s NVIDIA-Instant-Replay-
+# style clip -- mostly pre-roll (what led up to the moment, which is the
+# part you don't know is worth keeping until after it happens) with a
+# shorter confirmation tail. Requested as "wait 10s and clip it, 30s total".
+#
+# COST, stated plainly: the pre-roll ring buffer holds RAW annotated frames
+# (not encoded video), so this is a real memory increase -- at
+# camera.fps=30 and 1280x720, 20s of pre-roll is ~600 frames x ~2.8MB =
+# ~1.6GB resident for the buffer alone, up from ~400MB at the old 5s. If
+# that's tight on this machine, the fix is compressing ring-buffer frames
+# (e.g. JPEG) instead of storing raw arrays, not shrinking the window back
+# down -- ask if that's needed.
+CLIP_PRE_SECONDS  = 20
+CLIP_POST_SECONDS = 10
 CLIP_NOMINAL_FPS  = sys_config["camera"].get("fps", 15)   # sizes the ring buffer + used as encode-fps fallback
 CLIP_PRE_FRAMES   = max(1, int(CLIP_NOMINAL_FPS * CLIP_PRE_SECONDS))
 
 _clip_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clip")
+
+# BUG FOUND 2026-08-19: cv2.VideoWriter's "mp4v" fourcc writes MPEG-4 Part 2,
+# which NO current browser can decode -- so every auto-captured clip landed
+# on disk as a valid, playable-in-VLC file that showed a dead play button in
+# the dashboard's <video> player. Browsers need H.264 ("avc1"), and this
+# machine's OpenCV cannot encode it ("Failed to load OpenH264 library:
+# openh264-2.5.0-win64.dll"), so re-encoding after the fact is the reliable
+# path. imageio-ffmpeg bundles its own ffmpeg binary, so this works on a
+# packaged install too -- a system ffmpeg on PATH is used if present, but
+# never assumed. If neither is available the clip is still written and
+# registered, just in the old un-playable codec, with a clear warning.
+def _resolve_ffmpeg() -> str | None:
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    import shutil
+    return shutil.which("ffmpeg")
+
+FFMPEG_EXE = _resolve_ffmpeg()
+if FFMPEG_EXE:
+    print(f"🎞️  [CLIP] H.264 transcode enabled via {os.path.basename(FFMPEG_EXE)}")
+else:
+    print("⚠️  [CLIP] No ffmpeg found -- clips will be saved as MPEG-4 Part 2, "
+          "which the dashboard's video player CANNOT play. `pip install imageio-ffmpeg` to fix.")
+
+
+def _transcode_to_h264(src_path: str) -> bool:
+    """Re-encode in place to browser-playable H.264. Returns True on success.
+
+    -movflags +faststart matters specifically for the dashboard: it moves the
+    MP4 index to the front of the file so playback can begin before the whole
+    clip has downloaded, instead of the player stalling on a seek.
+    """
+    if not FFMPEG_EXE:
+        return False
+    tmp_path = src_path + ".h264.mp4"
+    try:
+        proc = subprocess.run(
+            [FFMPEG_EXE, "-y", "-loglevel", "error", "-i", src_path,
+             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", "-an", tmp_path],
+            capture_output=True, timeout=180,
+        )
+        if proc.returncode != 0 or not os.path.exists(tmp_path):
+            print(f"   ⚠️  [CLIP] H.264 transcode failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return False
+        os.replace(tmp_path, src_path)   # atomic; keeps the original filename the DB already has
+        return True
+    except Exception as e:
+        print(f"   ⚠️  [CLIP] H.264 transcode error: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
 
 # Guards _raw_frame_ring and _pending_clips below. Needed because the main
 # detection loop mutates these every frame, and (as of the panic-button
@@ -1488,11 +1691,18 @@ def _finalize_and_register_clip(clip: dict):
     finally:
         writer.release()
 
+    # Transcode BEFORE registering with the backend, so a clip is never
+    # advertised to the dashboard until it's actually in a codec the player
+    # can open. Runs on _clip_exec's background thread, so the detection
+    # loop is unaffected by the extra encode time.
+    playable = _transcode_to_h264(file_path)
+
     trigger_seconds = clip["trigger_index"] / encode_fps
     marker          = f"{int(trigger_seconds // 60):02d}:{int(trigger_seconds % 60):02d}"
     total_seconds   = len(frames) / encode_fps
 
-    print(f"🎬 [CLIP] Saved {filename} ({total_seconds:.1f}s, marker@{marker}) for case {incident_id}")
+    codec_note = "H.264" if playable else "MPEG-4 Part 2 (NOT browser-playable)"
+    print(f"🎬 [CLIP] Saved {filename} ({total_seconds:.1f}s, marker@{marker}, {codec_note}) for case {incident_id}")
 
     try:
         # Field names must be snake_case to match backend.py's ManualClipSchema.
@@ -1555,11 +1765,36 @@ def panic_capture(payload: PanicCaptureRequest):
 # 15. PER-TRACK STORES
 # ──────────────────────────────────────────────────────────────────────────────
 track_states, prev_joints, id_last_seen = {}, {}, {}
-robbery_tracker = RobberyTracker()                  
-vandal_states: dict = {}             
-vandal_sweep_history: dict = {}                     
-_vandal_alert_cooldown: dict = {}
-_robbery_alert_cooldown: dict = {}
+robbery_tracker = RobberyTracker()
+vandal_states: dict = {}
+vandal_sweep_history: dict = {}
+
+# BUG FOUND 2026-08-19: robbery/vandalism used the same "re-fire every
+# ALERT_COOLDOWN_FRAMES for as long as the state stays confirmed" pattern
+# TrackState had -- same fix applied here as a shared helper, so robbery
+# and vandalism can't independently regress back into it later. See
+# TrackState's active_incident_id comment for the full story (real
+# observed case: 239 separate incidents/clips from one continuously-
+# confirmed scene that never actually released).
+_episode_store: dict = {}   # key -> {"id": str|None, "end": last-release frame}
+
+def _episode_incident_id(key, is_active: bool, frame_no: int, debounce_frames: int = ALERT_COOLDOWN_FRAMES):
+    """Returns a fresh incident_id on the FIRST frame `key` becomes active
+    after being inactive (or after the debounce window since it last
+    released), None on every frame after that for as long as it stays
+    active. Call this every frame regardless of `is_active` -- it also
+    handles clearing state on release."""
+    st = _episode_store.setdefault(key, {"id": None, "end": -debounce_frames})
+    if not is_active:
+        if st["id"] is not None:
+            st["end"] = frame_no
+        st["id"] = None
+        return None
+    if st["id"] is None and (frame_no - st["end"]) > debounce_frames:
+        st["id"] = str(uuid.uuid4())[:8]
+        return st["id"]
+    return None
+
 
 # PLACEHOLDER confidences for the two RULE-BASED detectors. These are not
 # measured, not calibrated, and not derived from anything -- robbery and
@@ -1676,17 +1911,20 @@ while _running:
         stale = [t for t, lf in id_last_seen.items() if frame_count - lf > MAX_UNSEEN_FRAMES]
         for tid in stale:
             for d in (track_states, prev_joints, id_last_seen,
-                      vandal_states, vandal_sweep_history, _vandal_alert_cooldown):
+                      vandal_states, vandal_sweep_history):
                 d.pop(tid, None)
+            _episode_store.pop(("vandalism", tid), None)
             x3d_detector.cleanup_track(tid)
-        # _robbery_alert_cooldown is keyed by (tid_a, tid_b) pairs, not a single
-        # tid, so it can't be pruned via the .pop(tid, None) loop above -- drop
-        # any pair that references a track that just went stale, otherwise this
-        # dict grows unbounded over a 24/7 run with many transient near-passes.
+        # _episode_store's robbery-pair keys are ("robbery-pair", (tid_a, tid_b)),
+        # not a single tid, so they can't be pruned via the .pop(tid, None) loop
+        # above -- drop any pair that references a track that just went stale,
+        # otherwise this dict grows unbounded over a 24/7 run with many
+        # transient near-passes.
         if stale:
             stale_set = set(stale)
-            for pair_key in [k for k in _robbery_alert_cooldown if stale_set & set(k)]:
-                _robbery_alert_cooldown.pop(pair_key, None)
+            for key in [k for k in _episode_store
+                        if k[0] == "robbery-pair" and stale_set & set(k[1])]:
+                _episode_store.pop(key, None)
 
         victims = {}
         for tid, joints, b in zip(ids, kpts, boxes):
@@ -1777,10 +2015,10 @@ while _running:
                 else:
                     evidence_density = min(1.0, sum(ts.evidence_buf) / EVIDENCE_WINDOW + 0.55)
                     conf = max(x3d_conf, evidence_density)
-                ts.mark_alerted(frame_count)
-                scene_last_alert_frame = frame_count
-                
                 incident_id = str(uuid.uuid4())[:8]
+                ts.mark_alerted(frame_count, incident_id)
+                scene_last_alert_frame = frame_count
+
                 event_type = "ARMED THREAT" if state == "ARMED" else "ASSAULT"
                 triggered_alerts_this_frame.append({"id": incident_id, "conf": conf, "event": event_type})
 
@@ -1798,14 +2036,11 @@ while _running:
         robbery_pairs = robbery_tracker.update(ids, boxes, armed_states, violence_states)
         if not ROBBERY_ON:
             for pair_key, r_state in robbery_pairs.items():
-                if r_state == "ROBBERY":
-                    last_alert = _robbery_alert_cooldown.get(pair_key, -ALERT_COOLDOWN_FRAMES)
-                    if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
-                        _robbery_alert_cooldown[pair_key] = frame_count
-                        incident_id = str(uuid.uuid4())[:8]
-                        triggered_alerts_this_frame.append({"id": incident_id,
-                                                            "conf": RULE_ROBBERY_PLACEHOLDER_CONF,
-                                                            "event": "ROBBERY"})
+                incident_id = _episode_incident_id(("robbery-pair", pair_key), r_state == "ROBBERY", frame_count)
+                if incident_id:
+                    triggered_alerts_this_frame.append({"id": incident_id,
+                                                        "conf": RULE_ROBBERY_PLACEHOLDER_CONF,
+                                                        "event": "ROBBERY"})
 
         # ─── VANDALISM FILTER ANALYSIS ───
         # Disabled by default -- see detection.vandalism._why_disabled in
@@ -1832,11 +2067,9 @@ while _running:
                 static_targets=sign_boxes, all_person_boxes=boxes, my_box=p_box
             )
             v_state_res = vandal_states[tid].update(is_vandal)
-            
-            last_alert = _vandal_alert_cooldown.get(tid, -ALERT_COOLDOWN_FRAMES)
-            if v_state_res == "VANDALISM" and (frame_count - last_alert > ALERT_COOLDOWN_FRAMES):
-                _vandal_alert_cooldown[tid] = frame_count
-                incident_id = str(uuid.uuid4())[:8]
+
+            incident_id = _episode_incident_id(("vandalism", tid), v_state_res == "VANDALISM", frame_count)
+            if incident_id:
                 triggered_alerts_this_frame.append({"id": incident_id,
                                                     "conf": RULE_VANDALISM_PLACEHOLDER_CONF,
                                                     "event": "VANDALISM"})
@@ -1846,11 +2079,10 @@ while _running:
     # frame must be classified whether or not YOLO held a track. Robbery in
     # this dataset is frequently one person at a vehicle, which is exactly the
     # case a tracker loses.
-    if ROBBERY_ON and robbery_hit:
-        last_alert = _robbery_alert_cooldown.get("__model__", -ALERT_COOLDOWN_FRAMES)
-        if frame_count - last_alert > ALERT_COOLDOWN_FRAMES:
-            _robbery_alert_cooldown["__model__"] = frame_count
-            triggered_alerts_this_frame.append({"id": str(uuid.uuid4())[:8],
+    if ROBBERY_ON:
+        incident_id = _episode_incident_id("robbery-model", robbery_hit, frame_count)
+        if incident_id:
+            triggered_alerts_this_frame.append({"id": incident_id,
                                                 "conf": float(robbery_conf),
                                                 "event": "ROBBERY"})
 
@@ -1863,13 +2095,21 @@ while _running:
     #
     # Attribution is genuinely unknown here, so the alert says so rather than
     # guessing a track -- a reviewer opening the clip can see for themselves.
-    if SCENE_MODE_ON and scene_violent:
+    if SCENE_MODE_ON:
+        # Episode tracking runs off scene_violent alone (the real, continuous
+        # state) -- already_alerted only decides whether to SKIP emitting a
+        # freshly-opened episode's alert because a per-track alert already
+        # covered this exact frame. Folding already_alerted into the episode
+        # signal itself would spuriously "release" a still-violent scene on
+        # any frame a per-track alert happens to co-fire, re-opening a new
+        # episode (and a new incident) the very next frame -- exactly the
+        # kind of double-fire this whole mechanism exists to prevent.
         already_alerted = any(a["event"] in ("ASSAULT", "ARMED THREAT")
                               for a in triggered_alerts_this_frame)
-        if (not already_alerted
-                and frame_count - scene_last_alert_frame > SCENE_COOLDOWN_ASSAULT):
+        incident_id = _episode_incident_id("scene-fallback", scene_violent, frame_count,
+                                            debounce_frames=SCENE_COOLDOWN_ASSAULT)
+        if incident_id and not already_alerted:
             scene_last_alert_frame = frame_count
-            incident_id = str(uuid.uuid4())[:8]
             triggered_alerts_this_frame.append(
                 {"id": incident_id, "conf": scene_conf, "event": "ASSAULT"}
             )
@@ -1908,7 +2148,11 @@ while _running:
     for alert in triggered_alerts_this_frame:
         snap_filename = f"snap_{alert['id']}.jpg"
         snap_path = os.path.join(SCREENSHOTS_DIR, snap_filename)
-        cv2.imwrite(snap_path, frame)
+        # Copy first: the banner must land ONLY in the evidence image, not in
+        # the live stream or the event clip (both consume `frame` below).
+        snap_frame = frame.copy()
+        _draw_alert_banner(snap_frame, alert["event"], alert["conf"])
+        cv2.imwrite(snap_path, snap_frame)
         screenshot_url_path = f"/static/screenshots/{snap_filename}"
         _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path)
         _start_pending_clip(alert['id'], alert['event'], alert['conf'])

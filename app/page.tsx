@@ -9,9 +9,9 @@ import { usePermissions } from './hooks/usePermissions';
 import PTZControls from './components/PTZControls';
 import {
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin,
-  Maximize2, X, Sun, User, LogOut,
+  Maximize2, X, Sun, User,
   BatteryMedium, Thermometer, Zap, Plus, Film, Users, Terminal,
-  Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi
+  Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi, Siren
 } from 'lucide-react';
 
 // Every tab view was previously eagerly imported at module top -- all six
@@ -213,7 +213,14 @@ export default function EcoVisionSentinel() {
 
 const fetchCameras = async (userObj: any) => {
     try {
-      const barangay = userObj.barangayId && userObj.barangayId !== 'undefined' ? userObj.barangayId : 'cogon';
+      // Backend returns snake_case (barangay_id) -- this used to read the
+      // camelCase .barangayId, which is never present on the stored user
+      // object, so it silently fell back to 'cogon' for every account,
+      // every time. Invisible while 'cogon' was the only registered
+      // barangay in the whole system; would have misrouted every other
+      // barangay's cameras/incidents to cogon's the moment a second one
+      // existed.
+      const barangay = userObj.barangay_id && userObj.barangay_id !== 'undefined' ? userObj.barangay_id : 'cogon';
       const token = localStorage.getItem('ecoToken');
       const res = await fetch(`${apiUrl}/api/cameras?barangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(userObj.role)}`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -230,7 +237,7 @@ const fetchCameras = async (userObj: any) => {
   const fetchStats = async () => {
     if (!currentUser) return;
     try {
-      const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
+      const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
       // currentUser can hydrate (e.g. from a persisted session) a tick
@@ -258,7 +265,7 @@ const fetchCameras = async (userObj: any) => {
   const fetchActiveAlertCache = async () => {
     if (!currentUser) return;
     try {
-      const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
+      const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
       const role = currentUser.role || 'user';
       const token = localStorage.getItem('ecoToken');
       // See matching comment in fetchStats -- same currentUser-before-token
@@ -271,16 +278,32 @@ const fetchCameras = async (userObj: any) => {
       if (res.ok) {
         const data = await res.json();
         const activeDetections = data.filter((inc: any) => inc.status === 'Active');
+        // /api/incidents returns snake_case (location_name, barangay_id,
+        // occurred_time) -- these read camelCase names that don't exist on
+        // that response, so location/timestamp were always undefined and
+        // area always fell through to "GLOBAL Sector". Worse, the
+        // .includes() below ran on that undefined and threw, which this
+        // block's try/catch swallowed as if the backend were unreachable
+        // -- so a real crash here has been surfacing as the wrong error
+        // message ("Storage ledger ... unreachable") the whole time.
         const mappedAlerts = activeDetections.map((inc: any) => ({
           id: inc.id,
           type: inc.type,
           severity: 'CRITICAL' as const,
-          location: inc.locationName,
-          area: `${inc.barangayId ? inc.barangayId.toUpperCase() : 'GLOBAL'} Sector`,
-          timestamp: inc.militaryTime,
+          location: inc.location_name,
+          area: `${inc.barangay_id ? inc.barangay_id.toUpperCase() : 'GLOBAL'} Sector`,
+          timestamp: inc.occurred_time,
           confidence: inc.confidence ?? 0.925,
           status: 'pending' as const,
-          cameraLinkId: inc.locationName.includes("Entrance") ? "1" : "2"
+          cameraLinkId: inc.location_name && inc.location_name.includes("Entrance") ? "1" : "2",
+          // Wasn't carried at all -- the Incident Queue could never show a
+          // thumbnail no matter how correctly screenshot_path was stored,
+          // because this mapping just never read it off the incident.
+          // Resolved to a full URL here (rather than in IncidentRow) so
+          // that component doesn't need apiUrl threaded down as a new prop.
+          screenshot_path: inc.screenshot_path
+            ? (inc.screenshot_path.startsWith('http') ? inc.screenshot_path : `${apiUrl}${inc.screenshot_path}`)
+            : null,
         }));
         setAlerts(mappedAlerts);
         setBackendOnline(true);
@@ -306,7 +329,7 @@ const fetchCameras = async (userObj: any) => {
 
   const handleUpsertNode = async (name: string, url: string) => {
     try {
-      const barangay = currentUser.barangayId && currentUser.barangayId !== 'undefined' ? currentUser.barangayId : 'cogon';
+      const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
       const token = localStorage.getItem('ecoToken');
       const res = await fetch(`${apiUrl}/api/cameras`, {
         method: "POST",
@@ -353,7 +376,15 @@ const fetchCameras = async (userObj: any) => {
 
     try {
       const token = localStorage.getItem('ecoToken');
-      fetch(`${apiUrl}/siren/activate`, { method: "POST" }).catch(e => console.error(e));
+      // Missing the Authorization header meant this always 401'd --
+      // require_auth() + require_permission(confirm_dismiss_alerts) both
+      // reject an unauthenticated request, so "Verify Crime" never
+      // actually reached the ESP32. Fire-and-forget on purpose: the siren
+      // is best-effort hardware, and with esp32.enabled=false in most dev
+      // setups this call is EXPECTED to fail every time (nothing configured
+      // to reach) -- console.error here was tripping Next's dev overlay
+      // into a full-screen "crash" for a routine, harmless no-op.
+      fetch(`${apiUrl}/siren/activate`, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
       await fetch(`${apiUrl}/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -368,7 +399,9 @@ const fetchCameras = async (userObj: any) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
     try {
       const token = localStorage.getItem('ecoToken');
-      fetch(`${apiUrl}/siren/deactivate`, { method: "POST" }).catch(e => console.error(e));
+      // Same as handleVerifyCrime's /siren/activate -- best-effort, and
+      // expected to fail when no ESP32 is configured. See that comment.
+      fetch(`${apiUrl}/siren/deactivate`, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
       const res = await fetch(`${apiUrl}/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -382,7 +415,37 @@ const fetchCameras = async (userObj: any) => {
     } catch (e) { console.error(e); }
   };
 
-  const handleLogout = () => { localStorage.removeItem('ecoUser'); router.push('/loginpage/login'); };
+  // Standalone from handleDismissCrime's siren call -- that one only fires
+  // alongside dismissing a specific incident. This is a direct panic-style
+  // stop, reachable regardless of whether anything is even in the queue
+  // (a false-triggered ESP32 siren doesn't care whether the operator has
+  // gotten around to triaging the incident that set it off yet).
+  const [sirenStopState, setSirenStopState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const handleEmergencyStopSiren = async () => {
+    setSirenStopState('busy');
+    try {
+      const token = localStorage.getItem('ecoToken');
+      const res = await fetch(`${apiUrl}/siren/deactivate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setSirenStopState(res.ok ? 'done' : 'error');
+    } catch {
+      setSirenStopState('error');
+    }
+    setTimeout(() => setSirenStopState('idle'), 2500);
+  };
+
+  const handleLogout = () => {
+    // Was only clearing ecoUser, not ecoToken -- the same half-clear that
+    // caused the stale-token 401s fixed earlier tonight. A "logged out"
+    // session that still carries a valid token isn't actually logged out.
+    const token = localStorage.getItem('ecoToken');
+    localStorage.removeItem('ecoUser');
+    localStorage.removeItem('ecoToken');
+    if (token) fetch(`${apiUrl}/api/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    router.push('/loginpage/login');
+  };
 
   if (!currentUser) return <div className="min-h-screen" style={{ background: 'var(--bg)' }} />;
 
@@ -475,15 +538,6 @@ const fetchCameras = async (userObj: any) => {
               <span className="label" style={{ fontSize: '8px' }}>{currentUser.role}</span>
             </div>
           </button>
-
-          <button
-            onClick={handleLogout}
-            title="Sign out"
-            className="h-7 w-7 flex items-center justify-center border transition-colors hover:bg-white/5"
-            style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}
-          >
-            <LogOut size={12} />
-          </button>
         </div>
       </header>
 
@@ -526,10 +580,45 @@ const fetchCameras = async (userObj: any) => {
             )}
           </div>
 
+          {/* This used to say "Assignment" and read currentUser.barangayId --
+              a field that doesn't exist on the stored user object (the
+              backend returns barangay_id), so it always showed
+              "UNASSIGNED", and the label collided with the actual
+              "assignment" field (e.g. "Patrol Unit 3") used everywhere else
+              in the app, which is a different concept entirely. This is a
+              read-only jurisdiction readout, not an assignable control --
+              there is no UI anywhere that lets anyone "assign" something
+              here. Renamed and pointed at the field that actually matches
+              this account's role: barangay accounts are scoped to a
+              barangay, PNP accounts to a station. */}
+          {/* Reachable regardless of whether anything is in the Incident
+              Queue right now -- a false-triggered siren doesn't wait for
+              someone to get around to triaging the incident that set it
+              off. Best-effort like the queue's own siren calls: it POSTs
+              straight to /siren/deactivate, no incident involved. */}
+          <button
+            onClick={handleEmergencyStopSiren}
+            disabled={sirenStopState === 'busy'}
+            title="Immediately silence the physical siren, independent of any incident"
+            className="w-full flex items-center justify-center gap-2 py-2.5 border-t text-[10px] font-bold uppercase tracking-[0.15em] transition-colors disabled:opacity-60"
+            style={{
+              borderColor: 'var(--line)',
+              color: sirenStopState === 'done' ? 'var(--ok)' : sirenStopState === 'error' ? 'var(--critical)' : 'var(--critical)',
+              background: sirenStopState === 'idle' ? 'transparent' : 'rgba(229,52,47,0.06)',
+            }}
+          >
+            {sirenStopState === 'busy' ? <Loader2 size={12} className="animate-spin" /> :
+             sirenStopState === 'done' ? <Check size={12} /> :
+             sirenStopState === 'error' ? <X size={12} /> : <Siren size={12} />}
+            {sirenStopState === 'busy' ? 'Stopping…' :
+             sirenStopState === 'done' ? 'Siren stopped' :
+             sirenStopState === 'error' ? 'No response' : 'Emergency stop siren'}
+          </button>
+
           <div className="px-3 py-2.5 border-t" style={{ borderColor: 'var(--line)' }}>
-            <div className="label mb-1">Assignment</div>
+            <div className="label mb-1">{isPolice ? 'Station' : 'Barangay'}</div>
             <div className="data text-[11px] truncate" style={{ color: 'var(--text-2)' }}>
-              {(currentUser.barangayId || 'UNASSIGNED').toString().toUpperCase()}
+              {((isPolice ? currentUser.station_id : currentUser.barangay_id) || 'UNASSIGNED').toString().toUpperCase()}
             </div>
           </div>
         </nav>
@@ -699,6 +788,7 @@ const fetchCameras = async (userObj: any) => {
               {activeTab === 'crime-reports' && (
                 <CrimeReportsView
                   onUpdate={fetchStats}
+                  currentUserRole={currentUser.role}
                   onDeepLink={(crimeId: string) => {
                     setVideoRecordSearchQuery(crimeId);
                     setActiveTab('records');
@@ -1068,6 +1158,7 @@ function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
    needs to compare many incidents at once, so vertical space spent on
    decoration is space taken from the next incident. */
 function IncidentRow({ alert, onConfirm, onDismiss }: any) {
+  const [imgBroken, setImgBroken] = useState(false);
   return (
     <article
       className="border-b relative animate-rise-in"
@@ -1076,7 +1167,21 @@ function IncidentRow({ alert, onConfirm, onDismiss }: any) {
       {/* Severity spine */}
       <span className="absolute left-0 inset-y-0 w-[3px]" style={{ background: 'var(--critical)' }} />
 
-      <div className="pl-3 pr-2.5 py-2.5">
+      <div className="pl-3 pr-2.5 py-2.5 flex gap-2.5">
+        {/* Thumbnail stays small on purpose -- see this component's header
+            comment on density. Just hides itself on a load failure rather
+            than showing a broken-image icon; the text rows carry the
+            incident either way. */}
+        {alert.screenshot_path && !imgBroken && (
+          <img
+            src={alert.screenshot_path}
+            onError={() => setImgBroken(true)}
+            alt=""
+            className="w-11 h-11 shrink-0 object-cover border"
+            style={{ borderColor: 'var(--line)' }}
+          />
+        )}
+        <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2 mb-1">
           <span className="text-[12px] font-bold text-white tracking-wide truncate">
             {alert.type}
@@ -1121,6 +1226,7 @@ function IncidentRow({ alert, onConfirm, onDismiss }: any) {
           >
             Dismiss
           </button>
+        </div>
         </div>
       </div>
     </article>

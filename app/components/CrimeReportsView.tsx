@@ -9,6 +9,18 @@ import {
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 import { useLiveChannel } from '../context/WebSocketContext';
 
+// Every fetch in this file used to skip this entirely -- backend.py's
+// require_auth() 401s an unauthenticated request, so every read AND write
+// here (view incidents, file a report, archive one, confirm-and-report) was
+// silently failing. The read path masked it further: fetchIncidents() below
+// caught the resulting crash and fell back to SAMPLE_REPORTS, so the map
+// showed three fake incidents forever and nobody could tell real ones
+// weren't loading.
+function authHeaders() {
+  const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
+  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
 type SmartpoleNode = {
   id: string; name: string; street: string; lat: number; lng: number;
 };
@@ -37,10 +49,10 @@ const SAMPLE_REPORTS = [
     additional_officers: 'None', status: 'Confirmed', screenshot_path: 'https://picsum.photos/seed/sp2/640/360'
   },
   {
-    id: 'sample-sp3', case_id: 'CASE-N993DF44', type: 'PHYSICAL ALTERCATION', officer: 'AI_SENTINEL',
+    id: 'sample-sp3', case_id: 'CASE-N993DF44', type: 'PHYSICAL VIOLENCE', officer: 'AI_SENTINEL',
     lat: 11.0145, lng: 124.6055, location_name: 'North Uplink Smartpole Node',
     severity: 'HIGH', occurred_date: '2026-05-31', occurred_time: '0245',
-    narrative: 'Automated neural detection of a Physical Altercation on public lanes.',
+    narrative: 'Automated neural detection of a Physical Violence incident on public lanes.',
     nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
     additional_officers: 'None', status: 'Confirmed', screenshot_path: 'https://picsum.photos/seed/sp3/640/360'
   }
@@ -59,9 +71,19 @@ type Incident = {
 interface CrimeReportsViewProps {
   onUpdate: () => void;
   onDeepLink?: (crimeId: string) => void;
+  currentUserRole?: string;
 }
 
-export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsViewProps) {
+// Cameras are barangay property; the backend hard-bans PNP_ADMIN and
+// PNP_OFFICER from managing them regardless of tier (backend.py's
+// BARANGAY_ONLY_PERMISSIONS check runs before the admin bypass). "Add
+// smartpole" used to be shown to everyone and just 403 for police
+// accounts with that exact message -- hiding the control for a role that
+// can never use it beats showing it and having it fail.
+const PNP_SIDE_ROLES = new Set(['PNP_ADMIN', 'PNP_OFFICER']);
+
+export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole }: CrimeReportsViewProps) {
+  const canManageCameras = !PNP_SIDE_ROLES.has(currentUserRole || '');
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
   const selectedPole = useMemo<SmartpoleNode | null>(() => {
@@ -73,7 +95,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   const [showFilingModal, setShowFilingModal] = useState(false);
   const [expungeTargetId, setExpungeTargetId] = useState<string | null>(null);
   const [filingTarget, setFilingTarget] = useState<Incident | null>(null);
-  
+  const [actionError, setActionError] = useState('');
+
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
 
   const [isManualFilingActive, setIsManualFilingActive] = useState(false);
@@ -130,11 +153,26 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
 
   const fetchIncidents = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/incidents`);
+      const res = await fetch(`${API_URL}/api/incidents`, { headers: authHeaders() });
+      if (res.status === 401) {
+        setActionError('Session expired -- please log in again.');
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setActionError(body.detail || `Failed to load incidents (server said ${res.status}).`);
+        return;
+      }
       const data = await res.json();
-      setIncidents([...SAMPLE_REPORTS, ...data]);
+      setIncidents(data);
+      setActionError('');
     } catch {
+      // Real connection failure -- SAMPLE_REPORTS is a deliberate fallback
+      // here (not silently merged with live data, which is what made the
+      // fake incidents invisible before), so the map still demos something
+      // instead of going blank.
       setIncidents(SAMPLE_REPORTS);
+      setActionError('Backend unreachable -- showing sample data.');
     }
   };
   const buildPoleIcon = (L: any, pole: SmartpoleNode, selectedId: string | null = selectedPoleIdRef.current) => {
@@ -302,10 +340,14 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     setExpungeTargetId(null);
     // Archive, not delete -- Crime History reads the same incidents table
     // and must keep the permanent record even after this view "removes" it.
-    const res = await fetch(`${API_URL}/api/incidents/${incidentId}/archive`, { method: 'PATCH' });
+    const res = await fetch(`${API_URL}/api/incidents/${incidentId}/archive`, { method: 'PATCH', headers: authHeaders() });
     if (res.ok) {
       setIncidents(prev => prev.map(i => i.id === incidentId ? { ...i, map_hidden: 1 } : i));
+      setActionError('');
       onUpdate();
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail || 'Could not dismiss that incident.');
     }
   };
 
@@ -335,14 +377,18 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
     };
     const res = await fetch(`${API_URL}/api/incidents`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify(payload)
     });
     if (res.ok) {
       setFormManualNarrative("");
       setIsManualFilingActive(false);
+      setActionError('');
       fetchIncidents();
       onUpdate();
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail || 'Could not file that report.');
     }
   };
   const handleOpenReportFiler = (target: Incident) => {
@@ -355,21 +401,31 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
   const handleSubmitOfficialReport = async () => {
     if (!filingTarget || !reportForm.badgeNumber || !reportForm.reportingOfficer) return;
     try {
-      await fetch(`${API_URL}/api/incidents/${filingTarget.id}/confirm-and-report`, {
+      const res = await fetch(`${API_URL}/api/incidents/${filingTarget.id}/confirm-and-report`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({
           status: "Confirmed",
           capture_snapshot: true,
           report_details: reportForm
         })
       });
-      setShowFilingModal(false); 
+      if (!res.ok) {
+        // Previously ignored entirely -- the modal closed and claimed
+        // success on a 401/403 exactly the same as a real submission, so an
+        // officer had no way to know their official report never saved.
+        const body = await res.json().catch(() => ({}));
+        setActionError(body.detail || 'Could not submit that report -- it was NOT saved.');
+        return;
+      }
+      setShowFilingModal(false);
       setFilingTarget(null);
-      fetchIncidents(); 
+      setActionError('');
+      fetchIncidents();
       onUpdate();
-    } catch (e) { 
-      console.error(e); 
+    } catch (e) {
+      console.error(e);
+      setActionError('Backend connection failure -- report was NOT saved.');
     }
   };
 
@@ -428,15 +484,42 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
             <option value="district18">District 18 HQ</option>
           </select>
 
+          {canManageCameras && (
+          <>
           <div className="w-px h-5" style={{ background: 'var(--line-2)' }} />
 
           <button
-            onClick={() => {
+            onClick={async () => {
+              setActionError('');
+              // Used to be entirely fake -- two prompt()s then an alert()
+              // claiming success, with nothing sent anywhere and nothing
+              // saved. Now it actually registers the camera (POST
+              // /api/cameras, the same endpoint the barangay Cameras tab
+              // uses). NOTE: this map's pole markers (SMARTPOLE_LOCATIONS,
+              // above) are still a fixed list of 3 -- a newly added camera
+              // will show up in the Cameras tab and count, but will not
+              // yet appear as a pin on this map. That's a separate, larger
+              // rebuild (deriving pole markers from real camera rows
+              // instead of a hardcoded array) and out of scope for this fix.
               const name = prompt("Enter New Smartpole Identifier Label:", "Sector D Terminal");
+              if (!name) return;
               const path = prompt("Enter Network RTSP Surveillance Feed Stream Path:", "rtsp://192.168.1.50/live");
-              if (name && path && mapRef.current) {
-                const center = mapRef.current.getCenter();
-                alert(`Successfully initiated secure configuration link for ${name} at parameters:\nLat: ${center.lat.toFixed(4)}\nLng: ${center.lng.toFixed(4)}`);
+              if (!path) return;
+              try {
+                const res = await fetch(`${API_URL}/api/cameras`, {
+                  method: "POST",
+                  headers: authHeaders(),
+                  body: JSON.stringify({ name, url: path, barangay_id: "cogon" }),
+                });
+                if (res.ok) {
+                  onUpdate();
+                  alert(`${name} registered. It will appear in the Cameras tab -- this map's pole markers are a fixed demo set for now and won't show it yet.`);
+                } else {
+                  const body = await res.json().catch(() => ({}));
+                  setActionError(body.detail || 'Could not register that camera.');
+                }
+              } catch {
+                setActionError('Backend connection failure -- camera was not registered.');
               }
             }}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
@@ -444,8 +527,20 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
           >
             <Plus size={12} /> Add smartpole
           </button>
+          </>
+          )}
         </div>
       </div>
+
+      {actionError && (
+        <div
+          className="w-full px-2.5 py-1.5 border text-[10px] font-bold uppercase tracking-wider shrink-0 flex items-center justify-between gap-2"
+          style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
+        >
+          <span>{actionError}</span>
+          <button onClick={() => setActionError('')} className="shrink-0 hover:opacity-70"><X size={11} /></button>
+        </div>
+      )}
 
       <div className="flex-1 flex gap-2 min-h-0 w-full">
         {/* ═══ MAP CANVAS ═════════════════════════════════════════════════ */}
@@ -521,7 +616,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                   >
                     <option value="ASSAULT">Assault</option>
                     <option value="THEFT">Theft</option>
-                    <option value="PHYSICAL ALTERCATION">Altercation</option>
+                    <option value="PHYSICAL VIOLENCE">Physical Violence</option>
                     <option value="VANDALISM">Vandalism</option>
                   </select>
                 </div>
@@ -587,7 +682,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink }: CrimeReportsV
                 <option value="ALL">All types</option>
                 <option value="ASSAULT">Assault</option>
                 <option value="THEFT">Theft</option>
-                <option value="PHYSICAL ALTERCATION">Altercation</option>
+                <option value="PHYSICAL VIOLENCE">Physical Violence</option>
                 <option value="VANDALISM">Vandalism</option>
               </select>
             </div>

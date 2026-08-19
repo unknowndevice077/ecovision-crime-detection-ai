@@ -1,6 +1,6 @@
 # EcoVision Detection Performance — Full Report
 
-As of 2026-08-14. Every number is measured and traceable to a script in the
+As of 2026-08-19. Every number is measured and traceable to a script in the
 repository. Nothing is estimated, and where a figure rests on something thin it
 says so on the same line.
 
@@ -13,6 +13,7 @@ says so on the same line.
 | **Physical injury (violence)** | deployed | **95.0%** on continuous footage (38/40 events) | **17 / hour** across 3 cameras |
 | **Robbery** | deployed | **65.3%** of clips in unseen scenes | **5.6%** of normal clips |
 | **Vandalism** | **disabled** | 0% — the shipped rule has never fired | n/a |
+| **Weapons & signs** | deployed | **88.7%** recall on 3,001 test images | **99.3%** precision — see §5.3 before quoting an FPR |
 
 Read the rest before quoting any of these. In particular, **recall on the
 actual deployment cameras is unmeasured for every class**, because no labelled
@@ -236,7 +237,93 @@ that gap is filming, not filtering — every new location is a new scene. See
 
 ---
 
-## 5. What the data actually is, end to end
+## 5. Weapons and signs
+
+The only class in this system that is an **object detector** rather than a
+video classifier: a single YOLO model (`weights/weapon_signs.pt`) with three
+output classes — `Gun`, `Knife`, `Sign` — run per-frame, with no temporal
+smoothing. It has no `consecutive_required` because there is no multi-frame
+confirmation stage to tune; a detection either clears its threshold on that
+frame or it does not.
+
+### 5.1 Per-class thresholds, and a bug they hid
+
+Production applies a different confidence floor per class, not one flat
+number: **Gun 0.52, Knife 0.45, Sign 0.40** (`CONF_BY_CLASS` in
+`maincode/main.py`).
+
+Measuring this class for the first time on 19 Aug 2026 exposed a bug that had
+made those per-class values **unreachable**. `_run_weapon_detection` passed
+the flat top-level `WEAPON_CONF` (0.6) straight to YOLO's own `conf=`
+parameter — and YOLO discards everything below that internally, *before* any
+Python-level per-class check can see it. Every Knife and Sign detection
+between 0.40 and 0.60 was silently dropped. Verified against real frames
+before fixing: 11 of 58 detections in a 60-image sample fell in that dead
+band, including gun detections at 0.583 and 0.592 that were above their
+intended 0.52 threshold. The fix lowers YOLO's own cutoff to the minimum of
+all per-class thresholds and lets `CONF_BY_CLASS` do the real filtering.
+
+**The figures below are measured with the fix in place.**
+
+### 5.2 Confusion matrix — 3,001 test images, 5 datasets
+
+Framed per-image and binary, matching how the other three classes are
+reported: ground truth positive = the label file contains at least one box of
+a class this model outputs; predicted positive = the model produces at least
+one detection clearing that class's real production threshold. Each source
+dataset's own class taxonomy was mapped onto the model's unified Gun/Knife/Sign
+output. `person`, a second class in the CCTV knife set, is excluded from
+ground truth — counting it would inflate positives with images containing only
+a bystander.
+
+| dataset | n | TP | FP | TN | FN | accuracy | precision | recall | FPR |
+|---|---|---|---|---|---|---|---|---|---|
+| gun detection v4 | 736 | 498 | 0 | 1 | 237 | 67.8% | 100% | 67.8% | 0.0% |
+| gun and knife detection v1 | 845 | 682 | 18 | 65 | 80 | 88.4% | 97.4% | 89.5% | 21.7% |
+| knife-dataset v2 | 385 | 375 | 0 | 0 | 10 | 97.4% | 100% | 97.4% | 0.0% |
+| Traffic and Road Signs v1 | 1,024 | 1,024 | 0 | 0 | 0 | 100% | 100% | 100% | 0.0% |
+| CCTV Knife Detection v1 | 11 | 7 | 0 | 1 | 3 | 72.7% | 100% | 70.0% | 0.0% |
+| **overall** | **3,001** | **2,586** | **18** | **67** | **330** | **88.4%** | **99.3%** | **88.7%** | **21.2%** |
+
+### 5.3 How to read these honestly
+
+- **Precision is the trustworthy figure (99.3%).** When this model reports a
+  weapon, it is almost always right. That is the property an alerting system
+  needs most.
+- **The FPR column is not comparable to the other classes'.** Only 85 of 3,001
+  images are true negatives, and 65 of those sit in one dataset — so 18 false
+  positives produce a 21.2% rate off a tiny denominator. It is a small-sample
+  artefact, not evidence of a fifth of normal frames misfiring. **Do not quote
+  the 21.2% next to violence's 7.4%**; they are computed against completely
+  different negative pools.
+- **Recall is dragged down almost entirely by one dataset.** 237 of the 330
+  total misses are in `gun detection v4` alone (67.8% recall there). Knife
+  performance is strong (97.4%) and signs are perfect, which is expected — the
+  sign class is a large, high-contrast, rigid object.
+- **The 100% on Traffic and Road Signs means less than it looks.** Every image
+  in that split contains a sign, so there are no negatives to get wrong. It
+  confirms the class fires reliably; it says nothing about false positives.
+- **These are still object-detection datasets, not CCTV.** Mostly close-range,
+  well-framed images of weapons. The one genuinely CCTV-framed set here has
+  11 test images. Performance on a pole-mounted camera at real distance is
+  **unmeasured**, exactly as it is for violence and robbery.
+
+### 5.4 Known gap: the Sign class
+
+Signs score 100% here yet produced **zero detections across 4,800 sampled
+frames** of real outdoor footage during the vandalism evaluation (§4.1). Both
+results are true: the class works on the dataset it was trained on and does
+not fire on this deployment's cameras. The rule that depended on it is
+disabled for that reason, and dropping the Sign class from a future retrain is
+under consideration.
+
+*Measured 19 Aug 2026 with `weapon_confusion_matrix.py`. Two of the seven
+source datasets (Gun-cctv-detection, knife v1) exported with zero test images
+and were skipped rather than silently zero-filled.*
+
+---
+
+## 6. What the data actually is, end to end
 
 | pool | clips | distinct scenes | role |
 |---|---|---|---|
@@ -249,7 +336,7 @@ that gap is filming, not filtering — every new location is a new scene. See
 
 ---
 
-## 6. Things measured and rejected
+## 7. Things measured and rejected
 
 Kept because negative results are the most transferable part of this work.
 
@@ -271,7 +358,7 @@ the whole project.
 
 ---
 
-## 7. Object scale on the deployment cameras
+## 8. Object scale on the deployment cameras
 
 Measured on 248 person detections across the four holdout cameras
 (`measure_object_scale.py`):

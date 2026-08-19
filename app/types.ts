@@ -8,6 +8,7 @@ export type Alert = {
   timestamp: string;
   confidence: number;
   status: 'pending' | 'confirmed' | 'dismissed';
+  screenshot_path?: string | null;
 };
 
 export type Camera = {
@@ -19,13 +20,21 @@ export type Camera = {
 
 export type UserRole = 'DEVTEAM' | 'PNP_ADMIN' | 'PNP_OFFICER' | 'BARANGAY_ADMIN' | 'BARANGAY_STAFF';
 
+// Not actually used to type currentUser anywhere (page.tsx keeps it as
+// `any`), which is exactly why nothing caught this: the shape here was
+// camelCase while the backend (_row_to_user_dict_base in backend.py) and
+// localStorage's stored 'ecoUser' are snake_case. That mismatch is what
+// made page.tsx's currentUser.barangayId always read undefined -- fixed
+// there (2026-08-19), and fixed here so this type documents reality
+// instead of the bug.
 export type User = {
   id: number;
   username: string;
   role: UserRole;
-  barangayId: string;   // "Location", e.g. "cogon"
+  barangay_id: string;   // "Location", e.g. "cogon" -- null/absent for PNP roles
+  station_id?: string | null;
   assignment: string;
-  parentAdminId?: number | null;
+  parent_admin_id?: number | null;
   permissions?: Record<string, boolean>;
 };
 

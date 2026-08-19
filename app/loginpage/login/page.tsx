@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Shield, Lock, User, AlertTriangle } from 'lucide-react';
+import { Shield, Lock, User, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
@@ -9,6 +9,7 @@ import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 export default function LoginPage() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [creds, setCreds] = useState({ username: '', password: '' });
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
@@ -82,18 +83,29 @@ export default function LoginPage() {
               <label htmlFor="login-pass" className="label flex items-center gap-1.5 mb-1.5">
                 <Lock size={11} /> Password
               </label>
-              <input
-                id="login-pass"
-                type="password"
-                title="Password"
-                autoComplete="current-password"
-                value={creds.password}
-                onChange={e => setCreds({ ...creds, password: e.target.value })}
-                disabled={isSubmitting}
-                className="data w-full px-2.5 py-2.5 text-[12px] text-white border outline-none disabled:opacity-50"
-                style={{ background: 'var(--bg)', borderColor: 'var(--line)' }}
-                required
-              />
+              <div className="relative">
+                <input
+                  id="login-pass"
+                  type={showPassword ? 'text' : 'password'}
+                  title="Password"
+                  autoComplete="current-password"
+                  value={creds.password}
+                  onChange={e => setCreds({ ...creds, password: e.target.value })}
+                  disabled={isSubmitting}
+                  className="data w-full px-2.5 py-2.5 pr-9 text-[12px] text-white border outline-none disabled:opacity-50"
+                  style={{ background: 'var(--bg)', borderColor: 'var(--line)' }}
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(s => !s)}
+                  title={showPassword ? 'Hide password' : 'Show password'}
+                  tabIndex={-1}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-3)] hover:text-white transition-colors"
+                >
+                  {showPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
             </div>
 
             {error && (

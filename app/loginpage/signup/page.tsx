@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle } from 'lucide-react';
+import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
@@ -14,6 +14,7 @@ export default function SignupPage() {
     username: '', password: '', role: 'BARANGAY_ADMIN',
     barangay_id: '', station_id: '', assignment: '',
   });
+  const [showPassword, setShowPassword] = useState(false);
   const [stations, setStations] = useState<Station[]>([]);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -125,18 +126,29 @@ export default function SignupPage() {
               <label htmlFor="su-pass" className="label flex items-center gap-1.5 mb-1.5">
                 <Lock size={11} /> Password
               </label>
-              <input
-                id="su-pass"
-                type="password"
-                title="Password"
-                autoComplete="new-password"
-                value={formData.password}
-                onChange={e => setFormData({ ...formData, password: e.target.value })}
-                disabled={isSubmitting}
-                className={fieldClass}
-                style={fieldStyle}
-                required
-              />
+              <div className="relative">
+                <input
+                  id="su-pass"
+                  type={showPassword ? 'text' : 'password'}
+                  title="Password"
+                  autoComplete="new-password"
+                  value={formData.password}
+                  onChange={e => setFormData({ ...formData, password: e.target.value })}
+                  disabled={isSubmitting}
+                  className={`${fieldClass} pr-9`}
+                  style={fieldStyle}
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(s => !s)}
+                  title={showPassword ? 'Hide password' : 'Show password'}
+                  tabIndex={-1}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-3)] hover:text-white transition-colors"
+                >
+                  {showPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
             </div>
 
             <div>

@@ -94,7 +94,7 @@ x3d_debug_out*/
 Assault_Snapshots/
 roboflow_cache/
 yolo11n_openvino_model/
-
+recordings
 # ---- Superseded / scratch ----------------------------------------------------
 archive/
 useless/

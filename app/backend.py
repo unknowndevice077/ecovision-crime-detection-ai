@@ -1,3 +1,22 @@
+import sys
+
+# BUG FOUND 2026-08-19: PYTHONIOENCODING=utf-8 / PYTHONUTF8=1, set by
+# run_dev_system.bat and confirmed present in this exact process's own
+# environment (checked directly with psutil), still weren't enough to stop
+# stdout encoding as cp1252 under uvicorn's --reload -- print(f"emoji...")
+# kept crashing with UnicodeEncodeError, turning a handled ESP32-unreachable
+# warning into an unhandled 500 on /siren/activate. Whatever layer of
+# process spawning --reload introduces, the env var wasn't reliably making
+# it to the stream object print() actually writes through. Reconfiguring
+# the streams directly, in code, at the top of this file, doesn't depend on
+# that plumbing working at all -- it can't be undone by any shell, batch
+# script, or reload cycle between here and every print() call below.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # non-interactive/redirected stream that doesn't support reconfigure -- harmless
+
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -136,21 +155,83 @@ def require_role(payload: dict, allowed_roles: set):
     if payload["role"] not in allowed_roles:
         raise HTTPException(status_code=403, detail=f"'{payload['role']}' accounts cannot do this")
 
-# Safe folder verification tracking routines anchored to the WRITABLE
-# root, never BASE_DIR -- BASE_DIR can be a read-only install directory.
-DATA_DIR = os.path.abspath(os.path.join(WRITABLE_DIR, sys_config["database"]["path"]))
-LOGS_DIR = os.path.abspath(os.path.join(WRITABLE_DIR, os.path.dirname(sys_config["monitoring"]["log_file"])))
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LOGS_DIR, exist_ok=True)
-
-DB_PATH = os.path.join(DATA_DIR, "ecovision.db")
+# BUG FOUND 2026-08-19: DATA_DIR/DB_PATH/LOGS_DIR were dead code -- defined
+# here, referenced NOWHERE else in this file. The database connection this
+# app actually uses is opened by db.py's own, completely independent path
+# resolution (SQLITE_PATH = WRITABLE_DIR/ecovision.db directly, no "data"
+# subfolder, no config.json database.path consulted at all). These three
+# lines only ever did one real thing: silently create an empty, unused
+# WRITABLE_DIR/data/ folder and an empty WRITABLE_DIR/logs/ folder on every
+# startup -- which is exactly the "why does data/ exist but stay empty"
+# confusion that cost a long stretch of debugging tonight before this was
+# found. config.json's database.path is equally dead as a result; left as
+# documentation there rather than removed, since it's harmless sitting
+# unread. Schema file resolution below is real and still needed.
 # Schema file depends on which DB engine db.py picked: Postgres uses
 # DATABASE_URL (schema_final.sql), no DATABASE_URL falls back to SQLite
 # (schema_sqlite.sql) for the standalone installer build. Both files are
 # kept in sync field-for-field -- see schema_sqlite.sql's header comment.
 SCHEMA_FILENAME = "schema_final.sql" if DB_KIND == "postgres" else "schema_sqlite.sql"
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), SCHEMA_FILENAME)
-ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
+# NOTE on the old one-liner this replaces:
+#   ESP32_IP = sys_config["esp32"]["enabled"] and sys_config["esp32"].get("ip_override") or "192.168.254.152"
+# That `and/or` chain looked like it honoured `enabled`, but every branch fell
+# through to the same hardcoded default -- so `enabled: false` still produced a
+# usable IP and the siren routes still called out to it. Split into two plain
+# values so each means exactly one thing.
+ESP32_ENABLED = bool(sys_config["esp32"].get("enabled", False))
+ESP32_IP = sys_config["esp32"].get("ip_override") or "192.168.254.152"
+
+# ── ESP32 AUTO-DISCOVERY ──────────────────────────────────────────────────
+# Restored 2026-08-19. This project HAD self-registration and lost it in a
+# refactor: the old POST /panic did `global ESP32_IP; ESP32_IP =
+# request.client.host`, so the pole taught the backend its own address. The
+# replacement /api/panic_trigger dropped the `request: Request` parameter and
+# with it the only thing keeping the IP correct without manual config.
+#
+# Why it matters: the firmware uses plain DHCP (WiFi.begin with no
+# WiFi.config), so its address is a lease, not a fixed property of the device.
+# A DHCP reservation on the router pins it in practice -- but that lives
+# outside this repo and does not survive a router reset or a swap.
+#
+# Learned address is persisted so a backend restart doesn't forget it, and
+# takes precedence over config.json's ip_override the moment the device has
+# actually spoken to us -- a device telling us where it is beats a human
+# writing down where it was.
+_ESP32_STATE_PATH = os.path.join(WRITABLE_DIR, "esp32_last_seen.json")
+
+def _load_learned_esp32_ip():
+    global ESP32_IP
+    try:
+        with open(_ESP32_STATE_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        ip = data.get("ip")
+        if ip:
+            ESP32_IP = ip
+            print(f"📡 [ESP32] Using last-seen address {ip} (learned {data.get('seen_at', '?')})")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️  [ESP32] Could not read {_ESP32_STATE_PATH}: {e}")
+
+def _remember_esp32_ip(ip: str, source: str):
+    """Record where the pole just contacted us from. Called by any endpoint
+    the ESP32 itself hits, so every kind of contact keeps the address fresh."""
+    global ESP32_IP
+    if not ip or ip in ("127.0.0.1", "::1"):
+        return   # a local test/curl, not the pole -- don't overwrite a real address
+    changed = ip != ESP32_IP
+    ESP32_IP = ip
+    try:
+        with open(_ESP32_STATE_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"ip": ip, "seen_at": datetime.now().isoformat(timespec="seconds"),
+                       "source": source}, fh)
+    except Exception as e:
+        print(f"⚠️  [ESP32] Could not persist address: {e}")
+    if changed:
+        print(f"📡 [ESP32] Address learned via {source}: {ip}")
+
+_load_learned_esp32_ip()
 RECORDINGS_DIR = os.path.join(WRITABLE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
 SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
@@ -191,6 +272,26 @@ if sys_config["security"]["enable_cors"]:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# Was invisible: an unhandled exception anywhere in a route became Starlette's
+# generic 500 with no detail and (per FastAPI's default exception handling
+# order) no CORS headers attached -- so the browser reported "blocked by CORS
+# policy" while the real cause, a Python traceback, went nowhere anyone was
+# looking. This prints the full traceback to this console on every 500 (so
+# the actual error is finally visible here, not just "Internal Server
+# Error"), and returns a normal JSONResponse instead of letting Starlette's
+# default path swallow the response -- which also means CORSMiddleware gets
+# a real chance to add its headers, so the browser stops misreporting these
+# as CORS failures too.
+import traceback as _traceback
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception):
+    print(f"\n===== UNHANDLED EXCEPTION on {request.method} {request.url.path} =====")
+    _traceback.print_exc()
+    print("=" * 60 + "\n")
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
 
 # --- WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER ---
 class ConnectionManager:
@@ -540,6 +641,12 @@ class AiTriggerSchema(BaseModel):
     confidence: float
     barangay_id: Optional[str] = "cogon"
     screenshot_path: Optional[str] = None
+    # Was hardcoded to "Cogon Core Smartpole Node" below regardless of which
+    # camera actually saw the event -- every incident said the same location
+    # even on a single-camera deployment where that name may not match the
+    # real camera at all. main.py now sends the configured camera name;
+    # default here keeps old callers (or a payload that omits it) working.
+    location_name: Optional[str] = "Cogon Core Smartpole Node"
 
 class PanicSchema(BaseModel):
     event: str
@@ -775,8 +882,21 @@ async def ptz_capabilities(authorization: Optional[str] = Header(None)):
     """Never raises on an unreachable/unconfigured camera -- the dashboard
     calls this on load, and 'no camera attached' is a normal state."""
     require_auth(authorization)
-    from ptz_control import get_controller
-    return get_controller().get_capabilities()
+    from ptz_control import get_controller, PTZNotConfigured
+    # BUG FOUND 2026-08-19: this was the one PTZ endpoint with no try/except
+    # -- every sibling (move/stop/presets/goto/save) catches PTZNotConfigured
+    # and generic errors, this one didn't, directly contradicting its own
+    # docstring's promise. The dashboard calls this unconditionally on every
+    # load, so an unconfigured/unreachable camera turned into a 500 there
+    # too, right when "never raises" mattered most.
+    try:
+        return get_controller().get_capabilities()
+    except PTZNotConfigured as e:
+        return {"configured": False, "reason": str(e), "pan_tilt": False,
+                "zoom": False, "presets": False, "two_way_audio": False}
+    except Exception as e:
+        return {"configured": False, "reason": f"camera error: {e}", "pan_tilt": False,
+                "zoom": False, "presets": False, "two_way_audio": False}
 
 
 @app.post("/api/ptz/move")
@@ -988,7 +1108,7 @@ async def ai_trigger(data: AiTriggerSchema):
            (id, case_id, type, severity, status, lat, lng, location_name,
             occurred_date, occurred_time, confidence, officer, barangay_id, source)
            VALUES (?, ?, ?, 'HIGH', 'Active', ?, ?, ?, ?, ?, ?, 'AI_AUTOMATION', ?, 'AI_AUTOMATION')""",
-        (incident_id, case_id, data.event, 11.0504, 124.6062, "Cogon Core Smartpole Node",
+        (incident_id, case_id, data.event, 11.0504, 124.6062, data.location_name,
          now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), data.confidence, data.barangay_id.lower()),
     )
     cursor.execute(
@@ -1005,12 +1125,74 @@ async def ai_trigger(data: AiTriggerSchema):
 
     await manager.broadcast({
         "channel": "incidents", "status": "CRITICAL", "id": incident_id, "type": data.event,
-        "location": "Cogon Core Smartpole Node", "conf": data.confidence, "camera_link_id": "1",
+        "location": data.location_name, "conf": data.confidence, "camera_link_id": "1",
     })
     return {"status": "processed", "incident_id": incident_id}
 
+@app.get("/api/camera_name/{camera_id}")
+async def camera_name(camera_id: str):
+    """Lets main.py resolve the real, currently-registered name for the
+    camera it's pointed at, instead of a name baked into config.json --
+    added per request: "barangay adds a camera then adds a name and now the
+    police can access that camera and show the name". If a barangay renames
+    a camera in the Cameras tab, the AI core picks up the new name the next
+    time it starts (it resolves this once at startup, not per-alert -- a
+    live rename doesn't retroactively relabel an already-running session,
+    same restart-to-apply rule as every other config change tonight).
+
+    Deliberately unauthenticated, same reasoning as /api/ai_trigger: the
+    caller is the local AI pipeline, not a browser, and a camera's own
+    display name isn't sensitive. Give it a service credential if this
+    backend is ever exposed beyond localhost.
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM cameras WHERE id = ?", (camera_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No camera registered with id {camera_id!r}")
+    return {"id": camera_id, "name": row["name"]}
+
+@app.post("/api/esp32/register")
+async def esp32_register(request: Request):
+    """The pole announces itself here on boot and on every heartbeat.
+
+    Unauthenticated for the same reason /api/ai_trigger is: the caller is a
+    microcontroller on the local network with no user session and no ability
+    to hold a token. It reveals nothing and changes nothing except which
+    address the siren calls -- and only to the address the caller is
+    demonstrably reachable at, since request.client.host cannot be spoofed
+    into pointing somewhere the request didn't come from without also
+    breaking the TCP handshake.
+    """
+    ip = request.client.host if request.client else None
+    _remember_esp32_ip(ip, "register")
+    return {"status": "registered", "your_ip": ip, "siren_enabled": ESP32_ENABLED}
+
+
+@app.get("/api/esp32/status")
+async def esp32_status(authorization: Optional[str] = Header(None)):
+    """Where the backend currently thinks the pole is, and how it knows."""
+    require_auth(authorization)
+    info = {"ip": ESP32_IP, "enabled": ESP32_ENABLED, "source": "config.json ip_override / default"}
+    try:
+        with open(_ESP32_STATE_PATH, "r", encoding="utf-8") as fh:
+            info.update(json.load(fh))
+            info["source"] = "learned from the device itself"
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return info
+
+
 @app.post("/api/panic_trigger")
-async def panic_trigger(data: PanicSchema):
+async def panic_trigger(data: PanicSchema, request: Request):
+    # Restored: a panic press also teaches us the pole's current address.
+    # This is the original self-registration behaviour that the /panic ->
+    # /api/panic_trigger refactor silently dropped (see _remember_esp32_ip).
+    _remember_esp32_ip(request.client.host if request.client else None, "panic_trigger")
     incident_id = str(uuid.uuid4())
     case_id = f"PANIC-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4()).replace('-', '')[:8].upper()}"
     now = datetime.now()
@@ -1175,6 +1357,14 @@ async def siren_activate(authorization: Optional[str] = Header(None)):
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     conn.close()
+    # BUG FOUND 2026-08-19: esp32.enabled was never checked here, so with NO
+    # ESP32 on the network every Confirm/Dismiss click still fired a real HTTP
+    # POST and blocked on a 2-second connect timeout before returning. (The
+    # ESP32_IP expression at the top of this file reads `enabled`, but only as
+    # part of an `and/or` chain that falls through to the same hardcoded
+    # default either way -- so `enabled: false` disabled nothing at all.)
+    if not ESP32_ENABLED:
+        return {"status": "skipped", "detail": "esp32.enabled is false in config.json"}
     try:
         await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/on", timeout=2.0)
     except Exception as e:
@@ -1188,6 +1378,9 @@ async def siren_deactivate(authorization: Optional[str] = Header(None)):
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
     conn.close()
+    # See siren_activate above for why this check exists.
+    if not ESP32_ENABLED:
+        return {"status": "skipped", "detail": "esp32.enabled is false in config.json"}
     try:
         await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/off", timeout=2.0)
     except Exception as e:
@@ -1223,19 +1416,31 @@ async def get_video_records(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/records/register_clip")
 async def register_clip(data: ManualClipSchema, authorization: Optional[str] = Header(None)):
-    require_auth(authorization)
+    payload = require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
     rid = str(uuid.uuid4())
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     fpath = os.path.join(RECORDINGS_DIR, data.filename)
+    # BUG FOUND 2026-08-19: same missing barangay_id as /api/ai_register_clip
+    # below -- see that endpoint's comment. An operator manually extracting a
+    # segment is scoped to their own barangay; a PNP account's token carries
+    # no barangay_id at all (they use station_id instead), so this falls
+    # back to the linked incident's barangay_id in that case, same as the
+    # AI-triggered path.
+    clip_barangay_id = payload.get("barangay_id")
+    if not clip_barangay_id and data.associated_incident_id:
+        cursor.execute("SELECT barangay_id FROM incidents WHERE id = ?", (data.associated_incident_id,))
+        row = cursor.fetchone()
+        if row:
+            clip_barangay_id = row["barangay_id"]
     try:
         cursor.execute(
             """INSERT INTO video_records
-               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes, barangay_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (rid, data.filename, fpath, now_str, data.duration, data.type,
-             data.associated_incident_id or None, data.crime_time_marker, data.notes),
+             data.associated_incident_id or None, data.crime_time_marker, data.notes, clip_barangay_id),
         )
         conn.commit()
         return {"status": "registered", "id": rid}
@@ -1264,13 +1469,27 @@ async def ai_register_clip(data: ManualClipSchema):
     rid = str(uuid.uuid4())
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     fpath = os.path.join(RECORDINGS_DIR, data.filename)
+    # BUG FOUND 2026-08-19: this never set barangay_id, so every AI-triggered
+    # clip landed with it NULL. apply_scope() (used by GET /api/records)
+    # restricts every non-DEVTEAM role to "LOWER(barangay_id) = ?" -- NULL
+    # never equals a string in SQL, so every one of these clips was invisible
+    # to every barangay/PNP account regardless of jurisdiction, while the
+    # backend kept truthfully reporting "200 registered" the whole time.
+    # Resolved from the linked incident (which does carry a real
+    # barangay_id) rather than hardcoding one.
+    clip_barangay_id = None
+    if data.associated_incident_id:
+        cursor.execute("SELECT barangay_id FROM incidents WHERE id = ?", (data.associated_incident_id,))
+        row = cursor.fetchone()
+        if row:
+            clip_barangay_id = row["barangay_id"]
     try:
         cursor.execute(
             """INSERT INTO video_records
-               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes, barangay_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (rid, data.filename, fpath, now_str, data.duration, data.type,
-             data.associated_incident_id or None, data.crime_time_marker, data.notes),
+             data.associated_incident_id or None, data.crime_time_marker, data.notes, clip_barangay_id),
         )
         conn.commit()
         # RecordsView subscribes via useLiveChannel("*"), so pushing this
@@ -2119,9 +2338,24 @@ if __name__ == "__main__":
     preferred_port = sys_config["backend"]["port"]
     actual_port = find_free_port(preferred_port)
     write_runtime_port("backend", actual_port)
+    # BUG FOUND 2026-08-19: with no reload_dirs, uvicorn's --reload watches
+    # the process's cwd, which run_dev_system.bat sets to the WHOLE repo
+    # root ("Will watch for changes in these directories: ['...EcoVisionCode']").
+    # Every edit anywhere -- maincode/, electron/, even a weights file being
+    # touched -- restarted this process. Each restart re-runs init_db(),
+    # which looks like a fresh boot from wherever the DB actually was, right
+    # in the middle of a live test. reload_dirs alone isn't enough here:
+    # backend.py lives in app/, which is ALSO the entire Next.js frontend
+    # (app/page.tsx, app/components/*.tsx, ...) -- same folder, so scoping
+    # by directory still catches every frontend edit. reload_includes narrows
+    # it further to .py files only, so only genuine backend code changes
+    # (backend.py, db.py, port_utils.py, etc.) reload this process.
+    this_dir = os.path.dirname(os.path.abspath(__file__))
     uvicorn.run(
         "backend:app",
         host=sys_config["backend"]["host"],
         port=actual_port,
         reload=sys_config["backend"]["reload"],
+        reload_dirs=[this_dir] if sys_config["backend"]["reload"] else None,
+        reload_includes=["*.py"] if sys_config["backend"]["reload"] else None,
     )

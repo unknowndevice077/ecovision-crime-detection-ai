@@ -91,13 +91,33 @@ function getAppDataDir() {
 // up, or move. Falls back to userData only if the install folder itself
 // truly isn't writable, and that fallback is one consolidated folder too,
 // not a second scattering.
+// BUG FOUND 2026-08-19: this used to re-run the writability probe (create +
+// delete a .write_test file) on every single call -- and it's called once
+// per spawnPython() invocation, i.e. once for the backend and separately
+// once for the AI core. Real, observed consequence: a live install ended up
+// with backend.py writing incidents/screenshots to one directory and
+// main.py writing recordings/screenshots to a DIFFERENT one, because the two
+// probes didn't agree. Nothing downstream expects that -- the frontend asks
+// the backend for a screenshot path, the backend serves /static from ITS
+// resolved dir, and the file is sitting in the AI core's dir instead. Result
+// was every AI-triggered incident showing a broken image, and clip registry
+// entries pointing at files that don't exist where the backend looks.
+// Memoized so the probe runs once per app launch and every caller for the
+// rest of that session -- backend spawn, AI-core spawn, credential file,
+// runtime_ports.json, everything -- gets the exact same answer.
+let _writableDataDir = null;
 function getWritableDataDir() {
+  if (_writableDataDir) return _writableDataDir;
   const installRoot = getAppDataDir();
   const primary = path.join(installRoot, "data");
-  if (isWritable(primary)) return primary;
+  if (isWritable(primary)) {
+    _writableDataDir = primary;
+    return _writableDataDir;
+  }
   const fallback = path.join(app.getPath("userData"), "EcoVisionData");
   fs.mkdirSync(fallback, { recursive: true });
-  return fallback;
+  _writableDataDir = fallback;
+  return _writableDataDir;
 }
 
 function getRuntimePortsPath() {

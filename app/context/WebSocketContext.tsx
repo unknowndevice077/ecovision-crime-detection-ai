@@ -134,17 +134,38 @@ export function useWebSocketContext() {
 export function useLiveChannel(channel: string, onEvent: () => void) {
   const { subscribe } = useWebSocketContext();
 
+  // BUG FOUND 2026-08-19: `onEvent` was called directly inside this effect,
+  // whose dependency array is just [channel] -- a constant string literal
+  // that never changes, so this effect runs exactly ONCE, on mount, and
+  // every subsequent invocation (every WS broadcast, every 60s fallback
+  // tick) calls the SAME `onEvent` closure captured at that first render.
+  // For a callback like CrimeReportsView's fetchIncidents, which reads
+  // nothing but localStorage fresh on every call, that staleness is
+  // invisible. For page.tsx's fetchStats/fetchActiveAlertCache -- both
+  // guarded by `if (!currentUser) return;` -- it was fatal: currentUser is
+  // still null on the very first render (its own hydration effect hasn't
+  // committed yet), so the closure captured HERE, permanently, was the one
+  // that always no-ops. Every later broadcast and every 60s poll kept
+  // calling that same frozen closure for the rest of the session -- the
+  // Incident Queue (accept/decline) and nav badge counts could never
+  // populate, ever, no matter how many real incidents landed, because
+  // this hook never called a version of the function that could see them.
+  // A ref sidesteps it: the ref's .current is reassigned every render (so
+  // it always holds the latest closure), while the effect itself still
+  // only needs to run once for the subscribe/unsubscribe lifecycle.
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
+
   useEffect(() => {
-    onEvent(); // initial load
-    const unsubscribe = subscribe(channel, () => onEvent());
+    onEventRef.current(); // initial load
+    const unsubscribe = subscribe(channel, () => onEventRef.current());
     // Belt-and-suspenders: still poll, but slowly (60s) as a fallback in
     // case a broadcast gets missed during a reconnect window -- this is
     // NOT the primary refresh mechanism anymore, just a safety net.
-    const fallback = setInterval(onEvent, 60000);
+    const fallback = setInterval(() => onEventRef.current(), 60000);
     return () => {
       unsubscribe();
       clearInterval(fallback);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channel]);
+  }, [channel, subscribe]);
 }

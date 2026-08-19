@@ -60,7 +60,19 @@ export default function RecordsView() {
       } else if (recordsRes.status === 401 || crimesRes.status === 401) {
         setError('Session expired -- please log in again.');
       } else {
-        setError('Failed to load records.');
+        // A flat "Failed to load records" used to cover both a genuine
+        // outage AND a 403 from a standard account that was never granted
+        // view_records/view_history -- indistinguishable to whoever hit it.
+        // The 403's own detail already names the missing permission key
+        // (require_permission's HTTPException), so surface it verbatim
+        // instead of a generic message that gives no next step.
+        const failed = !recordsRes.ok ? recordsRes : crimesRes;
+        const body = await failed.json().catch(() => ({}));
+        if (failed.status === 403) {
+          setError(body.detail ? `${body.detail} -- ask a DevTeam admin to grant it.` : 'Missing permission for this view.');
+        } else {
+          setError(`Failed to load records (server said ${failed.status}).`);
+        }
       }
     } catch (e) {
       console.error("Failed to query stream archive indices:", e);

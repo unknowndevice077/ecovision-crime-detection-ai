@@ -5,19 +5,12 @@ import {
   ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
   Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
   Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus, ChevronDown,
-  Brain, AlertTriangle, Info, RotateCw
+  Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
-
-const PERMISSION_KEYS = [
-  { key: "view_map", label: "View Crime Map" },
-  { key: "view_records", label: "View Video Records" },
-  { key: "view_history", label: "View Crime History" },
-  { key: "manage_cameras", label: "Manage Cameras" },
-  { key: "confirm_dismiss_alerts", label: "Confirm / Dismiss Alerts" },
-];
+import { permissionRowsFor, permissionNoteFor, onlyEditablePermissions } from '../../lib/permissions';
 
 const CREATABLE_ROLES = [
   { role: 'PNP_ADMIN', code: 'PD', label: 'PNP Admin', scope: 'station' },
@@ -110,6 +103,7 @@ export default function DevteamView() {
   const [search, setSearch] = useState('');
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [editDraft, setEditDraft] = useState({ username: '', assignment: '', password: '' });
+  const [showEditPassword, setShowEditPassword] = useState(false);
   const [permsDraft, setPermsDraft] = useState<Record<string, boolean>>({});
   const [pendingActionIds, setPendingActionIds] = useState<Set<string | number>>(new Set());
   const [toast, setToast] = useState('');
@@ -260,6 +254,18 @@ export default function DevteamView() {
   const [restartPending, setRestartPending] = useState(false);
   const [confirmEnable, setConfirmEnable] = useState<DetectionModel | null>(null);
 
+  // Threshold editing, "weapon" only for now (per explicit request 2026-08-19):
+  // it's a single-frame YOLO confidence cutoff with no temporal smoothing to
+  // reason about, unlike violence/robbery/vandalism's scene_confidence_threshold
+  // + consecutive_required pair -- tuning those live needs both fields moved
+  // together or the two drift out of the relationship they were measured at.
+  // The backend endpoint (set_detection_model) already accepts a threshold
+  // for any class; this whitelist is UI-only, extend it here when
+  // robbery/vandalism get the same treatment.
+  const THRESHOLD_EDITABLE_MODELS = new Set(['weapon']);
+  const [editingThreshold, setEditingThreshold] = useState<string | null>(null);
+  const [thresholdDraft, setThresholdDraft] = useState('');
+
   const fetchModels = async () => {
     try {
       const res = await fetch(`${API_URL}/api/devteam/detection-models`, { headers: authHeaders() });
@@ -346,7 +352,7 @@ export default function DevteamView() {
     try {
       const [editRes, permsRes] = await Promise.all([
         fetch(`${API_URL}/api/devteam/users/${id}`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify(body) }),
-        fetch(`${API_URL}/api/admin/users/${id}/permissions`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ permissions: permsDraft }) }),
+        fetch(`${API_URL}/api/admin/users/${id}/permissions`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ permissions: onlyEditablePermissions(editingUser.role, permsDraft) }) }),
       ]);
       if (editRes.ok && permsRes.ok) { fetchOverview(); flash('Account updated.'); }
       else { flash('Some changes failed to save.'); }
@@ -403,7 +409,7 @@ export default function DevteamView() {
           assignment: createForm.assignment.trim(),
           display_title: createForm.display_title.trim() || null,
           parent_admin_id: createForm.parent_admin_id ? Number(createForm.parent_admin_id) : null,
-          permissions: createPerms,
+          permissions: onlyEditablePermissions(createForm.role, createPerms),
         }),
       });
       const d = await res.json().catch(() => ({}));
@@ -870,15 +876,27 @@ export default function DevteamView() {
               <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
                 <KeyRound size={10} /> Permissions — same tree used everywhere else
               </div>
+              {permissionNoteFor(createForm.role) && (
+                <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(createForm.role)}</p>
+              )}
               <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                {PERMISSION_KEYS.map(p => (
-                  <label key={p.key} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel)] transition-colors">
-                    <span className="text-[10px] text-[var(--text)]">{p.label}</span>
+                {permissionRowsFor(createForm.role).map(p => (
+                  <label
+                    key={p.key}
+                    title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
+                    className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
+                  >
+                    <span className="text-[10px] text-[var(--text)]">
+                      {p.label}
+                      {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
+                      {p.status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
+                    </span>
                     <input
                       type="checkbox"
-                      checked={!!createPerms[p.key]}
+                      checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!createPerms[p.key]}
+                      disabled={p.status !== 'editable'}
                       onChange={e => setCreatePerms({ ...createPerms, [p.key]: e.target.checked })}
-                      className="w-3.5 h-3.5 accent-[var(--accent)]"
+                      className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
                     />
                   </label>
                 ))}
@@ -907,6 +925,21 @@ export default function DevteamView() {
           shrinking a jurisdiction here is safe. */}
       {tab === 'stations' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-4">
+
+          <div className="flex items-start gap-2.5 border border-[var(--accent)]/25 bg-[var(--accent)]/[0.05] px-4 py-3">
+            <Info size={13} className="text-[var(--accent)] mt-0.5 shrink-0" />
+            <p className="text-[10.5px] leading-relaxed text-[var(--text)]">
+              <span className="text-[var(--accent)] font-bold">Why a station exists:</span>{' '}
+              a barangay account only ever sees its own barangay. A police account
+              covers more than one — a precinct's jurisdiction usually spans
+              several — so a PNP login can't be scoped to a single barangay the
+              way a barangay login is. A station is that grouping: pick which
+              barangays it covers below, and every PNP account attached to it sees
+              cameras and incidents across all of them. A station owns nothing
+              itself — no camera, incident, or recording ever moves when you
+              change its jurisdiction, so widening or narrowing one is always safe.
+            </p>
+          </div>
 
           <div className="border border-[var(--line)] p-4">
             <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
@@ -1145,8 +1178,48 @@ export default function DevteamView() {
 
                 {/* settings + provenance */}
                 <div className="px-4 py-3 space-y-2">
-                  <div className="flex flex-wrap gap-x-6 gap-y-1 text-[9.5px] text-[var(--text-2)] font-mono">
-                    <span>threshold <span className="text-[#fff]">{m.threshold}</span></span>
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-[9.5px] text-[var(--text-2)] font-mono">
+                    {THRESHOLD_EDITABLE_MODELS.has(m.name) ? (
+                      editingThreshold === m.name ? (
+                        <span className="flex items-center gap-1.5">
+                          threshold
+                          <input
+                            autoFocus
+                            value={thresholdDraft}
+                            onChange={e => setThresholdDraft(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                const t = parseFloat(thresholdDraft);
+                                if (!isNaN(t) && t > 0 && t < 1) { applyModelChange(m, { threshold: t }); setEditingThreshold(null); }
+                                else flash('Threshold must be a number between 0 and 1.');
+                              } else if (e.key === 'Escape') setEditingThreshold(null);
+                            }}
+                            className="w-14 bg-[var(--bg)] border border-[var(--accent)]/50 px-1.5 py-0.5 text-[#fff] outline-none"
+                          />
+                          <button
+                            onClick={() => {
+                              const t = parseFloat(thresholdDraft);
+                              if (!isNaN(t) && t > 0 && t < 1) { applyModelChange(m, { threshold: t }); setEditingThreshold(null); }
+                              else flash('Threshold must be a number between 0 and 1.');
+                            }}
+                            className="text-[var(--ok)] hover:opacity-70"
+                            title="Save"
+                          ><Save size={10} /></button>
+                          <button onClick={() => setEditingThreshold(null)} className="text-[var(--text-2)] hover:text-[#fff]" title="Cancel"><X size={10} /></button>
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => { setEditingThreshold(m.name); setThresholdDraft(String(m.threshold ?? '')); }}
+                          title="Single-frame confidence cutoff -- editable here because this class has no consecutive-frame smoothing to keep in sync with it, unlike violence/robbery/vandalism."
+                          className="hover:text-[#fff] transition-colors flex items-center gap-1"
+                        >
+                          threshold <span className="text-[#fff] underline decoration-dotted underline-offset-2">{m.threshold}</span>
+                          <Pencil size={9} className="text-[var(--text-3)]" />
+                        </button>
+                      )
+                    ) : (
+                      <span>threshold <span className="text-[#fff]">{m.threshold}</span></span>
+                    )}
                     <span>confirmations <span className="text-[#fff]">{m.consecutive_required}</span></span>
                     <span>weights {m.weights_present
                       ? <span className="text-[var(--ok)]">present</span>
@@ -1249,28 +1322,51 @@ export default function DevteamView() {
               </div>
               <div>
                 <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">New password</label>
-                <input
-                  type="password"
-                  value={editDraft.password}
-                  onChange={e => setEditDraft({ ...editDraft, password: e.target.value })}
-                  placeholder="leave blank to keep current"
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                />
+                <div className="relative">
+                  <input
+                    type={showEditPassword ? 'text' : 'password'}
+                    value={editDraft.password}
+                    onChange={e => setEditDraft({ ...editDraft, password: e.target.value })}
+                    placeholder="leave blank to keep current"
+                    className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 pr-8 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowEditPassword(s => !s)}
+                    title={showEditPassword ? 'Hide password' : 'Show password'}
+                    tabIndex={-1}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[#fff] transition-colors"
+                  >
+                    {showEditPassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                  </button>
+                </div>
               </div>
 
               <div className="pt-3 border-t border-[var(--panel-2)]">
                 <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
                   <KeyRound size={10} /> Permissions
                 </div>
+                {permissionNoteFor(editingUser.role) && (
+                  <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(editingUser.role)}</p>
+                )}
                 <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                  {PERMISSION_KEYS.map(p => (
-                    <label key={p.key} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel)] transition-colors">
-                      <span className="text-[10px] text-[var(--text)]">{p.label}</span>
+                  {permissionRowsFor(editingUser.role).map(p => (
+                    <label
+                      key={p.key}
+                      title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
+                      className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
+                    >
+                      <span className="text-[10px] text-[var(--text)]">
+                        {p.label}
+                        {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
+                        {p.status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
+                      </span>
                       <input
                         type="checkbox"
-                        checked={!!permsDraft[p.key]}
+                        checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!permsDraft[p.key]}
+                        disabled={p.status !== 'editable'}
                         onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
-                        className="w-3.5 h-3.5 accent-[var(--accent)]"
+                        className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
                       />
                     </label>
                   ))}
@@ -1333,16 +1429,31 @@ function SeatChip({ user, code }: { user?: ManagedUser; code: string }) {
 }
 
 function FieldInput({ label, value, onChange, type = 'text', placeholder }: any) {
+  const [show, setShow] = useState(false);
+  const isPassword = type === 'password';
   return (
     <div>
       <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
-      />
+      <div className={isPassword ? 'relative' : undefined}>
+        <input
+          type={isPassword ? (show ? 'text' : 'password') : type}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          className={`w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors ${isPassword ? 'pr-8' : ''}`}
+        />
+        {isPassword && (
+          <button
+            type="button"
+            onClick={() => setShow(s => !s)}
+            title={show ? 'Hide password' : 'Show password'}
+            tabIndex={-1}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[#fff] transition-colors"
+          >
+            {show ? <EyeOff size={12} /> : <Eye size={12} />}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -21,7 +21,7 @@ The system runs three integrated components, packaged as one desktop application
 
 ### 2. **Backend API** (`app/backend.py`, FastAPI)
 - Stores alerts, incident records, and video clips
-- Dual database backend: **SQLite by default**, Postgres when `DATABASE_URL` is set (e.g. Docker Compose) — see `app/db.py` and [Database](#database) below
+- Dual database backend: **SQLite by default**, Postgres when `DATABASE_URL` is set — see `app/db.py` and [Database](#database) below
 - Manages connected device (ESP32) telemetry and siren control
 - Role-based auth (JWT) and permissions system, with every scoped query going through one `scope_clause()` helper so cameras, incidents and records can't disagree about who sees what
 - Serves data to the dashboard over REST + a shared `/ws` WebSocket for live push updates
@@ -48,7 +48,6 @@ The system runs three integrated components, packaged as one desktop application
 - ✅ **Two-organization access control** — barangay and PNP hierarchies with database-enforced scope; see [Organization & Roles](#organization--roles)
 - ✅ **Runtime-selectable camera index** — no hardcoded camera number, switchable from the dashboard
 - ✅ **Self-contained desktop app** — single Inno Setup installer (`electron-builder` packages `win.target: dir`, `installer/EcoVisionSentinel.iss` wraps it), ships its own Python runtime (`python-env/`, the official embeddable distribution — not a venv), no separate Python or Node install needed on the target machine
-- ✅ **Docker deployment option** — `docker-compose.yml` / `dockerfile.combined` / `dockerfile.detector` / `Dockerfile.backend` for a non-Electron, containerized deployment (Postgres-backed)
 - ✅ **Robbery detection** — trained X3D-XS classifier, enabled by default (threshold 0.70, 65.3% recall / 86.5% precision on held-out clips)
 - 🚧 **Vandalism detection** — trained, but ships disabled by default (37.5% false-positive rate at its best threshold) — blocked on training-scene count, not architecture; see `docs/vandalism_data_collection.md`. Toggleable from the AI Models admin tab regardless.
 
@@ -89,7 +88,6 @@ Existing databases are moved onto this model by `app/migrate_pnp_hierarchy.py` (
 | Backend API | FastAPI (Python 3.11), SQLite or Postgres |
 | AI/Vision | Ultralytics YOLO11 (pose + weapon detection), PyTorchVideo X3D-XS (violence classification), OpenCV, TensorRT (optional) |
 | Hardware | ESP32 integration |
-| Containerization | Docker / Docker Compose (alternative to the Electron desktop build) |
 
 ## Repository Structure
 
@@ -122,7 +120,6 @@ EcoVisionCode/
 ├── python-env/                 # Bundled runtime for the installer, built by tools/build_python_env.ps1 (gitignored)
 ├── config.json / config.development.json / config.production.json
 ├── requirements.txt / requirements-backend.txt / requirements-detector.txt
-├── docker-compose.yml, dockerfile.combined, dockerfile.detector, Dockerfile.backend
 ├── package.json
 ├── setup.bat                   # Environment setup (.venv + python-env)
 ├── run_dev_system.bat          # Development startup
@@ -171,11 +168,11 @@ Manually place trained model weights into the `weights/` directory (gitignored d
 
 | File | Read by | Notes |
 |---|---|---|
-| `.env` | `app/backend.py` (`load_dotenv()`), `docker-compose` | `APP_ENV`, `SECRET_KEY`, `CORS_ORIGINS`. Copy from `.env.example`. |
+| `.env` | `app/backend.py` (`load_dotenv()`) | `APP_ENV`, `SECRET_KEY`, `CORS_ORIGINS`, `DEVTEAM_BOOTSTRAP_USERNAME`/`PASSWORD`. Copy from `.env.example`. |
 | `.env.local` | Next.js | **Must be at the repo root**, not in `app/`. Only `NEXT_PUBLIC_*` reaches the browser; both variables already have working defaults in code. Copy from `.env.local.example`. |
 | `config.json` | backend **and** AI core | Detection thresholds, camera index, cooldowns, ESP32, network. The AI core reads only this — never `.env`. |
 
-One caveat worth knowing: `backend.py` imports `db.py` before it calls `load_dotenv()`, and `db.py` reads `DATABASE_URL` at import time — so a `DATABASE_URL` set in `.env` does not reach the database layer. Export it in the real environment (or use Docker, which injects it as a container variable) if you want Postgres.
+One caveat worth knowing: `backend.py` imports `db.py` before it calls `load_dotenv()`, and `db.py` reads `DATABASE_URL` at import time — so a `DATABASE_URL` set in `.env` does not reach the database layer. Export it in the real process environment if you want Postgres.
 
 ### Start Development
 
@@ -192,14 +189,6 @@ The first two open in their own windows; the Next.js dev server runs in the fore
 
 `run_dev_system.bat` also runs `app/reset_devteam_password.py` and prints fresh DevTeam credentials — development convenience only.
 
-### Docker (alternative to Electron)
-
-```bash
-docker compose up
-```
-
-Uses `docker-compose.yml` (Postgres-backed, `DATABASE_URL` set for the backend/detector containers). See `dockerfile.combined` / `dockerfile.detector` / `Dockerfile.backend` for the individual service builds.
-
 ## Database
 
 `app/db.py` picks its backend on **the presence of `DATABASE_URL` alone** — there is no connect-failure fallback, so setting it without a reachable server raises at import.
@@ -211,7 +200,7 @@ Uses `docker-compose.yml` (Postgres-backed, `DATABASE_URL` set for the backend/d
 
 Override the data root with `ECOVISION_WRITABLE_DIR`, or point at one specific file with `SQLITE_PATH`. That writable directory also holds `logs/`, `recordings/`, `runtime_ports.json`, a writable `config.json` override, and `devteam_credentials.txt`.
 
-**First run** creates a `devteam` account with a random password (`secrets.token_urlsafe(12)`), prints it to the console, and writes it to `devteam_credentials.txt` in the writable directory. It is not shown again. The `DEVTEAM_BOOTSTRAP_*` variables in `.env` are interpolated by `docker-compose.yml` but are not read by any Python code.
+**First run** creates a `devteam` account. If `DEVTEAM_BOOTSTRAP_USERNAME`/`DEVTEAM_BOOTSTRAP_PASSWORD` are set in `.env`, `app/backend.py`'s `init_db()` uses those directly — a fixed login instead of a random one, currently how the packaged installer ships for the testing phase (`TESTING_PHASE_FIXED_CREDENTIALS` in `electron/main.js`; must be reverted before a real deployment). Otherwise it generates a random password (`secrets.token_urlsafe(12)`), prints it to the console, and writes it once to `devteam_credentials.txt` in the writable directory — not shown again.
 
 Schema lives in `app/schema_final.sql` (Postgres) and `app/schema_sqlite.sql` (SQLite) — keep both in step. Postgres migrations are in `alembic/`; the one-shot hierarchy migration is `app/migrate_pnp_hierarchy.py`.
 

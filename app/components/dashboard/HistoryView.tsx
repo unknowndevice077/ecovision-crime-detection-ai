@@ -9,10 +9,16 @@ import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonRow } from './Skeleton';
 
+function authHeaders() {
+  const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
+  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
 export default function HistoryView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [historyRecords, setHistoryRecords] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const [dateFilter, setDateFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("ALL");
@@ -21,15 +27,27 @@ export default function HistoryView() {
 
   const loadLogs = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/incidents`);
+      // This request had no Authorization header at all -- require_auth()
+      // 401s it every time, res.ok is false, and the catch block never
+      // runs (a 401 is still a normal HTTP response, not a fetch error),
+      // so this silently fell through to "No incidents match the current
+      // filters" forever, indistinguishable from a genuinely empty log.
+      const res = await fetch(`${API_URL}/api/incidents`, { headers: authHeaders() });
       if (res.ok) {
         const data = await res.json();
         // schema_final.sql: incidents.status is 'Active' | 'Confirmed' | 'Dismissed'
         const processedHistory = data.filter((inc: any) => inc.status !== 'Active');
         setHistoryRecords(processedHistory);
+        setError('');
+      } else if (res.status === 401) {
+        setError('Session expired -- please log in again.');
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setError(body.detail || `Failed to load incident log (server said ${res.status}).`);
       }
     } catch (err) {
       console.error("Could not sync database rows:", err);
+      setError('Backend connection failure.');
     } finally {
       setIsLoading(false);
     }
@@ -76,6 +94,15 @@ export default function HistoryView() {
             {String(processedData.length).padStart(3, '0')} RECORDS
           </span>
         </div>
+
+        {error && (
+          <div
+            className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider border-b"
+            style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
+          >
+            {error}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-1.5 p-2">
           <div className="relative flex-1 min-w-[180px]">

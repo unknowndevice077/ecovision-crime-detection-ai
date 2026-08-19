@@ -179,8 +179,9 @@ Reasons, in order of discovery:
 **9b. Two more installer bugs found and fixed 18-19 Aug, worth knowing if
 something in this area looks broken again:**
   - `writeGeneratedEnv()` forced `APP_ENV=production`, which made the app
-    silently load `config.production.json` (a Docker-only file — violence
-    only, no robbery/vandalism, stale settings) instead of `config.json`, on
+    silently load `config.production.json` (a leftover from the since-removed
+    Docker setup — violence only, no robbery/vandalism, stale settings)
+    instead of `config.json`, on
     *every* packaged install. Fixed by using `APP_ENV=desktop` instead — a
     value that matches neither `config.development.json` nor
     `config.production.json`, so it always falls through to plain
