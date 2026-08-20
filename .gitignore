@@ -154,3 +154,14 @@ docs/media/_chk.png
 ~$*.doc*
 ~$*.xls*
 ~$*.ppt*
+
+# Firmware -- NEVER commit. hardware/esp32_smartpole_tracker.ino hardcodes the
+# deployment Wi-Fi SSID and password, and it was pushed to a PUBLIC repo on
+# 2026-08-20 before that was noticed. History was rewritten to purge it; this
+# entry is what stops it coming back. The file still lives locally and in
+# D:\EcoVisionImagesTraining\_hardware_backup\ -- it is ignored, not deleted.
+#
+# If firmware ever needs to be version-controlled, strip the credentials into
+# a gitignored secrets.h first and commit only the .ino that includes it.
+hardware/
+*.ino
