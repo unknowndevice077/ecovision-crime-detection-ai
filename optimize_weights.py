@@ -29,6 +29,7 @@ else is for a human reading a terminal.
 """
 import argparse
 import json
+import re
 import shutil
 import sys
 import time
@@ -40,6 +41,11 @@ REPO = Path(__file__).resolve().parent
 _CONFIG = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
 _VIOLENCE_SCENE_STEM = Path(_CONFIG["detection"]["violence"]["scene_model_path"]).stem
 _ROBBERY_STEM = Path(_CONFIG["detection"]["robbery"]["model_path"]).stem
+# Was hardcoded "weapon_signs" -- the same bug the TARGETS comment below warns
+# about, sitting three lines under the warning. The weapon detector is exactly
+# the checkpoint being replaced right now (weapons_v2 drops the dead Sign
+# class), so a hardcoded stem would keep optimizing the retired model.
+_WEAPON_STEM = Path(_CONFIG["detection"]["weapon"]["model_path"]).stem
 sys.path.insert(0, str(REPO / "maincode"))
 WEIGHTS = REPO / "weights"
 
@@ -206,6 +212,37 @@ def bench_x3d_engine(engine_bytes, geom, batch, n, agreement_pt=None):
 # ---------------------------------------------------------------------------
 # YOLO: ultralytics has its own exporter, so use it rather than reimplementing.
 # ---------------------------------------------------------------------------
+_MAIN_PY = REPO / "maincode" / "main.py"
+
+
+def runtime_imgsz(const_name, default=416):
+    """The imgsz PRODUCTION runs this model at, read from main.py's constant.
+
+    Not the size the checkpoint was trained at -- those differ on purpose.
+    yolo11s-pose.pt ships trained at 640 but main.py deliberately runs it at
+    POSE_IMGSZ=416 for speed, so an engine built at 640 would be built for a
+    workload that never happens: the before/after benchmarks would describe
+    different resolutions, and the "speedup" reported to the user would be
+    measuring the resize, not the engine.
+
+    Hardcoding 416 was correct only while every model happened to run at 416.
+    weapons_v2 is trained at 640 for small-object resolution on CCTV frames;
+    when it is deployed and WEAPON_IMGSZ becomes 640, this follows
+    automatically instead of silently building a 416 engine for it.
+
+    Parsed rather than imported because importing main.py loads every model
+    and opens a camera.
+    """
+    try:
+        m = re.search(rf"^{const_name}\s*=\s*(\d+)", _MAIN_PY.read_text(encoding="utf-8"),
+                      re.MULTILINE)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return default
+
+
 def bench_yolo(path, task, n, imgsz=416):
     from ultralytics import YOLO
     frame = (np.random.rand(720, 1280, 3) * 255).astype("uint8")
@@ -242,10 +279,14 @@ TARGETS = [
      "label": "Violence detector", "batches": [1, 17]},
     {"stem": _ROBBERY_STEM, "kind": "x3d",
      "label": "Robbery detector", "batches": [1]},
+    # imgsz_const names the constant in maincode/main.py that sets the
+    # resolution production actually runs this model at. yolo11s-pose ships
+    # trained at 640 but runs at POSE_IMGSZ=416, so these must be read from
+    # main.py rather than from the checkpoint.
     {"stem": "yolo11s-pose", "kind": "yolo", "task": "pose",
-     "label": "Person / pose detection"},
-    {"stem": "weapon_signs", "kind": "yolo", "task": "detect",
-     "label": "Weapon and sign detection"},
+     "label": "Person / pose detection", "imgsz_const": "POSE_IMGSZ"},
+    {"stem": _WEAPON_STEM, "kind": "yolo", "task": "detect",
+     "label": "Weapon detection", "imgsz_const": "WEAPON_IMGSZ"},
 ]
 
 
@@ -403,16 +444,22 @@ def main():
                 row["detail"] = [{"batch": b, "before_ms": before[b], "after_ms": after[b]}
                                  for b in batches]
             else:
-                say("  measuring current speed...")
-                row["before_ms"] = bench_yolo(pt, t["task"], args.n)
+                # imgsz comes from the checkpoint, not a constant -- the engine
+                # and both benchmarks must all use the size the model was
+                # trained at, or the "before" and "after" numbers describe
+                # different workloads and the speedup is meaningless.
+                sz = runtime_imgsz(t.get("imgsz_const", "WEAPON_IMGSZ"))
+                say(f"  measuring current speed (imgsz={sz})...")
+                row["imgsz"] = sz
+                row["before_ms"] = bench_yolo(pt, t["task"], args.n, imgsz=sz)
                 if not args.check_only:
                     say("  building engine...")
                     emit("step", index=i, label=t["label"], state="building")
-                    build_yolo_engine(pt, workspace_gb=args.workspace_gb)
+                    build_yolo_engine(pt, imgsz=sz, workspace_gb=args.workspace_gb)
                 if not eng.exists():
                     raise FileNotFoundError("engine was not produced")
                 say("  measuring optimized speed...")
-                row["after_ms"] = bench_yolo(eng, t["task"], args.n)
+                row["after_ms"] = bench_yolo(eng, t["task"], args.n, imgsz=sz)
 
             row["speedup"] = row["before_ms"] / row["after_ms"]
             row["engine_mb"] = eng.stat().st_size / 2**20 if eng.exists() else None

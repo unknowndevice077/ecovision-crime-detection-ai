@@ -50,14 +50,32 @@ ROBBERY_RELEASE_FRAMES   = 45      # frames of no-evidence before dropping ROBBE
 # samples (33/903). True distribution at native frame rate: median 1.1,
 # p75 3.7, max 52 px/frame.
 #
-# A 7-band x 8-sustain-param grid search on 79 labelled vandalism clips + 24
-# same-camera negatives (ucf_clips/vandalism_outdoor, /vandalism_normal)
-# picked the values below by (recall - FPR). Every candidate tested held FPR
-# at a clean 0.0% -- the ceiling is recall, not false alarms. Final:
-# 11.4% recall (9/79), 0.0% FPR (0/24). Up from the 0% recall this rule had
-# with a dead condition 1, but still low enough that this is NOT a
-# recommendation to enable detection.vandalism.enabled -- see config.json's
-# _why_disabled, updated with this same figure.
+# A 7-band x 8-sustain-param grid search on 79 clips from
+# ucf_clips/vandalism_outdoor + 24 same-camera negatives picked the values
+# below, and produced "11.4% recall (9/79), 0.0% FPR (0/24)".
+#
+# THAT NUMBER IS RETRACTED -- 2026-08-20. A contact sheet of all 10 source
+# videos (_scratch/vandalism_contact_sheet.jpg) shows UCF-Crime's Vandalism
+# class is PROPERTY DESTRUCTION, not graffiti: Vandalism050 is someone
+# keying a car, 026 swings a board, 029 attacks a shop shutter, 013/033
+# knock over a planter display. Essentially none of it is spray-painting.
+#
+# So the measurement was a three-way mismatch: vandalism_marks.pt detects
+# GRAFFITI MARKS, this rule models SPRAY-PAINTING WRIST MOTION, and the
+# clips show SMASHING AND KEYING. 11.4% measured how often a graffiti
+# detector coincidentally fired near a wrist in videos of people breaking
+# things -- it is not a measurement of this rule's recall, and neither is
+# the "35.4% ceiling" or the "20.3% at confirm=2" derived from the same set.
+#
+# The constants below are therefore still UNVALIDATED against footage of
+# the act they model. They are kept only because they are better-reasoned
+# than the originals (the old [20,90] band genuinely did sit in punch
+# territory, which is a real defect independent of the bad test set).
+#
+# There is no graffiti-act dataset in this project. Getting one is
+# docs/vandalism_data_collection.md's job. config.json's _why_disabled was
+# NOT updated with the 11.4% figure -- it still carries the older, honest
+# X3D-model numbers, and detection.vandalism.enabled stays false.
 VANDAL_TARGET_PROXIMITY  = 120     # px -- wrist must be within this distance of a detected mark
 VANDAL_MIN_WRIST_VEL     = 0.3     # px/frame -- was 20 (in punch territory); real sweeping motion is far slower
 VANDAL_MAX_WRIST_VEL     = 8.0     # px/frame -- was 90; well under MIN_PUNCH_VEL=60, as "not a punch" requires
