@@ -821,6 +821,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
               </div>
               <button
                 title="Close report filing form"
+                aria-label="Close report filing form"
                 onClick={closeModal}
                 className="transition-colors hover:text-white"
                 style={{ color: 'var(--text-3)' }}

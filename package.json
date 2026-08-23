@@ -13,7 +13,8 @@
     "format": "prettier --write .",
     "desktop": "electron .",
     "preapp:build": "powershell -Command \"taskkill /F /IM EcoVisionSentinel.exe /IM electron.exe 2>$null; exit 0\"",
-    "app:build": "next build && electron-builder"
+    "app:build": "next build && node tools/copy_standalone_assets.js && electron-builder",
+    "installer": "npm run app:build && powershell -ExecutionPolicy Bypass -File tools/build_sfx_installer.ps1"
   },
   "dependencies": {
     "axios": "^1.6.2",
@@ -66,7 +67,12 @@
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        { "target": "dir", "arch": ["x64"] }
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "compression": "store",
@@ -82,7 +88,9 @@
       {
         "from": "python-env",
         "to": "python-env",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "app/backend.py",
@@ -137,15 +145,15 @@
         "to": "weights",
         "filter": [
           "yolo11s-pose.pt",
-          "weapon_signs.pt",
+          "weapons_v2.pt",
           "x3d_xs_violence_best.pt",
           "x3d_xs_violence_scene_daynight.pt",
           "x3d_xs_violence_scene_daynight.pt.meta.json",
           "x3d_xs_robbery_scene.pt",
           "x3d_xs_robbery_scene.pt.meta.json",
-          "x3d_xs_vandalism_scene.pt",
-          "x3d_xs_vandalism_scene.pt.meta.json",
-          "vandalism_marks.pt"
+          "x3d_xs_vandalism_scene_v3.pt",
+          "x3d_xs_vandalism_scene_v3.pt.meta.json",
+          "vandalism_marks_v2.pt"
         ]
       },
       {

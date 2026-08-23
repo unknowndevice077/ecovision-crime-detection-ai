@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
   Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
@@ -44,6 +44,7 @@ type ManagedUser = {
   username: string;
   role: string;
   barangay_id: string;
+  station_id: string;
   assignment: string;
   parent_admin_id: number | null;
   permissions: string;
@@ -88,6 +89,7 @@ type OptimizeStep = {
   index: number;
   total?: number;
   label: string;
+  stem?: string;
   state: 'start' | 'building' | 'done' | 'skipped' | 'failed';
   before_ms?: number;
   after_ms?: number;
@@ -117,6 +119,8 @@ type OptimizeState = {
   error: string | null;
   started_at: string | null;
   finished_at: string | null;
+  cancelled?: boolean;
+  cancel_requested?: boolean;
 };
 
 type Station = { id: string; name: string; barangay_ids: string[]; staff_count: number };
@@ -137,7 +141,7 @@ export default function DevteamView() {
   const [selectedAdminId, setSelectedAdminId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
-  const [editDraft, setEditDraft] = useState({ username: '', assignment: '', password: '' });
+  const [editDraft, setEditDraft] = useState({ username: '', assignment: '', password: '', barangay_id: '', station_id: '' });
   const [showEditPassword, setShowEditPassword] = useState(false);
   const [permsDraft, setPermsDraft] = useState<Record<string, boolean>>({});
   const [pendingActionIds, setPendingActionIds] = useState<Set<string | number>>(new Set());
@@ -289,17 +293,14 @@ export default function DevteamView() {
   const [restartPending, setRestartPending] = useState(false);
   const [confirmEnable, setConfirmEnable] = useState<DetectionModel | null>(null);
 
-  // Threshold editing, "weapon" only for now (per explicit request 2026-08-19):
-  // it's a single-frame YOLO confidence cutoff with no temporal smoothing to
-  // reason about, unlike violence/robbery/vandalism's scene_confidence_threshold
-  // + consecutive_required pair -- tuning those live needs both fields moved
-  // together or the two drift out of the relationship they were measured at.
-  // The backend endpoint (set_detection_model) already accepts a threshold
-  // for any class; this whitelist is UI-only, extend it here when
-  // robbery/vandalism get the same treatment.
-  const THRESHOLD_EDITABLE_MODELS = new Set(['weapon']);
-  const [editingThreshold, setEditingThreshold] = useState<string | null>(null);
-  const [thresholdDraft, setThresholdDraft] = useState('');
+  // REVERSED 2026-08-23 (was editable for "weapon" only, since 2026-08-19):
+  // every threshold here is the value measured to give the model's reported
+  // accuracy on its validation split. Editing it live from the dashboard
+  // invalidates the number displayed two lines above it with no warning, so
+  // this is now display-only for every class, weapon included. The backend
+  // endpoint (set_detection_model) still accepts a threshold in its PATCH
+  // body -- nothing here calls it anymore, but removing that capability is a
+  // separate, deliberate decision, not a side effect of removing this UI.
 
   const fetchModels = async () => {
     try {
@@ -339,6 +340,13 @@ export default function DevteamView() {
   // either speeds things up or changes nothing -- never changes an answer.
   const [optimizeState, setOptimizeState] = useState<OptimizeState | null>(null);
   const [optimizeBusy, setOptimizeBusy] = useState(false);
+  const [optimizeIsRevert, setOptimizeIsRevert] = useState(false);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  // The progress window opens on click and stays open through the finished
+  // state (so the last result is visible), and is only dismissed by the
+  // user -- fetchOptimizeStatus alone would close it the instant
+  // optimizeState.running flips back to false, taking the result with it.
+  const [optimizeWindowOpen, setOptimizeWindowOpen] = useState(false);
 
   const fetchOptimizeStatus = async () => {
     try {
@@ -349,8 +357,18 @@ export default function DevteamView() {
 
   useLiveChannel("optimize_weights", fetchOptimizeStatus);
 
+  // Reopens the progress window if a run is already in flight when this
+  // panel first sees it -- e.g. it was started, the page got reloaded, and
+  // the poll picks the still-running state back up. Without this, Cancel
+  // would only ever be reachable from the same click that started the run.
+  useEffect(() => {
+    if (optimizeState?.running) setOptimizeWindowOpen(true);
+  }, [optimizeState?.running]);
+
   const startOptimize = async (revert: boolean) => {
     setOptimizeBusy(true);
+    setOptimizeIsRevert(revert);
+    setOptimizeWindowOpen(true);
     try {
       const res = await fetch(`${API_URL}/api/devteam/optimize_weights${revert ? '/revert' : ''}`, {
         method: 'POST', headers: authHeaders(),
@@ -363,6 +381,23 @@ export default function DevteamView() {
       flash('Could not reach the server');
     } finally {
       setOptimizeBusy(false);
+    }
+  };
+
+  const cancelOptimize = async () => {
+    setCancelBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/optimize_weights/cancel`, {
+        method: 'POST', headers: authHeaders(),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { flash(d.detail || 'Could not cancel'); return; }
+      await fetchOptimizeStatus();
+      flash('Cancelled.');
+    } catch {
+      flash('Could not reach the server');
+    } finally {
+      setCancelBusy(false);
     }
   };
 
@@ -408,7 +443,10 @@ export default function DevteamView() {
 
   const openEdit = (u: ManagedUser) => {
     setEditingUser(u);
-    setEditDraft({ username: u.username, assignment: u.assignment, password: '' });
+    setEditDraft({
+      username: u.username, assignment: u.assignment, password: '',
+      barangay_id: u.barangay_id || '', station_id: u.station_id || '',
+    });
     try { setPermsDraft(JSON.parse(u.permissions || "{}")); } catch { setPermsDraft({}); }
   };
 
@@ -417,6 +455,15 @@ export default function DevteamView() {
     const id = editingUser.id;
     const body: any = { username: editDraft.username, assignment: editDraft.assignment };
     if (editDraft.password.trim()) body.password = editDraft.password.trim();
+    // Which scope field to send follows the account's own organization, same
+    // as account creation -- chk_user_scope rejects a PNP account with a
+    // barangay_id (or vice versa), so only the one this role actually uses
+    // gets sent, never both.
+    if (PNP_ROLES.includes(editingUser.role)) {
+      if (editDraft.station_id.trim()) body.station_id = editDraft.station_id.trim();
+    } else {
+      if (editDraft.barangay_id.trim()) body.barangay_id = editDraft.barangay_id.trim();
+    }
     setEditingUser(null);
     try {
       const [editRes, permsRes] = await Promise.all([
@@ -1326,47 +1373,9 @@ export default function DevteamView() {
                 {/* settings + provenance */}
                 <div className="px-4 py-3 space-y-2">
                   <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-[9.5px] text-[var(--text-2)] font-mono">
-                    {THRESHOLD_EDITABLE_MODELS.has(m.name) ? (
-                      editingThreshold === m.name ? (
-                        <span className="flex items-center gap-1.5">
-                          threshold
-                          <input
-                            autoFocus
-                            value={thresholdDraft}
-                            onChange={e => setThresholdDraft(e.target.value)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') {
-                                const t = parseFloat(thresholdDraft);
-                                if (!isNaN(t) && t > 0 && t < 1) { applyModelChange(m, { threshold: t }); setEditingThreshold(null); }
-                                else flash('Threshold must be a number between 0 and 1.');
-                              } else if (e.key === 'Escape') setEditingThreshold(null);
-                            }}
-                            className="w-14 bg-[var(--bg)] border border-[var(--accent)]/50 px-1.5 py-0.5 text-[#fff] outline-none"
-                          />
-                          <button
-                            onClick={() => {
-                              const t = parseFloat(thresholdDraft);
-                              if (!isNaN(t) && t > 0 && t < 1) { applyModelChange(m, { threshold: t }); setEditingThreshold(null); }
-                              else flash('Threshold must be a number between 0 and 1.');
-                            }}
-                            className="text-[var(--ok)] hover:opacity-70"
-                            title="Save"
-                          ><Save size={10} /></button>
-                          <button onClick={() => setEditingThreshold(null)} className="text-[var(--text-2)] hover:text-[#fff]" title="Cancel"><X size={10} /></button>
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => { setEditingThreshold(m.name); setThresholdDraft(String(m.threshold ?? '')); }}
-                          title="Single-frame confidence cutoff -- editable here because this class has no consecutive-frame smoothing to keep in sync with it, unlike violence/robbery/vandalism."
-                          className="hover:text-[#fff] transition-colors flex items-center gap-1"
-                        >
-                          threshold <span className="text-[#fff] underline decoration-dotted underline-offset-2">{m.threshold}</span>
-                          <Pencil size={9} className="text-[var(--text-3)]" />
-                        </button>
-                      )
-                    ) : (
-                      <span>threshold <span className="text-[#fff]">{m.threshold}</span></span>
-                    )}
+                    <span title="Chosen on the validation split for the best measured accuracy -- not something to hand-tune from the dashboard.">
+                      threshold <span className="text-[#fff]">{m.threshold}</span>
+                    </span>
                     <span>confirmations <span className="text-[#fff]">{m.consecutive_required}</span></span>
                     <span>weights {m.weights_present
                       ? <span className="text-[var(--ok)]">present</span>
@@ -1387,6 +1396,88 @@ export default function DevteamView() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* OPTIMIZE PROGRESS WINDOW -- opens the moment Optimize/Revert is
+          clicked, not only once steps start arriving, so there's never a gap
+          where the button visibly did something but nothing on screen shows
+          it. Stays open through the finished state so the result (or the
+          "Cancelled" notice) is still visible; the user dismisses it with
+          Close. Cancel is live for the whole time optimizeState.running is
+          true, not just at the start. */}
+      {optimizeWindowOpen && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+          <div className="bg-[var(--panel)] border border-[var(--accent)]/30 w-full max-w-sm p-5 font-mono">
+            <div className="flex items-center gap-2 mb-4 pb-3 border-b border-[var(--panel-2)]">
+              {optimizeState?.running ? (
+                <RotateCw size={13} className="text-[var(--accent)] animate-spin shrink-0" />
+              ) : (
+                <Gauge size={13} className="text-[var(--accent)] shrink-0" />
+              )}
+              <span className="text-[10px] tracking-[0.15em] uppercase text-[#fff] flex-1">
+                {optimizeState?.running
+                  ? (optimizeIsRevert ? 'Reverting to .pt weights…' : 'Optimizing for this machine…')
+                  : optimizeState?.cancelled
+                  ? 'Cancelled'
+                  : optimizeState?.error
+                  ? 'Optimize failed'
+                  : 'Done'}
+              </span>
+            </div>
+
+            {optimizeState?.steps?.length ? (
+              <div className="border border-[var(--line)] divide-y divide-[var(--panel-2)] mb-4 max-h-64 overflow-y-auto">
+                {optimizeState.steps.map(s => (
+                  <div key={s.label} className="flex items-center justify-between px-3 py-2 text-[9.5px]">
+                    <span className="text-[var(--text-2)] truncate pr-2">{s.label}</span>
+                    {s.state === 'done' ? (
+                      <span className="text-[var(--ok)] shrink-0">{s.speedup?.toFixed(2)}x</span>
+                    ) : s.state === 'failed' ? (
+                      <span className="text-[var(--critical)] shrink-0">failed</span>
+                    ) : s.state === 'skipped' ? (
+                      <span className="text-[var(--text-3)] shrink-0">skipped</span>
+                    ) : s.state === 'building' ? (
+                      <span className="text-[var(--warn)] shrink-0">building…</span>
+                    ) : (
+                      <span className="text-[var(--text-3)] shrink-0">starting…</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[9.5px] text-[var(--text-2)] mb-4">
+                {optimizeState?.running ? 'Starting…' : 'Waiting for the first step…'}
+              </p>
+            )}
+
+            {optimizeState?.cancelled && (
+              <p className="text-[9.5px] leading-relaxed text-[var(--text-2)] mb-4">
+                Stopped partway through. Any model already finished before the cancel keeps
+                its engine; a model that was mid-build was left on the .pt weights.
+              </p>
+            )}
+            {optimizeState?.error && !optimizeState?.cancelled && (
+              <p className="text-[9.5px] leading-relaxed text-[var(--critical)] mb-4">{optimizeState.error}</p>
+            )}
+
+            {optimizeState?.running ? (
+              <button
+                onClick={cancelOptimize}
+                disabled={cancelBusy || !!optimizeState?.cancel_requested}
+                className="w-full py-2.5 text-[10px] tracking-[0.12em] uppercase border border-[var(--critical)]/50 text-[var(--critical)] hover:bg-[var(--critical)]/10 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {optimizeState?.cancel_requested ? 'Cancelling…' : 'Cancel'}
+              </button>
+            ) : (
+              <button
+                onClick={() => setOptimizeWindowOpen(false)}
+                className="w-full py-2.5 text-[10px] tracking-[0.12em] uppercase border border-[var(--line-2)] text-[var(--text)] hover:border-[var(--text-3)]"
+              >
+                Close
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1467,6 +1558,48 @@ export default function DevteamView() {
                   className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
                 />
               </div>
+
+              {/* BUG FOUND 2026-08-23: an account's location could be set at
+                  creation but never changed afterward -- this editor and the
+                  station_id field it PATCHes were both simply missing. DEVTEAM
+                  accounts have no org of their own (chk_user_scope requires
+                  both NULL), so there's nothing to show them here. */}
+              {editingUser.role !== 'DEVTEAM' && (
+                PNP_ROLES.includes(editingUser.role) ? (
+                  <div>
+                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                      Police station
+                    </label>
+                    <select
+                      value={editDraft.station_id}
+                      onChange={e => setEditDraft({ ...editDraft, station_id: e.target.value })}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                    >
+                      <option value="">
+                        {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
+                      </option>
+                      {stations.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.barangay_ids.length} barangay{s.barangay_ids.length === 1 ? '' : 's'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                      Barangay
+                    </label>
+                    <input
+                      value={editDraft.barangay_id}
+                      onChange={e => setEditDraft({ ...editDraft, barangay_id: e.target.value })}
+                      placeholder="barangay id"
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                    />
+                  </div>
+                )
+              )}
+
               <div>
                 <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">New password</label>
                 <div className="relative">

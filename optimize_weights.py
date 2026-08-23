@@ -391,10 +391,17 @@ def main():
     for i, t in enumerate(targets):
         pt = WEIGHTS / f"{t['stem']}.pt"
         eng = WEIGHTS / f"{t['stem']}.engine"
-        emit("step", index=i, total=len(targets), label=t["label"], state="start")
+        # stem is carried on every step event (not just "building") so a
+        # consumer that kills this process mid-run -- see backend.py's
+        # /optimize_weights/cancel -- always has, from the last step event it
+        # saw, enough to know which .engine file might be a partial write and
+        # needs removing. Cheap to include everywhere; only matters for the
+        # states below where a build is actually in flight.
+        emit("step", index=i, total=len(targets), label=t["label"], stem=t["stem"],
+             state="start")
         if not pt.exists():
             say(f"  {t['label']}: {pt.name} missing, skipped")
-            emit("step", index=i, label=t["label"], state="skipped",
+            emit("step", index=i, label=t["label"], stem=t["stem"], state="skipped",
                  reason="weights missing")
             continue
 
@@ -415,7 +422,7 @@ def main():
                     geom = x3d_geometry(pt)
                 else:
                     say("  building engine (this is the slow part, ~1 min)...")
-                    emit("step", index=i, label=t["label"], state="building")
+                    emit("step", index=i, label=t["label"], stem=t["stem"], state="building")
                     blob, geom = build_x3d_engine(pt, args.max_batch, args.workspace_gb)
 
                 say("  measuring optimized speed...")
@@ -454,7 +461,7 @@ def main():
                 row["before_ms"] = bench_yolo(pt, t["task"], args.n, imgsz=sz)
                 if not args.check_only:
                     say("  building engine...")
-                    emit("step", index=i, label=t["label"], state="building")
+                    emit("step", index=i, label=t["label"], stem=t["stem"], state="building")
                     build_yolo_engine(pt, imgsz=sz, workspace_gb=args.workspace_gb)
                 if not eng.exists():
                     raise FileNotFoundError("engine was not produced")
@@ -465,7 +472,7 @@ def main():
             row["engine_mb"] = eng.stat().st_size / 2**20 if eng.exists() else None
             say(f"  {row['before_ms']:.1f} ms -> {row['after_ms']:.1f} ms "
                 f"({row['speedup']:.2f}x)\n")
-            emit("step", index=i, label=t["label"], state="done", **{
+            emit("step", index=i, label=t["label"], stem=t["stem"], state="done", **{
                 k: row[k] for k in ("before_ms", "after_ms", "speedup")})
             results.append(row)
 
@@ -477,7 +484,7 @@ def main():
             # loader on next launch and fail there instead, which is a much
             # worse place to discover it.
             eng.unlink(missing_ok=True)
-            emit("step", index=i, label=t["label"], state="failed", error=msg)
+            emit("step", index=i, label=t["label"], stem=t["stem"], state="failed", error=msg)
             results.append({"label": t["label"], "error": msg})
 
     good = [r for r in results if "speedup" in r]

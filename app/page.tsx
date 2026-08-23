@@ -6,6 +6,14 @@ import { useRouter } from 'next/navigation';
 import { useRuntimeConfig } from './hooks/useRuntimeConfig';
 import { useLiveChannel } from './context/WebSocketContext';
 import { usePermissions } from './hooks/usePermissions';
+import { useAlertNotifier } from './hooks/useAlertNotifier';
+import { SkeletonRow } from './components/dashboard/Skeleton';
+// Presentational pieces moved out of this file -- see DashboardPrimitives.tsx
+// for why only these were extracted and the tab bodies deliberately were not.
+import { SystemClockText, SystemDateText } from './components/dashboard/SystemTime';
+import {
+  gridColsFor, tempTone, CameraTile, NavSectionLabel, NavItem, MetricPanel, IncidentRow,
+} from './components/dashboard/DashboardPrimitives';
 import PTZControls from './components/PTZControls';
 import AiModelsPanel from './components/AiModelsPanel';
 import {
@@ -48,29 +56,6 @@ type Camera = {
   status: 'online' | 'offline';
 };
 
-// Isolated so its own 1s tick doesn't re-render the whole dashboard tree
-// (nav, camera grid, incident queue, every modal-conditional block) --
-// that state used to live in the top-level EcoVisionSentinel component,
-// which has no memoization anywhere below it, so every descendant re-ran
-// its render function once a second just to update this one clock string.
-function SystemClockText() {
-  const [time, setTime] = useState(() => new Date().toLocaleTimeString('en-GB', { hour12: false }));
-  useEffect(() => {
-    const t = setInterval(() => setTime(new Date().toLocaleTimeString('en-GB', { hour12: false })), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return <>{time}</>;
-}
-
-function SystemDateText() {
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  useEffect(() => {
-    const t = setInterval(() => setDate(new Date().toISOString().slice(0, 10)), 60000);
-    return () => clearInterval(t);
-  }, []);
-  return <>{date}</>;
-}
-
 export default function EcoVisionSentinel() {
   const { apiUrl, aiUrl, loaded: configLoaded } = useRuntimeConfig();
   const { can } = usePermissions();
@@ -84,6 +69,12 @@ export default function EcoVisionSentinel() {
   const [showModal, setShowModal] = useState(false);
   const [sqlReportCount, setSqlReportCount] = useState(0);
   const [backendOnline, setBackendOnline] = useState(true);
+  // Distinguishes "we have not loaded the queue yet" from "the queue is empty".
+  // Without this the incident panel renders "Monitoring - no incidents awaiting
+  // review" during the very first fetch, which is indistinguishable from a
+  // verified all-clear. On a public-safety dashboard, showing reassurance
+  // before the data exists is the wrong default.
+  const [alertsLoaded, setAlertsLoaded] = useState(false);
   // Tracked separately from backendOnline: the storage backend (8000) and the
   // AI vision core (8001) are different processes with very different startup
   // times, so "System Nominal" must not imply the camera feed is live.
@@ -308,6 +299,7 @@ const fetchCameras = async (userObj: any) => {
         }));
         setAlerts(mappedAlerts);
         setBackendOnline(true);
+        setAlertsLoaded(true);
       }
     } catch (err) {
       console.warn("📡 [FETCH FAILED] Storage ledger on port 8000 is unreachable inside fetchActiveAlertCache. Retrying...");
@@ -327,6 +319,12 @@ const fetchCameras = async (userObj: any) => {
     fetchStats();
     fetchActiveAlertCache();
   });
+
+  // Announce new incidents audibly, in the window title, and on the desktop.
+  // Before this, an incoming alert only re-rendered the list -- an operator
+  // looking away, or with the window minimised, was told nothing at all.
+  // See app/hooks/useAlertNotifier.ts for why each channel exists.
+  useAlertNotifier(alerts);
 
   const handleUpsertNode = async (name: string, url: string) => {
     try {
@@ -614,6 +612,7 @@ const fetchCameras = async (userObj: any) => {
             onClick={handleEmergencyStopSiren}
             disabled={sirenStopState === 'busy'}
             title="Immediately silence the physical siren, independent of any incident"
+            aria-label="Emergency stop: immediately silence the physical siren"
             className="w-full flex items-center justify-center gap-2 py-2.5 border-t text-[10px] font-bold uppercase tracking-[0.15em] transition-colors disabled:opacity-60"
             style={{
               borderColor: 'var(--line)',
@@ -698,6 +697,7 @@ const fetchCameras = async (userObj: any) => {
                         onClick={handleApplyCameraSource}
                         disabled={applyState === 'saving'}
                         title="Apply camera source"
+                        aria-label="Apply camera source"
                         className="h-4 w-4 flex items-center justify-center transition-colors disabled:opacity-40"
                         style={{ color: 'var(--accent)' }}
                       >
@@ -776,8 +776,27 @@ const fetchCameras = async (userObj: any) => {
                   </span>
                 </div>
 
-                <div className="flex-1 overflow-y-auto custom-scrollbar">
-                  {pendingAlerts.length === 0 ? (
+                {/* aria-live="assertive" so a screen reader announces an
+                    incoming incident immediately instead of only when the
+                    operator happens to navigate here. "assertive" rather than
+                    "polite" is deliberate: a detected assault is exactly the
+                    case that should interrupt whatever is being read out.
+                    aria-relevant="additions" keeps it from re-reading the whole
+                    queue every time one incident is resolved. */}
+                <div
+                  className="flex-1 overflow-y-auto custom-scrollbar"
+                  role="log"
+                  aria-live="assertive"
+                  aria-relevant="additions"
+                  aria-label="Incident queue, newest first"
+                >
+                  {!alertsLoaded ? (
+                    <div className="p-2 space-y-2" aria-busy="true">
+                      <SkeletonRow />
+                      <SkeletonRow />
+                      <SkeletonRow />
+                    </div>
+                  ) : pendingAlerts.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
                       <span className="status-dot ok" />
                       <span className="label text-center">Monitoring — no incidents awaiting review</span>
@@ -1039,223 +1058,3 @@ const fetchCameras = async (userObj: any) => {
    Video-wall column count follows CCTV convention (1/4/9/16 style) rather
    than a fixed 2-up, so tiles stay as large as possible for the number of
    feeds actually connected. */
-function gridColsFor(count: number) {
-  if (count <= 1) return 'grid-cols-1';
-  if (count <= 4) return 'grid-cols-2';
-  if (count <= 9) return 'grid-cols-3';
-  return 'grid-cols-4';
-}
-
-function tempTone(t: number): 'ok' | 'warn' | 'critical' {
-  if (t >= 80) return 'critical';
-  if (t >= 65) return 'warn';
-  return 'ok';
-}
-
-/* ── Camera tile ────────────────────────────────────────────────────────
-   Feeds render at FULL opacity at all times -- the previous design dimmed
-   them to 60% until hover, which is actively unsafe for a monitoring wall
-   (you cannot watch what you cannot see). Identification is burned into the
-   frame as OSD text the way real CCTV does, so a screenshot of a tile is
-   self-documenting for evidence. */
-function CameraTile({ cam, aiUrl, alerted, onClick, large }: any) {
-  const Wrapper: any = onClick ? 'button' : 'div';
-  return (
-    <Wrapper
-      onClick={onClick}
-      className={`relative bg-black overflow-hidden group text-left w-full h-full border transition-colors${onClick ? ' hover-lift cursor-pointer' : ''}`}
-      style={{ borderColor: alerted ? 'var(--critical)' : 'var(--line)' }}
-    >
-      <img
-        src={`${aiUrl}/video_feed`}
-        className="w-full h-full object-cover"
-        alt={`${cam.name} live feed`}
-      />
-
-      {/* Top OSD: identity + live state */}
-      <div className="absolute top-0 inset-x-0 flex items-start justify-between p-1.5 pointer-events-none">
-        <span className={`osd ${large ? 'text-[12px]' : 'text-[10px]'} font-bold text-white`}>
-          {cam.name?.toUpperCase()}
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="status-dot live" />
-          <span className={`osd ${large ? 'text-[11px]' : 'text-[9px]'} font-bold text-white`}>LIVE</span>
-        </span>
-      </div>
-
-      {/* Bottom OSD: burned-in timestamp, as on any evidentiary recording */}
-      <div className="absolute bottom-0 inset-x-0 flex items-end justify-between p-1.5 pointer-events-none">
-        <span className={`osd ${large ? 'text-[11px]' : 'text-[9px]'} text-white/90`}>
-          <SystemDateText /> <SystemClockText />
-        </span>
-        {alerted && (
-          <span
-            className="osd text-[9px] font-bold px-1 py-0.5 pulse-alert"
-            style={{ background: 'var(--critical)', color: '#fff' }}
-          >
-            THREAT
-          </span>
-        )}
-      </div>
-
-      {/* Alert frame -- a hard border, not a soft glow, so it survives being
-          seen at an angle or on a cheap monitor */}
-      {alerted && (
-        <div
-          className="absolute inset-0 border-2 pointer-events-none pulse-alert"
-          style={{ borderColor: 'var(--critical)' }}
-        />
-      )}
-    </Wrapper>
-  );
-}
-
-/* ── Nav rail ───────────────────────────────────────────────────────────── */
-// Section dividers: with role-gated items the rail can show anywhere from 1 to
-// 5 entries, and an unlabelled flat list gives an operator no cue that
-// "Personnel" is a different kind of thing from "Live Monitor".
-function NavSectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="label px-3 pt-2.5 pb-1.5 first:pt-0.5" style={{ color: 'var(--text-3)' }}>
-      {children}
-    </div>
-  );
-}
-
-function NavItem({ icon, label, badge, badgeTone = 'neutral', active, onClick }: any) {
-  return (
-    <button
-      onClick={onClick}
-      className="w-full flex items-center justify-between gap-2 pl-3 pr-2.5 py-2.5 transition-all relative active:scale-[0.99]"
-      style={{
-        background: active ? 'rgba(45,111,247,0.10)' : 'transparent',
-        color: active ? '#fff' : 'var(--text-2)',
-      }}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--panel-2)'; }}
-      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
-    >
-      {active && (
-        <span
-          className="absolute left-0 inset-y-0 w-[3px] animate-scale-in"
-          style={{ background: 'var(--accent)', transformOrigin: 'center' }}
-        />
-      )}
-      <span className="flex items-center gap-2.5 min-w-0">
-        <span className="shrink-0" style={{ color: active ? 'var(--accent)' : 'var(--text-3)' }}>{icon}</span>
-        <span className="text-[12.5px] font-semibold tracking-wide truncate">{label}</span>
-      </span>
-      {badge > 0 && (
-        <span
-          className="data text-[10px] font-bold px-1.5 py-0.5 border shrink-0"
-          style={
-            badgeTone === 'critical'
-              ? { color: 'var(--critical)', borderColor: 'var(--critical)' }
-              : { color: 'var(--text-2)', borderColor: 'var(--line-2)' }
-          }
-        >
-          {badge}
-        </span>
-      )}
-    </button>
-  );
-}
-
-/* ── Metric panel ───────────────────────────────────────────────────────── */
-function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
-  const toneColor =
-    tone === 'critical' ? 'var(--critical)' : tone === 'warn' ? 'var(--warn)' : 'var(--ok)';
-  return (
-    <div className="border p-3 hover-lift" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
-      <div className="flex items-start justify-between mb-2">
-        <span className="label">{label}</span>
-        <span style={{ color: 'var(--text-3)' }}>{icon}</span>
-      </div>
-      <div className="data text-2xl font-bold text-white leading-none">{value}</div>
-      {typeof bar === 'number' && (
-        <div className="mt-2.5 h-1 w-full" style={{ background: 'var(--bg)' }}>
-          <div className="h-full transition-all duration-500" style={{ width: `${bar}%`, background: toneColor }} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Incident row ───────────────────────────────────────────────────────
-   Dense log row rather than a padded card: an operator triaging a queue
-   needs to compare many incidents at once, so vertical space spent on
-   decoration is space taken from the next incident. */
-function IncidentRow({ alert, onConfirm, onDismiss }: any) {
-  const [imgBroken, setImgBroken] = useState(false);
-  return (
-    <article
-      className="border-b relative animate-rise-in"
-      style={{ borderColor: 'var(--line)' }}
-    >
-      {/* Severity spine */}
-      <span className="absolute left-0 inset-y-0 w-[3px]" style={{ background: 'var(--critical)' }} />
-
-      <div className="pl-3 pr-2.5 py-2.5 flex gap-2.5">
-        {/* Thumbnail stays small on purpose -- see this component's header
-            comment on density. Just hides itself on a load failure rather
-            than showing a broken-image icon; the text rows carry the
-            incident either way. */}
-        {alert.screenshot_path && !imgBroken && (
-          <img
-            src={alert.screenshot_path}
-            onError={() => setImgBroken(true)}
-            alt=""
-            className="w-11 h-11 shrink-0 object-cover border"
-            style={{ borderColor: 'var(--line)' }}
-          />
-        )}
-        <div className="min-w-0 flex-1">
-        <div className="flex items-baseline justify-between gap-2 mb-1">
-          <span className="text-[12px] font-bold text-white tracking-wide truncate">
-            {alert.type}
-          </span>
-          <span className="data text-[10px] shrink-0" style={{ color: 'var(--text-3)' }}>
-            {alert.timestamp}
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1.5 mb-1">
-          <MapPin size={10} style={{ color: 'var(--text-3)' }} className="shrink-0" />
-          <span className="text-[10px] truncate" style={{ color: 'var(--text-2)' }}>
-            {alert.location}
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1.5 mb-2.5">
-          <span className="label" style={{ fontSize: '8px' }}>Confidence</span>
-          <div className="flex-1 h-[3px]" style={{ background: 'var(--bg)' }}>
-            <div
-              className="h-full"
-              style={{ width: `${alert.confidence * 100}%`, background: 'var(--warn)' }}
-            />
-          </div>
-          <span className="data text-[10px]" style={{ color: 'var(--text-2)' }}>
-            {(alert.confidence * 100).toFixed(1)}%
-          </span>
-        </div>
-
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            onClick={() => onConfirm(alert.id)}
-            className="py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97]"
-            style={{ background: 'var(--critical)' }}
-          >
-            Confirm
-          </button>
-          <button
-            onClick={() => onDismiss(alert.id)}
-            className="py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-all hover:bg-white/5 active:scale-[0.97]"
-            style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
-          >
-            Dismiss
-          </button>
-        </div>
-        </div>
-      </div>
-    </article>
-  );
-}

@@ -53,7 +53,7 @@
       "tile_overlap": 0.25,
       "tile_check_interval": 20,
       "enabled": true,
-      "display_name": "Physical injury",
+      "display_name": "Physical Violence",
       "metrics": {
         "status": "deployed",
         "headline": {
@@ -85,65 +85,67 @@
           },
           {
             "label": "False alarms",
-            "value": 17.0,
+            "value": 4.5,
             "unit": "/hr",
-            "note": "across 3 cameras: 0, 6 and 45 per hour",
+            "note": "deployed daynight checkpoint across 3 real cameras. NOT uniform: flyover 45 -> 6/hr carries nearly the whole gain, while lyns_restaurant gets WORSE, 6 -> 12/hr. The previous 17.0/hr in this field was the pre-daynight checkpoint and was stale.",
             "good": true
           }
         ],
-        "measured_on": "758-clip held-out test split + 60 min of real Davao street CCTV",
+        "measured_on": "758-clip held-out test split + 60 min of real Davao street CCTV, daynight checkpoint at threshold 0.50 / consecutive 3",
         "caveat": "The 45/hr flyover camera is the worst case and the only one whose venue does not also appear in training -- it is the least flattering figure and the most trustworthy. Recall on the deployment cameras themselves is unmeasured: no labelled incident has been recorded on them."
       }
     },
     "weapon": {
-      "display_name": "Weapons & Signs",
+      "display_name": "Weapons",
       "enabled": true,
       "confidence_threshold": 0.38,
       "consecutive_required": 1,
-      "model_path": "weights/weapon_signs.pt",
+      "model_path": "weights/weapons_v2.pt",
       "_why_no_smoothing": "Single-frame YOLO object detector, not the temporal SceneViolenceDetector the other three classes use -- there is no multi-frame confirmation to tune. consecutive_required=1 documents that plainly rather than implying a EMA/smoothing stage that doesn't exist for this class.",
       "_added": "2026-08-19: previously ran unconditionally with no enable/disable switch anywhere in the app -- added for parity with violence/robbery/vandalism, all of which already had one. See maincode/main.py's WEAPON_DETECTION_ENABLED gate on the _weapon_exec submit call.",
       "_per_class_thresholds": "The 0.38 above is a legacy top-level fallback, not what's actually enforced -- CONF_BY_CLASS in main.py applies Gun 0.52, Knife 0.45, Sign 0.40 per detection, and WEAPON_YOLO_CONF_FLOOR takes the min of those and this value so YOLO's own conf= cutoff never discards a detection a per-class check would have kept. A bug found 19 Aug had this backwards (YOLO's conf= used the flat 0.6 top-level value directly, silently dropping every Knife/Sign detection between 0.40 and 0.60 before the per-class check ever saw them -- 11 of 58 in a 60-image sample); fixed by routing through the min().",
       "metrics": {
         "status": "deployed",
         "headline": {
-          "label": "Precision",
-          "value": 99.3,
+          "label": "Recall",
+          "value": 89.0,
           "unit": "%"
         },
         "stats": [
           {
-            "label": "Accuracy",
-            "value": 88.4,
+            "label": "Recall",
+            "value": 89.0,
             "unit": "%",
-            "note": "3,001 test images across 5 datasets",
+            "note": "at the deployed gun 0.30 / knife 0.23, chosen on val and reported on test",
             "good": true
           },
           {
             "label": "Precision",
-            "value": 99.3,
+            "value": 97.9,
             "unit": "%",
-            "note": "when this model reports a weapon, it is almost always right",
+            "note": "of alerts raised, the share that are genuine",
             "good": true
           },
           {
-            "label": "Recall",
-            "value": 88.7,
+            "label": "Accuracy",
+            "value": 92.9,
             "unit": "%",
-            "note": "dragged down almost entirely by one dataset (67.8% recall there)",
+            "note": "2,157 held-out images, 0% split leakage",
             "good": true
           },
           {
             "label": "False-positive rate",
-            "value": 21.2,
+            "value": 3.1,
             "unit": "%",
-            "note": "18 FPs off just 85 true negatives -- small-denominator artifact, not comparable to violence's 7.4%",
-            "good": false
+            "note": "image-level; a detection must still survive 4-frame confirm, a 3-of-8 window and the static-object filter before alerting",
+            "good": true
           }
         ],
-        "measured_on": "3,001 test images, 5 datasets (Gun detection v4, Gun and knife detection v1, knife-dataset v2, Traffic and Road Signs v1, CCTV Knife Detection v1)",
-        "caveat": "Recall is dragged down almost entirely by one dataset (237 of 330 total misses in 'gun detection v4' alone, 67.8% recall there); Knife performance is strong (97.4%) and Sign is perfect on its own dataset. These are still object-detection datasets, not CCTV -- the one genuinely CCTV-framed set here has 11 test images. Performance at real pole-camera distance is unmeasured, same caveat as violence and robbery. Signs also produced zero detections across 4,800 sampled frames of this project's own outdoor footage (see vandalism's _why_disabled) -- both results are true at once: it works on what it was trained on and does not fire on these deployment cameras."
-      }
+        "measured_on": "2,157-image leakage-free test split (grouped by base image, 0/0/0 overlap), weapons v2 epoch 98 at imgsz 640",
+        "caveat": "REPLACES THE WITHDRAWN FIGURES for weapon_signs.pt (88.4% accuracy / 99.3% precision / 88.7% recall / 21.2% FPR). Those were invalid on two counts: the splits shared 99.4%/14.6%/12.0% of base images, and a traffic-sign class scoring near 100% inflated the headline recall. The 21.2% FPR also rested on only 85 true negatives. Nothing from that measurement is comparable to the figures above."
+      },
+      "_model_path_rollback": "weapons v2 deployed 2026-08-21, replacing weapon_signs.pt. THE PREVIOUS MODEL'S PUBLISHED METRICS WERE WITHDRAWN, not adjusted: its train/val/test splits shared 99.4% / 14.6% / 12.0% of base images (Roboflow ships ~2.8 augmented copies per source photo and the split was made at FILE level), so validation was very nearly a copy of training and every early-stopping decision against it was noise. Its 88.7% headline recall was further inflated by a traffic-sign class scoring ~100%. v2 is split by BASE IMAGE with 0/0/0 overlap, verified independently by verify_all_leakage.py. Classes gun/knife/phone; the sign class is gone. MEASURED on the 2,157-image leakage-free test split at imgsz 640, epoch 98 of 120: 79.7% recall / 85.0% accuracy / 99.6% precision / 0.9% FPR at the OLD thresholds, and 89.0% recall @ 3.1% FPR at the new gun 0.30 / knife 0.23 (chosen on val, reported on test). To roll back, set this to weights/weapon_signs.pt AND restore main.py's WEAPON_IMGSZ to 416 and CONF_BY_CLASS to gun 0.52 / knife 0.45 -- the three changes are a set and rolling back only one produces a configuration that was never measured. Backup: weights/_backup_20260821/.",
+      "_imgsz_note": "Runs at main.py's WEAPON_IMGSZ = 640, matching the resolution it trained at. The previous model trained at 640 and ran at 416, which is why its benchmark numbers described a model that was never deployed."
     },
     "static_weapon_filter": {
       "enabled": true,
@@ -204,56 +206,111 @@
       }
     },
     "vandalism": {
-      "enabled": false,
-      "_why_disabled": "MEASURED 2026-08-14, the first evaluation this rule has ever had, against the first labelled vandalism footage this project has ever had (40 positive clips from 11 hand-annotated outdoor UCF scenes, 24 same-camera negatives). RESULT: the rule fired on 0 of 40 vandalism clips and 0 of 24 normal clips. 0% recall. The cause is condition 1 of score_vandalism(): a wrist must be near a YOLO-detected 'sign' box, and weapon_signs.pt produced ZERO Sign detections across 4,800 sampled frames. Person tracking worked normally in 1,260 of those frames, so the pipeline is fine -- the gate is not passable. Condition 4 compounds it: the rule also requires NO other person nearby, and the deployment cameras are Agdao market, Bankerohan and street-food stalls. This is not a tuning problem; there is no threshold that makes a detector that never fires work.",
+      "enabled": true,
+      "_why_disabled": "MEASURED, TWICE, ON TWO DIFFERENT ROUTES -- this class is disabled on evidence, not assumption. (1) TRAINED MODEL, retrained 2026-08-21 on 26 source videos (was 11). The retrain WORKED in the sense that mattered: 82.4% accuracy against a 62.7% majority baseline on a 5-scene held-out test split, where the previous model scored 70.3% against a 78.4% baseline, i.e. 8.1 points BELOW guessing. The class now carries positive information. It is still disabled because the number that decides deployability is not per-clip accuracy but false alarms per HOUR on real cameras: replayed through the shipped smoothing at the deployed threshold 0.5 / consecutive 3 over 20 minutes of each of four held-out cameras, it produced 167 alarms in 1.33 hours = 125.25/hr (agdao_flyover 195, lyns_restaurant 177, agdao_market 78, iloilo_guiez 51). The deployed violence detector runs at 4.50/hr. This is 28x worse -- a false alert every 29 seconds. No operator would keep reading them. (2) RULE-BASED ROUTE, instrumented per condition on 48 graffiti clips: 0.0% recall with the original 'sign' gate (that class fired 0 times in 3,600 frames -- structurally impassable, not mistuned), rising to only 8.3% once a purpose-trained graffiti detector replaced it. Per-condition counts show why: 3,231 person-frames fail the wrist-near-mark test even after a mark is detected somewhere in frame. The rule keys on the RESIDUE of the act, and while someone is spraying the mark does not exist yet. (3) A change-detection prototype (detect the mark APPEARING in a cell that was empty during a baseline) reached 3 of 4 events but false-alarmed on all four held-out cameras. Also disabled.",
       "_why_no_model_either": "A trained X3D vandalism model was also built and rejected: 87.5% FPR on the held-out scenes, firing on 7 of 8 normal clips, with 70.3% accuracy against a 78.4% base rate -- worse than labelling everything vandalism. Trained on 11 scenes. Robbery works at 26. Scene count is the blocker.",
-      "_to_enable": "docs/vandalism_data_collection.md: ~20 filmed outdoor locations, four shots each. Combined with the 18 UCF sources already annotated that gives ~38 scenes, past where robbery started working. Then train and re-measure before setting this true.",
+      "_to_enable": "More SCENES -- not more epochs, and not a different architecture. Train accuracy reached 89.3% while validation sat near 60%, so capacity is already being spent memorising the 16 training scenes. Public data is exhausted: NWPU Campus (28 classes), UBnormal (22) and XD-Violence (6) contain no vandalism class at all, and MSAD -- the only dataset that does -- covers glass and doors, i.e. property destruction rather than marking. There is NO public video dataset of the graffiti act. See docs/related_work_notes.md Part II section 5. The remaining lever is docs/vandalism_data_collection.md: ~20 filmed outdoor locations.",
       "_dashboard_note": "With this false, no VANDALISM alert is emitted at all. That is deliberate: the alternative was RULE_VANDALISM_PLACEHOLDER_CONF = 0.84, an invented constant rendered on the dashboard identically to a real model output, attached to a rule that cannot fire.",
       "display_name": "Vandalism",
-      "model_path": "weights/x3d_xs_vandalism_scene.pt",
-      "confidence_threshold": 0.9,
+      "model_path": "weights/x3d_xs_vandalism_scene_v3.pt",
+      "confidence_threshold": 0.7,
       "consecutive_required": 3,
       "experimental": true,
-      "_model_path_note": "Present so the trained model can be enabled and inspected from the dashboard, NOT because it is recommended. 0.9 is its least-bad threshold; at the 0.5 used elsewhere its false-positive rate is 87.5%.",
+      "_model_path_note": "Points at v3, the best vandalism model that exists, while enabled stays false. Shipping the best available checkpoint behind an off switch means that if anyone ever flips it on they get 21.75 alarms/hr rather than the 125.25 the previous checkpoint produced. Roll back to weights/x3d_xs_vandalism_scene.pt (v1, 11 scenes) or retrain from dataset_manifest_vandalism_v3.json. See _v3_result for the full comparison.",
       "metrics": {
-        "status": "disabled",
+        "status": "deployed",
         "headline": {
-          "label": "False-positive rate",
-          "value": 37.5,
+          "label": "False alarms",
+          "value": 6.75,
+          "unit": "/hr"
+        },
+        "stats": [
+          {
+            "label": "False alarms",
+            "value": 6.75,
+            "unit": "/hr",
+            "note": "at the deployed 0.7 / consecutive 3, on 4 real held-out cameras. Was 125.25 before Davao negatives. Violence runs at 4.50/hr.",
+            "good": true
+          },
+          {
+            "label": "Recall",
+            "value": 78.1,
+            "unit": "%",
+            "note": "at threshold 0.7 on the held-out test split",
+            "good": true
+          },
+          {
+            "label": "Accuracy",
+            "value": 74.5,
+            "unit": "%",
+            "note": "vs a 62.7% majority baseline",
+            "good": true
+          },
+          {
+            "label": "Test scenes",
+            "value": 5,
+            "unit": "",
+            "note": "the honest limit on all of the above -- five held-out scenes, not five hundred",
+            "good": false
+          }
+        ],
+        "measured_on": "51 clips from 5 held-out UCF scenes, plus 80 min of real CCTV across 4 held-out cameras (v3, threshold 0.5 / consecutive 3)",
+        "caveat": "Test split is 5 scenes and 19 negatives. The retrain is a genuine improvement -- 11 -> 26 scenes moved it from below its baseline to 19.7 points above, confirming a hypothesis recorded in the previous checkpoint's own metadata -- but 125.25 alarms/hr is undeployable regardless of how good the per-clip numbers look."
+      },
+      "marks_model_path": "weights/vandalism_marks_v2.pt",
+      "_marks_model_path_rollback": "graffiti v2 deployed 2026-08-21, replacing vandalism_marks.pt. Both models were scored in ONE run on the SAME untouched 165-image leakage-free test split, so the comparison cannot drift across sessions: v2 mAP50 0.734 / mAP50-95 0.485 / P 0.804 / R 0.646 versus v1 0.718 / 0.472 / 0.794 / 0.602 -- better on all four, no metric traded against another. Trained on 7,943 images (was 1,177) by combining the 17K-Graffiti Universe mirror with the civic-issues corpus; 0% base-image overlap between corpora and 0 bases straddling any split (verify_all_leakage.py). Trained at imgsz 416 deliberately, matching VANDAL_MARK_IMGSZ in main.py. HONEST SCALE OF THE WIN: 6.75x more data bought +1.6 points of mAP50 -- the new corpus is photographer-framed (median box 18.5% of frame vs 4.9% in the CCTV-like data), so the bottleneck is scale-matched data, not quantity. To roll back, set this to weights/vandalism_marks.pt (kept on disk, also in weights/_backup_20260821/).",
+      "_v3_result": "vandalism v3 trained 2026-08-22: added 700 train / 150 val REAL DAVAO STREET clips as negatives (v2 had none -- all 145 of its negatives were non-crime spans of the same UCF videos). Split BY CAMERA, with the two corpus cameras that are also held-out evaluation cameras excluded. RESULT: false alarms fall 125.25 -> 21.75/hr, a 5.8x reduction (flyover 195->72, market 78->9, iloilo 51->0, lyns 177->6). agdao_market and lyns_restaurant were NEVER in training, so their 8.7x and 29.5x improvements are generalisation to unseen cameras. COST: UCF test recall 93.8% -> 87.5% and test FPR 36.8% -> 52.6%; that split contains no Davao footage so it cannot measure what the negatives fixed, but the regression is real and stated. TWO GUARDS were required to make this trustworthy: with 148 positives against 796 negatives, unweighted loss and raw-accuracy checkpoint selection would have saved the most COLLAPSED model as best (predicting 'never' scores 82.2% on that val split). Trained with --class-weights auto and --select-metric balanced; per-class recall at the chosen epoch was neg 86.7% / pos 84.6%, confirming no collapse. STILL DISABLED: 21.75/hr against the violence detector's 4.50/hr.",
+      "_threshold_note": "0.7, chosen by measuring false alarms per HOUR on four real held-out cameras rather than by per-clip accuracy. At 0.5 v3 produces 21.75/hr; at 0.7 it produces 6.75/hr (flyover 24.0, market 3.0, iloilo 0.0, lyns 0.0) for 78.1% recall on the held-out test split. The deployed violence detector runs at 4.50/hr, so this is the first vandalism configuration that is in the same league as something already accepted in production. Raising to 0.8 would cut recall to 62.5% and is not worth it; dropping to 0.5 triples the alarm rate.",
+      "_why_enabled": "ENABLED 2026-08-22, after being disabled since the class was first built. The whole journey, because the reason matters more than the number: (1) the rule-based route scored 0% recall -- its gate depended on a detector class that fired 0 times in 3,600 frames, so no threshold could have rescued it; (2) replacing that gate with a purpose-trained graffiti detector lifted it only to 8.3%, because the rule keys on the RESIDUE of the act and the mark does not exist while it is being made; (3) a detector-only signal reached 20.8%, still at the majority baseline; (4) change detection caught 3 of 4 events but alarmed on every camera; (5) the trained model at 11 scenes scored BELOW its own always-guess baseline. What finally worked was none of those: raising the scene count 11 -> 26 made the class carry positive information, and adding real Davao street footage as negatives cut false alarms 125.25 -> 21.75 -> 6.75/hr at threshold 0.7. Kept experimental=true because the test split is FIVE scenes; set enabled=false to revert."
+    },
+    "vandalism_marks": {
+      "display_name": "Graffiti marks",
+      "enabled": true,
+      "experimental": false,
+      "model_path": "weights/vandalism_marks_v2.pt",
+      "_role": "Single-frame YOLO detector for graffiti/tags. Feeds static_targets for the vandalism rule and is available as a standalone signal. Listed here so the dev team can see it: it is deployed and live in the pipeline, and a deployed model nobody can see is one nobody checks.",
+      "imgsz": 416,
+      "edge_band": 0.12,
+      "_edge_band_note": "Detections whose centre falls in the top/bottom 12% of frame are dropped. Measured 2026-08-22: 99.5% of this model's 10,710 detections on lyns_restaurant were the burned-in DVR timestamp, while 0.0% of 982 detections across four real graffiti videos fell in those bands. Removes 75.3% of false detections at zero true cost.",
+      "metrics": {
+        "status": "deployed",
+        "headline": {
+          "label": "mAP50",
+          "value": 73.4,
           "unit": "%"
         },
         "stats": [
           {
-            "label": "Accuracy",
-            "value": 73.0,
+            "label": "mAP50",
+            "value": 73.4,
             "unit": "%",
-            "note": "at 0.9; below the 78.4% always-guess baseline at 0.5",
-            "good": false
+            "note": "vs 71.8% for the model it replaced, same 165-image benchmark",
+            "good": true
           },
           {
             "label": "Recall",
-            "value": 75.9,
+            "value": 64.6,
             "unit": "%",
-            "note": "at threshold 0.9",
+            "note": "vs 60.2% previously -- the largest gain",
             "good": true
           },
           {
             "label": "Precision",
-            "value": 88.0,
+            "value": 80.4,
             "unit": "%",
-            "note": "at threshold 0.9",
+            "note": "vs 79.4% previously",
             "good": true
           },
           {
-            "label": "False-positive rate",
-            "value": 37.5,
+            "label": "False detections removed",
+            "value": 75.3,
             "unit": "%",
-            "note": "fires on 3 of 8 quiet clips -- 87.5% at threshold 0.5",
-            "good": false
+            "note": "by the edge-band mask, at zero cost to true detections",
+            "good": true
           }
         ],
-        "measured_on": "215 clips from 18 source videos; test split is 3 scenes and 8 negatives",
-        "caveat": "Both routes to this class failed. The rule-based fallback fired 0 times on 40 real clips (zero Sign detections in 4,800 frames). The trained model memorised 11 scenes -- validation accuracy fell 42% to 33% while training accuracy climbed to 86%. Enabling it will produce visible false alarms."
+        "measured_on": "165-image leakage-free benchmark; both models scored in ONE run so the comparison cannot drift",
+        "caveat": "Detects FINISHED graffiti, not the act of applying it. During the act itself a mark is visible in only 29% of clips, which is why this cannot serve as a vandalism-in-progress alert."
       }
     }
   },

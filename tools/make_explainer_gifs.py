@@ -174,7 +174,7 @@ def gif_detector_output(clip_path, model_key="violence"):
         mp = blk["scene_model_path"]
         thr = blk["scene_confidence_threshold"]
         con = blk["scene_consecutive_required"]
-        title = "PHYSICAL INJURY"
+        title = "PHYSICAL VIOLENCE"
     else:
         blk = cfg[model_key]
         mp = blk["model_path"]

@@ -36,6 +36,15 @@ sys.path.insert(0, str(REPO / "maincode"))
 _CONFIG = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
 _VIOLENCE_SCENE_WEIGHT = Path(_CONFIG["detection"]["violence"]["scene_model_path"]).name
 _ROBBERY_WEIGHT = Path(_CONFIG["detection"]["robbery"]["model_path"]).name
+# Both of these were hardcoded until 2026-08-22, which is the same defect the
+# comment below warns about -- the author fixed it for violence and robbery and
+# left it in place for the weapon detector, so deploying weapons_v2.pt made the
+# installer report a MISSING file that was present under a different name.
+_WEAPON_WEIGHT = Path(
+    _CONFIG["detection"].get("weapon", {}).get("model_path", "weapon_signs.pt")).name
+_MARKS_WEIGHT = Path(
+    _CONFIG["detection"].get("vandalism", {}).get(
+        "marks_model_path", "vandalism_marks.pt")).name
 
 GREEN, RED, YELLOW, RESET = "\033[92m", "\033[91m", "\033[93m", "\033[0m"
 
@@ -131,9 +140,10 @@ def main():
     # false MISSING for the correct, present file on every single install.
     required = {
         "yolo11s-pose.pt": "person + pose detection",
-        "weapon_signs.pt": "weapon / sign detection",
+        _WEAPON_WEIGHT: "weapon detection (gun / knife)",
         _VIOLENCE_SCENE_WEIGHT: "violence (scene mode)",
         _ROBBERY_WEIGHT: "robbery",
+        _MARKS_WEIGHT: "graffiti marks (vandalism static targets)",
     }
     wdir = REPO / "weights"
     for f, why in required.items():
@@ -146,6 +156,57 @@ def main():
         else:
             bad(f"{f:38} MISSING            {why}")
             problems.append(f"weights/{f}")
+
+    # ---- 4b. Will the INSTALLER actually contain these files? ------------
+    #
+    # BUG FOUND 2026-08-22: package.json's extraResources filter for weights/ is
+    # a hardcoded whitelist, and it still named weapon_signs.pt,
+    # vandalism_marks.pt and x3d_xs_vandalism_scene.pt after config.json had
+    # been repointed at weapons_v2.pt, vandalism_marks_v2.pt and
+    # x3d_xs_vandalism_scene_v3.pt. Every check above would pass -- the files
+    # exist in the repo -- while the built installer shipped a config naming
+    # weights that were not in the bundle.
+    #
+    # This compares the two lists directly, because they are maintained in
+    # different files by different edits and nothing else notices when they part.
+    print("\n[4b] Installer weight manifest (package.json vs config.json)")
+    try:
+        pkg = json.loads((REPO / "package.json").read_text(encoding="utf-8"))
+        entries = pkg.get("build", {}).get("extraResources", [])
+        wfilter = None
+        for e in entries:
+            if isinstance(e, dict) and e.get("from") == "weights":
+                wfilter = set(e.get("filter") or [])
+                break
+        if wfilter is None:
+            warn("no weights entry in extraResources -- installer ships no models")
+        else:
+            missing = {f for f in required if f not in wfilter}
+            if missing:
+                for f in sorted(missing):
+                    bad(f"{f:38} deployed but NOT in the installer bundle")
+                    problems.append(f"package.json extraResources: {f}")
+            else:
+                ok(f"all {len(required)} deployed weights are in the bundle")
+            # "referenced" means named ANYWHERE in config.json, not just in
+            # the required-core list: violence.model_path (track mode) and
+            # vandalism.model_path (deployed but disabled) are both legitimately
+            # bundled without being core, and flagging them would train whoever
+            # runs this to ignore the warning.
+            import re as _re
+            cfg_text = (REPO / "config.json").read_text(encoding="utf-8")
+            referenced = set(_re.findall(r"[\w.\-]+\.pt", cfg_text))
+            # yolo11s-pose.pt is resolved by a literal in main.py's
+            # load_model_with_fallback rather than from config, so it is
+            # correctly absent from config.json. Listed here so the warning
+            # means something when it does fire.
+            referenced.add("yolo11s-pose.pt")
+            extra = {f for f in wfilter
+                     if f.endswith(".pt") and f not in referenced}
+            for f in sorted(extra):
+                warn(f"{f:38} bundled but named nowhere in config.json")
+    except Exception as e:
+        warn(f"could not read package.json: {e}")
 
     # ---- 5. Database ----------------------------------------------------
     print("\n[5] Database")
@@ -186,7 +247,7 @@ def main():
             from x3d_violence_detector import SceneViolenceDetector
             t0 = time.time()
             pose = YOLO(str(wdir / "yolo11s-pose.pt"))
-            objd = YOLO(str(wdir / "weapon_signs.pt"))
+            objd = YOLO(str(wdir / _WEAPON_WEIGHT))
             viol = SceneViolenceDetector(
                 model_path=str(wdir / _VIOLENCE_SCENE_WEIGHT),
                 device=device)

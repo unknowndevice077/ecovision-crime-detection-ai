@@ -5,17 +5,18 @@ import { Brain, Gauge, Undo2, AlertTriangle } from 'lucide-react';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 import { useLiveChannel } from '../context/WebSocketContext';
 
-/* Read-only AI model status + "optimize for this machine" control.
+/* AI model status, on/off, + "optimize for this machine" control.
  *
- * Barangay-admin scoped, not DevTeam's full AI Models tab: this shows what's
- * running and lets the machine be sped up (a TensorRT engine build that
- * refuses to install unless it agrees with the .pt weights on real input --
- * see optimize_weights.py), but never lets a barangay account turn a
- * detector on or off. That stays DevTeam-only -- see backend.py's
- * MODEL_VIEW_ROLES comment for why the split sits exactly there: the
- * barangay owns the hardware this runs on (same reasoning as manage_cameras
- * being barangay-only), but "should this camera see less" is a different,
- * higher-stakes call than "how fast is the box under the camera."
+ * Barangay-admin scoped, not DevTeam's full AI Models tab: no threshold
+ * editing (that number is what the model's reported accuracy was measured
+ * at -- DevTeam-only, enforced server-side in set_detection_model, not just
+ * hidden here) and no per-model metrics breakdown. But turning a detector
+ * on or off IS a barangay-admin action, same as manage_cameras -- the
+ * barangay owns the camera and the hardware this actually runs on, and
+ * "should this camera see less" is exactly the kind of call that sits with
+ * whoever is accountable for that camera. (Was DevTeam-only until
+ * 2026-08-23; see backend.py's set_detection_model comment for why that
+ * changed.)
  */
 
 function authHeaders() {
@@ -31,7 +32,12 @@ type DetectionModel = {
   experimental: boolean;
   threshold: number;
   weights_present: boolean;
-  metrics?: { headline?: { label: string; value: number; unit: string }; stats?: ModelMetricStat[] };
+  metrics?: {
+    status?: string;
+    headline?: { label: string; value: number; unit: string };
+    stats?: ModelMetricStat[];
+    caveat?: string;
+  };
 };
 
 type OptimizeStep = {
@@ -62,6 +68,9 @@ export default function AiModelsPanel() {
   const [optimizeState, setOptimizeState] = useState<OptimizeState | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
+  const [modelBusy, setModelBusy] = useState<string | null>(null);
+  const [restartPending, setRestartPending] = useState(false);
+  const [confirmEnable, setConfirmEnable] = useState<DetectionModel | null>(null);
 
   const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
@@ -71,6 +80,37 @@ export default function AiModelsPanel() {
       if (res.ok) setModels((await res.json()).models || []);
     } catch { /* leave the previous list up */ }
     finally { setLoaded(true); }
+  };
+
+  const applyModelChange = async (m: DetectionModel, body: Record<string, unknown>) => {
+    setModelBusy(m.name);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/detection-models/${m.name}`, {
+        method: 'PATCH',
+        headers: { ...authHeaders() },
+        body: JSON.stringify(body),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { flash(d.detail || 'Could not save'); return; }
+      await fetchModels();
+      setRestartPending(true);
+      flash(`${m.display_name} ${body.enabled === false ? 'turned off' : 'turned on'} — restart detection to apply`);
+    } catch {
+      flash('Could not reach the server');
+    } finally {
+      setModelBusy(null);
+    }
+  };
+
+  // Same rule as the DevTeam panel: enabling a model whose own measurements
+  // missed the bar for deployment gets a confirmation step first. Turning
+  // one off never does -- that can only reduce output.
+  const requestToggle = (m: DetectionModel) => {
+    if (!m.enabled && (m.experimental || m.metrics?.status === 'disabled')) {
+      setConfirmEnable(m);
+      return;
+    }
+    applyModelChange(m, { enabled: !m.enabled });
   };
 
   const fetchOptimizeStatus = async () => {
@@ -126,15 +166,18 @@ export default function AiModelsPanel() {
                   <span className="text-[9.5px] uppercase tracking-wide truncate" style={{ color: 'var(--text-2)' }}>
                     {m.display_name}
                   </span>
-                  <span
-                    className="text-[8px] font-bold uppercase px-1 py-0.5 border shrink-0"
+                  <button
+                    onClick={() => requestToggle(m)}
+                    disabled={modelBusy === m.name || (!m.enabled && !m.weights_present)}
+                    title={!m.weights_present ? 'Model file is missing' : (m.enabled ? 'Turn off' : 'Turn on')}
+                    className="text-[8px] font-bold uppercase px-1 py-0.5 border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     style={{
                       color: m.enabled ? 'var(--ok)' : 'var(--text-3)',
                       borderColor: m.enabled ? 'var(--ok)' : 'var(--line-2)',
                     }}
                   >
                     {m.enabled ? 'Active' : 'Off'}
-                  </span>
+                  </button>
                 </div>
                 {m.metrics?.headline ? (
                   <div className="data text-base font-bold text-white leading-none">
@@ -149,8 +192,15 @@ export default function AiModelsPanel() {
           </div>
         )}
         <p className="text-[9.5px] leading-relaxed mt-3" style={{ color: 'var(--text-3)' }}>
-          Turning a model on or off is a DevTeam action. This view is read-only.
+          Click Active / Off to switch a model. Thresholds stay fixed — those are set to the
+          accuracy each model was measured at, not something to hand-tune here.
         </p>
+        {restartPending && (
+          <p className="text-[9.5px] leading-relaxed mt-2 pt-2 border-t" style={{ color: 'var(--warn)', borderColor: 'var(--line)' }}>
+            <span style={{ fontWeight: 700 }}>Restart required.</span> Detection reads this
+            once at startup — your change is saved but won't take effect until it restarts.
+          </p>
+        )}
       </div>
 
       {/* Optimize for this machine */}
@@ -232,6 +282,55 @@ export default function AiModelsPanel() {
           </div>
         )}
       </div>
+
+      {/* CONFIRM ENABLING A MODEL THAT MEASURED BADLY -- same gate as the
+          DevTeam panel, since this view can now flip the same switch. */}
+      {confirmEnable && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4" style={{ background: 'color-mix(in srgb, var(--bg) 85%, transparent)' }}>
+          <div className="border w-full max-w-md p-6" style={{ background: 'var(--panel)', borderColor: 'var(--warn)' }}>
+            <div className="flex items-center gap-2 mb-4 pb-3 border-b" style={{ borderColor: 'var(--panel-2)' }}>
+              <AlertTriangle size={14} style={{ color: 'var(--warn)' }} />
+              <span className="text-[10px] tracking-[0.15em] uppercase" style={{ color: '#fff' }}>
+                Turn on {confirmEnable.display_name}?
+              </span>
+            </div>
+            <p className="text-[10.5px] leading-relaxed mb-3" style={{ color: 'var(--text-2)' }}>
+              This model did not meet the bar for deployment. Its own measurements:
+            </p>
+            <div className="border divide-y mb-4" style={{ borderColor: 'var(--line)' }}>
+              {confirmEnable.metrics?.stats?.map(s => (
+                <div key={s.label} className="flex items-baseline justify-between px-3 py-2">
+                  <span className="text-[9.5px]" style={{ color: 'var(--text-2)' }}>{s.label}</span>
+                  <span className="text-[11px]" style={{ color: s.good === false ? 'var(--warn)' : '#fff' }}>
+                    {s.value}{s.unit}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {confirmEnable.metrics?.caveat && (
+              <p className="text-[9.5px] leading-relaxed mb-5" style={{ color: 'var(--text-2)' }}>
+                {confirmEnable.metrics.caveat}
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmEnable(null)}
+                className="flex-1 py-2.5 text-[10px] tracking-[0.12em] uppercase border"
+                style={{ borderColor: 'var(--line-2)', color: 'var(--text)' }}
+              >
+                Keep it off
+              </button>
+              <button
+                onClick={() => { const m = confirmEnable; setConfirmEnable(null); applyModelChange(m, { enabled: true }); }}
+                className="flex-1 py-2.5 text-[10px] tracking-[0.12em] uppercase border"
+                style={{ borderColor: 'var(--warn)', color: 'var(--warn)' }}
+              >
+                Turn it on anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -63,20 +63,54 @@ SECRET_KEY_ENV = os.environ.get("SECRET_KEY")
 # --- CONFIGURATION ENGINE SETUP ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ENV_CONFIG_PATH = os.path.join(BASE_DIR, f"config.{APP_ENV}.json")
-CONFIG_PATH = _ENV_CONFIG_PATH if os.path.exists(_ENV_CONFIG_PATH) else os.path.join(BASE_DIR, "config.json")
+_BASE_CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+CONFIG_PATH = _ENV_CONFIG_PATH if os.path.exists(_ENV_CONFIG_PATH) else _BASE_CONFIG_PATH
 
 WRITABLE_DIR = os.environ.get("ECOVISION_WRITABLE_DIR")
 if not WRITABLE_DIR:
     WRITABLE_DIR = os.path.join(os.path.expanduser("~"), "EcoVisionSentinelData")
 os.makedirs(WRITABLE_DIR, exist_ok=True)
 
-with open(CONFIG_PATH, 'r') as f:
+
+def _deep_merge(base, override):
+    """Overlay `override` onto `base` recursively, returning a new dict."""
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+# BUG FOUND 2026-08-22, chasing why the DevTeam AI-Models panel showed no
+# statistics for weapons, robbery or vandalism. Both of these layers used to
+# REPLACE sys_config outright rather than overlay it:
+#
+#   sys_config = json.load(config.<APP_ENV>.json)   # whole-file replacement
+#   sys_config = json.load(<writable>/config.json)  # replaced again
+#
+# APP_ENV defaults to "development" and config.development.json exists, so
+# config.json -- the file carrying every model path, threshold and metrics
+# block -- was never read. Both env files and the writable copy are older
+# skeletons that predate detection.weapon / detection.robbery /
+# detection.vandalism entirely, so the panel had nothing to render and every
+# consumer silently fell through to its .get(..., default).
+#
+# maincode/main.py had the identical defect and the identical fix; the two
+# loaders must stay in step or the detector and the API disagree about which
+# model is deployed.
+with open(_BASE_CONFIG_PATH, 'r', encoding='utf-8') as f:
     sys_config = json.load(f)
+
+if os.path.exists(_ENV_CONFIG_PATH):
+    with open(_ENV_CONFIG_PATH, 'r', encoding='utf-8') as f:
+        sys_config = _deep_merge(sys_config, json.load(f))
 
 WRITABLE_CONFIG_PATH = os.path.join(WRITABLE_DIR, "config.json")
 if os.path.exists(WRITABLE_CONFIG_PATH):
-    with open(WRITABLE_CONFIG_PATH, 'r') as f:
-        sys_config = json.load(f)
+    with open(WRITABLE_CONFIG_PATH, 'r', encoding='utf-8') as f:
+        sys_config = _deep_merge(sys_config, json.load(f))
 
 if CORS_ORIGINS_ENV:
     sys_config.setdefault("security", {})["cors_origins"] = [o.strip() for o in CORS_ORIGINS_ENV.split(",")]
@@ -695,6 +729,12 @@ class DevteamUserEdit(BaseModel):
     assignment: Optional[str] = None
     display_title: Optional[str] = None
     barangay_id: Optional[str] = None
+    # BUG FOUND 2026-08-23: this model had barangay_id but never station_id,
+    # so a PNP account's jurisdiction -- its "location" -- could be set at
+    # creation (DevteamCreateUser takes both) but never changed afterward.
+    # The edit UI had nowhere to send it even if this were here; both are
+    # fixed together, see DevteamView.tsx's edit-user modal.
+    station_id: Optional[str] = None
     role: Optional[str] = None
 
 class DevteamCreateUser(BaseModel):
@@ -2299,8 +2339,28 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
         fields.append("assignment = ?"); values.append(data.assignment)
     if data.display_title is not None:
         fields.append("display_title = ?"); values.append(data.display_title)
+    # Existence is checked explicitly for both -- this can't lean on the FK
+    # the way the comment used to claim: users.station_id/barangay_id are
+    # declared REFERENCES in schema_sqlite.sql, but SQLite does not enforce
+    # foreign keys unless "PRAGMA foreign_keys = ON" is run on the
+    # connection, which nothing here does (the default/no-DATABASE_URL
+    # path). Without this check, an edit could silently scope an account to
+    # a station or barangay id that doesn't exist -- no error, just an
+    # account whose jurisdiction never resolves to anything again.
     if data.barangay_id is not None:
-        fields.append("barangay_id = ?"); values.append(data.barangay_id.lower())
+        brgy = data.barangay_id.strip().lower()
+        cursor.execute("SELECT 1 FROM barangays WHERE id = ?", (brgy,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Unknown barangay '{brgy}'")
+        fields.append("barangay_id = ?"); values.append(brgy)
+    if data.station_id is not None:
+        stn = data.station_id.strip().lower()
+        cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (stn,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Unknown station '{stn}'")
+        fields.append("station_id = ?"); values.append(stn)
     if data.role is not None:
         if data.role not in ALL_ROLES:
             conn.close()
@@ -2415,12 +2475,32 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
 # clip buffer is half full is a much worse failure than one that needs a
 # restart. The response says so explicitly so the UI can tell the user.
 # ──────────────────────────────────────────────────────────────────────────────
-DETECTION_CLASSES = ("violence", "robbery", "vandalism", "weapon")
+# Five entries, not four. vandalism_marks is the graffiti/tag detector -- a
+# separately trained, separately deployed YOLO model with its own measured
+# numbers, which was invisible in this panel while being live in the pipeline.
+# A deployed model the dev team cannot see is one nobody checks.
+DETECTION_CLASSES = ("violence", "robbery", "vandalism", "vandalism_marks",
+                     "weapon")
 
 
 def _read_config_file():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    """config.json as the DETECTOR sees it: base + env overlay + writable.
+
+    Must mirror the layering in maincode/main.py exactly. Reading CONFIG_PATH
+    alone (which resolves to config.<APP_ENV>.json when that file exists) was
+    why this endpoint served no statistics for weapons, robbery or vandalism:
+    those blocks live only in config.json, and the env file replaced it.
+    """
+    with open(_BASE_CONFIG_PATH, "r", encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    for extra in (_ENV_CONFIG_PATH, WRITABLE_CONFIG_PATH):
+        if extra and os.path.exists(extra):
+            try:
+                with open(extra, "r", encoding="utf-8") as fh:
+                    cfg = _deep_merge(cfg, json.load(fh))
+            except Exception:
+                pass          # a malformed overlay must not blank the panel
+    return cfg
 
 
 @app.get("/api/devteam/detection-models")
@@ -2475,10 +2555,22 @@ async def set_detection_model(
     authorization: Optional[str] = Header(None),
 ):
     payload = require_auth(authorization)
-    require_role(payload, {"DEVTEAM"})
+    # BUG FOUND 2026-08-23: this was DEVTEAM-only, so the barangay that owns
+    # the camera and hardware this actually runs on had no way to turn a
+    # detector on or off -- every "should this camera see less" call sat
+    # with DevTeam regardless of whose site it affected. Widened to
+    # MODEL_VIEW_ROLES (same set that can already see the panel), matching
+    # manage_cameras' existing barangay-owns-its-hardware precedent. The
+    # threshold value stays DEVTEAM-only -- see the check below -- since
+    # that number is what the model's reported accuracy was measured at,
+    # not something to hand-tune per site.
+    require_role(payload, MODEL_VIEW_ROLES)
 
     if name not in DETECTION_CLASSES:
         raise HTTPException(status_code=404, detail=f"Unknown detection class: {name}")
+
+    if "threshold" in body and payload["role"] != "DEVTEAM":
+        raise HTTPException(status_code=403, detail="Only DevTeam can change a detection threshold")
 
     try:
         cfg = _read_config_file()
@@ -2525,12 +2617,29 @@ async def set_detection_model(
     # write here leaves config.json unparseable, which takes down the backend
     # AND the detector on next start -- the one file where a torn write is
     # unrecoverable without a manual edit.
-    tmp = CONFIG_PATH + ".tmp"
+    #
+    # BUG FOUND 2026-08-23: this used to write to CONFIG_PATH (the shipped
+    # BASE_DIR config.json), not WRITABLE_CONFIG_PATH. Every other writer in
+    # this file follows "write to the WRITABLE copy, never CONFIG_PATH" (see
+    # the comment above the secret_key write ~30 lines up) precisely because
+    # WRITABLE_CONFIG_PATH is what main.py's loader merges LAST -- i.e. it
+    # always wins. WRITABLE_CONFIG_PATH is seeded as a FULL snapshot of the
+    # merged config the first time the app ever runs, so once that snapshot
+    # exists, every key it contains (which is every key, since it's a full
+    # copy) permanently shadows the same key in the base config.json on every
+    # future load. Writing the toggle to CONFIG_PATH instead of
+    # WRITABLE_CONFIG_PATH meant the change was saved to a file whose value
+    # for "enabled" the loader never actually looks at again once the
+    # snapshot exists -- so a detector switched off would flip back on (the
+    # snapshot's original "enabled": true winning the merge) the next time
+    # the app was closed and reopened, exactly undoing the toggle instead of
+    # merely requiring a restart to apply it.
+    tmp = WRITABLE_CONFIG_PATH + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
-        os.replace(tmp, CONFIG_PATH)
+        os.replace(tmp, WRITABLE_CONFIG_PATH)
     except Exception as e:
         try:
             os.remove(tmp)
@@ -2571,11 +2680,18 @@ _optimize_state = {
     "error": None,
     "started_at": None,
     "finished_at": None,
+    "cancelled": False,
 }
 _optimize_lock = asyncio.Lock()
+# The live subprocess handle for whatever optimize run is in progress, so
+# /optimize_weights/cancel has something to terminate. Deliberately NOT a key
+# in _optimize_state -- that dict is returned verbatim as the /status
+# response body, and a Process object isn't JSON-serializable.
+_optimize_proc: "Optional[asyncio.subprocess.Process]" = None
 
 
 async def _run_optimize_weights(revert: bool):
+    global _optimize_proc
     args = [sys.executable, os.path.join(BASE_DIR, "optimize_weights.py")]
     if revert:
         args.append("--revert")
@@ -2583,6 +2699,17 @@ async def _run_optimize_weights(revert: bool):
         *args, cwd=BASE_DIR,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
+    _optimize_proc = proc
+    # optimize_weights.py's build_yolo_engine/build_x3d_engine write the
+    # .engine straight to its final path, so a step killed mid-"building" can
+    # leave a truncated file behind -- exactly the case optimize_weights.py's
+    # own except-block already guards against on a measured failure (it
+    # unlinks the engine rather than leave a broken file for the loader to
+    # trip on next launch). This tracks the stem of whatever step last
+    # reported "building" with no terminal event since, so the finally block
+    # below can apply that same cleanup when this run stops abnormally
+    # (cancelled, or the pipe just closes).
+    in_flight_stem = None
     try:
         while True:
             line = await proc.stdout.readline()
@@ -2600,6 +2727,11 @@ async def _run_optimize_weights(revert: bool):
                 _optimize_state["preconditions"] = event
             elif kind == "step":
                 _optimize_state["steps"].append(event)
+                state = event.get("state")
+                if state == "building":
+                    in_flight_stem = event.get("stem")
+                elif state in ("done", "failed", "skipped"):
+                    in_flight_stem = None
             elif kind == "summary":
                 _optimize_state["summary"] = event
             elif kind == "reverted":
@@ -2611,11 +2743,21 @@ async def _run_optimize_weights(revert: bool):
         _optimize_state["error"] = f"{type(e).__name__}: {e}"
         returncode = -1
     finally:
+        cancelled = bool(_optimize_state.get("cancel_requested"))
+        if in_flight_stem:
+            try:
+                os.remove(os.path.join(BASE_DIR, "weights", f"{in_flight_stem}.engine"))
+            except OSError:
+                pass
         _optimize_state["running"] = False
+        _optimize_state["cancelled"] = cancelled
+        _optimize_state["cancel_requested"] = False
         _optimize_state["returncode"] = returncode
         _optimize_state["finished_at"] = datetime.utcnow().isoformat()
+        _optimize_proc = None
         await manager.broadcast({"channel": "optimize_weights", "event": "finished",
                                   "returncode": returncode,
+                                  "cancelled": cancelled,
                                   "error": _optimize_state["error"]})
 
 
@@ -2628,7 +2770,8 @@ async def start_optimize_weights(authorization: Optional[str] = Header(None)):
         if _optimize_state["running"]:
             raise HTTPException(status_code=409, detail="An optimize run is already in progress")
         _optimize_state.update(running=True, steps=[], summary=None, preconditions=None,
-                                returncode=None, error=None,
+                                returncode=None, error=None, cancelled=False,
+                                cancel_requested=False,
                                 started_at=datetime.utcnow().isoformat(), finished_at=None)
         asyncio.create_task(_run_optimize_weights(revert=False))
 
@@ -2644,11 +2787,44 @@ async def revert_optimize_weights(authorization: Optional[str] = Header(None)):
         if _optimize_state["running"]:
             raise HTTPException(status_code=409, detail="An optimize run is already in progress")
         _optimize_state.update(running=True, steps=[], summary=None, preconditions=None,
-                                returncode=None, error=None,
+                                returncode=None, error=None, cancelled=False,
+                                cancel_requested=False,
                                 started_at=datetime.utcnow().isoformat(), finished_at=None)
         asyncio.create_task(_run_optimize_weights(revert=True))
 
     return {"status": "started"}
+
+
+@app.post("/api/devteam/optimize_weights/cancel")
+async def cancel_optimize_weights(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, MODEL_VIEW_ROLES)
+
+    async with _optimize_lock:
+        if not _optimize_state["running"] or _optimize_proc is None:
+            raise HTTPException(status_code=409, detail="No optimize run is in progress")
+        proc = _optimize_proc
+        _optimize_state["cancel_requested"] = True
+
+    # terminate() outside the lock -- _run_optimize_weights holds nothing
+    # while awaiting proc output, so this doesn't need the lock, and killing
+    # a subprocess is exactly the kind of call that shouldn't be made while
+    # holding one. On Windows, Process.terminate() calls TerminateProcess --
+    # there is no graceful SIGTERM-equivalent stop to ask a console app for
+    # there, so this IS the hard stop, not a polite request that a wait/kill
+    # escalation follows. The wait below just confirms it actually exited
+    # before responding, so the dashboard's "cancelling..." doesn't linger
+    # past the point where the process is really gone.
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        pass
+
+    return {"status": "cancelling"}
 
 
 @app.get("/api/devteam/optimize_weights/status")

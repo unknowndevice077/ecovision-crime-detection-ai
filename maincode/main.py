@@ -127,14 +127,51 @@ WORKSPACE_ROOT = os.path.dirname(BASE_DIR)
 # env-specific file isn't shipped. Previously this always loaded config.json
 # unconditionally, so APP_ENV=production silently had zero effect here --
 # the detector container was running dev settings in "production".
+def _deep_merge(base, override):
+    """Recursively overlay `override` onto `base`, returning a new dict.
+
+    Defined here because config loading needs it immediately below.
+    """
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 APP_ENV = os.environ.get("APP_ENV", "development")
 _ENV_CONFIG_PATH = os.path.join(WORKSPACE_ROOT, f"config.{APP_ENV}.json")
-SHIPPED_CONFIG_PATH = _ENV_CONFIG_PATH if os.path.exists(_ENV_CONFIG_PATH) else os.path.join(WORKSPACE_ROOT, "config.json")
-if not os.path.exists(SHIPPED_CONFIG_PATH):
-    sys.exit(f"❌ Central configuration file not found at workspace root: {SHIPPED_CONFIG_PATH}")
+_BASE_CONFIG_PATH = os.path.join(WORKSPACE_ROOT, "config.json")
 
-with open(SHIPPED_CONFIG_PATH, 'r') as f:
+# BUG FOUND 2026-08-21 by running the pipeline end-to-end and reading which
+# weights it reported loading. This used to be:
+#
+#   SHIPPED_CONFIG_PATH = _ENV_CONFIG_PATH if exists else config.json
+#
+# i.e. config.<APP_ENV>.json REPLACED config.json rather than overlaying it.
+# APP_ENV defaults to "development" and config.development.json exists, so
+# config.json -- the file carrying every model path, threshold, metric block
+# and rollback note in this project -- was never read at all in a normal dev
+# run. Both env files are stale skeletons missing detection.weapon,
+# detection.robbery and detection.vandalism entirely, so all three fell through
+# to hardcoded defaults. Editing config.json changed nothing, silently.
+#
+# Now: config.json is the BASE (structure, defaults, everything documented),
+# and config.<APP_ENV>.json is an OVERLAY carrying only what that environment
+# genuinely differs on. A key added to the base reaches every environment.
+if not os.path.exists(_BASE_CONFIG_PATH):
+    sys.exit(f"❌ Central configuration file not found at workspace root: {_BASE_CONFIG_PATH}")
+
+with open(_BASE_CONFIG_PATH, 'r', encoding='utf-8') as f:
     sys_config = json.load(f)
+
+SHIPPED_CONFIG_PATH = _BASE_CONFIG_PATH
+if os.path.exists(_ENV_CONFIG_PATH):
+    with open(_ENV_CONFIG_PATH, 'r', encoding='utf-8') as f:
+        sys_config = _deep_merge(sys_config, json.load(f))
+    SHIPPED_CONFIG_PATH = _ENV_CONFIG_PATH
 
 WRITABLE_DIR = os.environ.get("ECOVISION_WRITABLE_DIR")
 if not WRITABLE_DIR:
@@ -149,15 +186,34 @@ os.makedirs(WRITABLE_DIR, exist_ok=True)
 # so both processes agree on secret_key / persisted settings; otherwise
 # seed it from the shipped copy.
 CONFIG_PATH = os.path.join(WRITABLE_DIR, "config.json")
+
+
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, 'r') as f:
-        sys_config = json.load(f)
+        _writable_config = json.load(f)
+    # shipped = base (structure + any newly added keys),
+    # writable = override (whatever this machine actually changed)
+    sys_config = _deep_merge(sys_config, _writable_config)
 else:
     with open(CONFIG_PATH, "w") as f:
         json.dump(sys_config, f, indent=2)
 
 POSE_IMGSZ          = 416
-WEAPON_IMGSZ        = 416
+# RAISED 416 -> 640 on 2026-08-21, because weapons v2 trained at 640 and a
+# detector run at a resolution it was not benchmarked at is not the model whose
+# numbers were published. Measured on the same 2,157-image held-out test split,
+# same checkpoint, thresholds re-selected on val for each resolution:
+#
+#             baseline recall    @<=3% FPR budget    val->test FPR drift
+#   imgsz 416     76.1%          88.3% @ 5.3%        4.9% -> 7.2%
+#   imgsz 640     79.7%          89.0% @ 3.1%        4.9% -> 4.6%
+#
+# 640 gives MORE recall at LOWER false-positive rate -- not a trade. The drift
+# column is the deciding one: at 416 the threshold chosen on validation
+# overshoots its budget badly on test, i.e. the confidence distribution is not
+# stable at that resolution. Any TensorRT engine must be rebuilt at 640;
+# optimize_weights.py reads this constant, so it follows automatically.
+WEAPON_IMGSZ        = 640
 WEAPON_CONF         = sys_config["detection"].get("confidence_threshold", 0.38)
 # Previously had no switch at all -- weapon detection ran unconditionally
 # every DETECTION_INTERVAL frames regardless of config. Added 2026-08-19 for
@@ -169,6 +225,32 @@ DETECTION_INTERVAL  = sys_config["detection"].get("detection_interval", 5)
 VANDAL_MARK_IMGSZ = 416
 VANDAL_MARK_CONF  = sys_config["detection"].get("vandalism", {}).get(
     "marks_confidence_threshold", 0.5)
+
+# Ignore mark detections whose centre falls in the top or bottom band of the
+# frame. MEASURED 2026-08-22, not assumed -- a frame from lyns_restaurant was
+# rendered with its detections drawn and the box sat squarely on the burned-in
+# DVR timestamp ("12-08-2026 08:04:44 PM"). White text on a dark surface is, to
+# a detector trained on photographs of tags, indistinguishable from graffiti.
+#
+# Detection centres by vertical position, over 10,800 sampled observations per
+# real camera and every sampled frame of the four annotated graffiti videos:
+#
+#                             detections   in top/bottom 12%
+#   Vandalism019/027/048/049       982            0.0%     <- real graffiti
+#   lyns_restaurant              10710           99.5%     <- the timestamp
+#   agdao_flyover                 1210           15.6%
+#   agdao_market / iloilo         1512            0.0%
+#
+# Masking the bands removes 99.5% of lyns_restaurant's false detections and
+# costs ZERO true detections across all four graffiti videos. It also explains
+# the change-detection prototype's failure: a detector firing on static
+# burned-in text in every frame makes "a mark appeared where there was none"
+# trigger on detector flicker rather than on new paint.
+#
+# 0.0 disables the mask. Raise it only with evidence gathered the same way --
+# by rendering a frame with its detections drawn and looking at it.
+VANDAL_MARK_EDGE_BAND = sys_config["detection"].get("vandalism", {}).get(
+    "marks_edge_band", 0.12)
 
 # There is deliberately no POSE_CONF here. A `POSE_CONF = 0.30` constant used
 # to sit at this spot, never passed to anything -- and wiring it into the
@@ -186,27 +268,52 @@ VANDAL_MARK_CONF  = sys_config["detection"].get("vandalism", {}).get(
 # If pose detection needs tuning, tune the tracker (track_buffer,
 # new_track_thresh in the botsort.yaml passed via tracker=), not conf.
 
-# NOTE: "phone" removed from WEAPON_CLASSES / CONF_BY_CLASS below.
-# The deployed weapon_signs model only outputs Gun/Knife/Sign right now.
-# "phone" was dead-code leftover from planning for the deferred
-# Phone/Wallet/SprayCan class decision -- re-add it here ONLY once it's
-# actually a trained class in weapon_signs.pt, otherwise it's a silent
-# no-op class name that can never match a real detection.
-WEAPON_CLASSES   = {"gun", "knife", "pistol", "firearm", "handgun", "rifle"}
+# UPDATED 2026-08-21 for weapons v2. This model emits exactly three classes:
+# gun, knife, phone. Every name below is one it can actually produce.
+#
+# NAMES REMOVED, and why -- verify_deployment.py flags a name main.py looks
+# for that the loaded model cannot emit, because that is a silent no-op: it
+# never matches, never errors, and reads like working coverage.
+#   pistol / firearm / handgun / rifle
+#       vestigial aliases from the source corpora. merge_weapons.py maps all
+#       of them to "Gun", so no merged model has ever emitted them.
+#   sign
+#       weapons v2 has no sign class. The old one fired 0 times in 4,800
+#       measured frames (it detects ROAD signs, not walls) while inflating the
+#       previous model's headline recall to 88.7%. static_targets now comes
+#       from the graffiti detector instead -- see _run_vandal_mark_detection.
+#
+# "phone" stays OUT of WEAPON_CLASSES deliberately, and this is now a real
+# trained class rather than the dead name it used to be. The model detects
+# phones so it stops calling them guns; main.py drops the detection, so a
+# correctly-detected phone is a TRUE NEGATIVE that raises no alert.
+WEAPON_CLASSES   = {"gun", "knife"}
 VIOLENCE_CLASSES = {"violence", "fight", "assault"}
-SIGN_CLASSES     = {"sign"}   
+SIGN_CLASSES     = set()   # weapons v2 has no sign class -- see above
 
+# THRESHOLDS CHOSEN BY MEASUREMENT 2026-08-21, not inherited.
+# sweep_weapon_thresholds.py caches per-image max confidence in one inference
+# pass, then evaluates every threshold pair offline. Selected on the VAL split
+# and reported on TEST, because choosing an operating point on the split you
+# then report manufactures an improvement with no file moving between splits.
+#
+# On the 2,157-image held-out test split, weapons v2 (epoch 98) at imgsz 640:
+#     gun 0.52 / knife 0.45  (inherited)   79.7% recall @ 0.9% FPR
+#     gun 0.30 / knife 0.23  (chosen)      89.0% recall @ 3.1% FPR
+# +9.3 points of recall for 2.2 points of FPR. The old values were tuned for a
+# DIFFERENT, WORSE model that needed high thresholds to suppress its own false
+# positives; v2 is precise enough that it does not.
+#
+# 3.1% is an IMAGE-level rate and overstates live behaviour: a detection must
+# still survive ARMED_CONFIRM_FRAMES=4, the 3-of-8 evidence window, and the
+# static-object filter (which removed 97.4%/81.0%/78.1% of false weapons on
+# three real feeds) before any alert reaches an operator.
 CONF_BY_CLASS = {
-    "gun":      0.52,
-    "pistol":   0.52,
-    "firearm":  0.52,
-    "handgun":  0.52,
-    "rifle":    0.52,
-    "knife":    0.45,
+    "gun":      0.30,
+    "knife":    0.23,
     "violence": 0.40,
     "fight":    0.40,
     "assault":  0.40,
-    "sign":     0.40,
 }
 # BUG FOUND 2026-08-19, computing weapon_signs.pt's first-ever confusion
 # matrix: _run_weapon_detection passed WEAPON_CONF (0.6, the top-level
@@ -471,11 +578,46 @@ def load_model_with_fallback(engine_name: str, pt_name: str, task: str, weights_
         print(f"❌ Failed to load {pt_name}: {str(e)}")
         raise
 
+def _resolve_weight(value, default):
+    """Accept either a bare filename or a workspace-relative path.
+
+    Two conventions are in use in config.json and they disagreed silently.
+    detection.violence.model_path is written "weights/x3d_...pt" (relative to
+    the workspace root), while detection.vandalism.marks_model_path was
+    consumed as a BARE filename joined onto WEIGHTS_DIR. Feeding a
+    "weights/..."-style value into the second produced
+    <root>/weights/weights/<file>, which does not exist -- and because the
+    caller only checks existence before falling back to a default, the wrong
+    model loaded with no error and a reassuring log line.
+
+    Accepting both forms removes the trap rather than documenting it.
+    """
+    v = value or default
+    if "/" in v or os.path.sep in v:
+        cand = os.path.join(WORKSPACE_ROOT, v.replace("/", os.path.sep))
+        if os.path.exists(cand):
+            return cand
+        v = os.path.basename(v)          # fall through to WEIGHTS_DIR
+    return os.path.join(WEIGHTS_DIR, v)
+
+
 pose_model, pose_file_name = load_model_with_fallback(
     "yolo11s-pose.engine", "yolo11s-pose.pt", "pose", WEIGHTS_DIR
 )
+
+# WEAPON MODEL NAME NOW COMES FROM CONFIG, not a literal.
+# BUG FOUND 2026-08-21 by running the pipeline end-to-end and reading which
+# weights it reported loading: this call hardcoded "weapon_signs.pt", so
+# detection.weapon.model_path in config.json was decorative -- editing it
+# changed nothing, exactly like the documented-dead database.path key. The
+# system loaded the old detector no matter what the config said, and nothing
+# anywhere reported a conflict.
+_WEAPON_PT = os.path.basename(_resolve_weight(
+    sys_config["detection"].get("weapon", {}).get("model_path"),
+    "weapon_signs.pt"))
+_WEAPON_ENGINE = os.path.splitext(_WEAPON_PT)[0] + ".engine"
 violence_model, weapon_file_name = load_model_with_fallback(
-    "weapon_signs.engine", "weapon_signs.pt", "detect", WEIGHTS_DIR
+    _WEAPON_ENGINE, _WEAPON_PT, "detect", WEIGHTS_DIR
 )
 
 # Vandalism-marks detector (graffiti/tag). Separate small YOLO model, not part
@@ -484,8 +626,9 @@ violence_model, weapon_file_name = load_model_with_fallback(
 # because this is a custom weight name Ultralytics has no hub fallback for; a
 # missing file must disable the signal, not attempt a network download that
 # will just fail.
-_VANDAL_MARKS_PATH = os.path.join(WEIGHTS_DIR, sys_config["detection"].get("vandalism", {})
-                                   .get("marks_model_path", "vandalism_marks.pt"))
+_VANDAL_MARKS_PATH = _resolve_weight(
+    sys_config["detection"].get("vandalism", {}).get("marks_model_path"),
+    "vandalism_marks.pt")
 vandal_mark_model = None
 if os.path.exists(_VANDAL_MARKS_PATH):
     try:
@@ -535,6 +678,20 @@ def _pip_crop_from_box(frame, p_box, pad_frac: float = 0.25):
     return frame[y1:y2, x1:x2].copy()
 
 
+# BUG FOUND 2026-08-23: weapon (WEAPON_DETECTION_ENABLED), robbery
+# (ROBBERY_ON) and vandalism (VANDALISM_ON) all gate their model calls AND
+# their alert emission on detection.<class>.enabled -- violence never did.
+# The DevTeam "AI Models" toggle wrote enabled:false to config.json (and,
+# separately, PATCHed the right file after the WRITABLE_CONFIG_PATH fix
+# earlier the same day), the panel showed "Off", and the violence detector
+# kept running and alerting exactly as before regardless, because nothing in
+# this file ever read detection.violence.enabled. Absent means on, matching
+# backend.py's own "violence has no explicit flag historically -- absent
+# means on" comment on the API side.
+VIOLENCE_ON = bool(sys_config.get("detection", {}).get("violence", {}).get("enabled", True))
+if not VIOLENCE_ON:
+    print("🚫 Physical Violence: disabled via config.json detection.violence.enabled")
+
 SCENE_MODE_ON = VIOLENCE_MODE in ("scene", "tiled", "both")
 scene_detector = None
 if SCENE_MODE_ON:
@@ -570,9 +727,35 @@ else:
 VANDALISM_ON = bool(sys_config.get("detection", {})
                     .get("vandalism", {}).get("enabled", False))
 if not VANDALISM_ON:
-    print("🚫 Vandalism: disabled -- see config detection.vandalism._why_disabled "
-          "(the sign-detector bug that made the rule score 0% recall is now fixed; "
-          "pending held-out validation of vandalism_marks.pt before re-enabling)")
+    print("🚫 Vandalism: disabled -- see config detection.vandalism._why_disabled. "
+          "v3 (deployed here, off) measures 21.75 false alarms/hr on four real "
+          "held-out cameras, down from 125.25 once real Davao street footage was "
+          "added as negatives. The violence detector runs at 4.50/hr, so this is "
+          "still ~5x too noisy to put in front of an operator.")
+
+# VANDALISM MODEL, wired 2026-08-22. Until now detection.vandalism.model_path
+# was named in config and loaded by nothing: VANDALISM_ON gated only the
+# rule-based path, so enabling the class ran an 8.3%-recall rule while the
+# config advertised the trained model's numbers. Same shape as the weapon
+# model_path key that was decorative until today.
+_VANDAL_CFG = sys_config.get("detection", {}).get("vandalism", {})
+vandalism_detector = None
+if VANDALISM_ON and _VANDAL_CFG.get("model_path"):
+    try:
+        vandalism_detector = SceneViolenceDetector(
+            model_path=os.path.normpath(os.path.join(
+                os.path.dirname(BASE_DIR), _VANDAL_CFG["model_path"])),
+            device=TARGET_DEVICE,
+            threshold=float(_VANDAL_CFG.get("confidence_threshold", 0.7)),
+            consecutive=int(_VANDAL_CFG.get("consecutive_required", 3)))
+        print(f"🎨 Vandalism model: {_VANDAL_CFG['model_path']} "
+              f"@ {_VANDAL_CFG.get('confidence_threshold', 0.7)} "
+              f"(6.75 false alarms/hr measured on 4 held-out cameras)")
+    except Exception as e:
+        # Same policy as robbery: loud, but never take the rest down.
+        print(f"⚠️  Vandalism model failed to load ({e}); "
+              f"the rule-based path remains available")
+        vandalism_detector = None
 
 _ROBBERY_CFG = sys_config.get("detection", {}).get("robbery", {})
 ROBBERY_ON = bool(_ROBBERY_CFG.get("enabled", False))
@@ -832,11 +1015,15 @@ def _run_vandal_mark_detection(frame_copy):
     res = vandal_mark_model.predict(frame_copy, verbose=False, conf=VANDAL_MARK_CONF,
                                      imgsz=VANDAL_MARK_IMGSZ, half=USE_CUDA)
     boxes = []
+    fh = frame_copy.shape[0]
     if res[0].boxes:
         for box in res[0].boxes:
             raw_conf = float(box.conf[0].cpu())
             if raw_conf >= VANDAL_MARK_CONF:
                 xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                cy = (int(xyxy[1]) + int(xyxy[3])) / 2.0 / max(fh, 1)
+                if cy < VANDAL_MARK_EDGE_BAND or cy > 1.0 - VANDAL_MARK_EDGE_BAND:
+                    continue          # DVR overlay band -- see constant
                 boxes.append(xyxy)
     with _vandal_mark_lock:
         _vandal_mark_cache["boxes"] = boxes
@@ -1935,12 +2122,16 @@ while _running:
     # person. The detector rate-limits itself to one real forward every
     # X3D_CHECK_INTERVAL frames and returns its cached verdict in between.
     scene_violent, scene_conf = (False, 0.0)
-    if SCENE_MODE_ON:
+    if SCENE_MODE_ON and VIOLENCE_ON:
         scene_violent, scene_conf = scene_detector.update(frame, frame_count)
 
     # Robbery runs on the same frame, with its own threshold and confirmation
     # state. Independent of the violence verdict on purpose: a robbery
     # involving assault should raise both, not compete for one label.
+    vandal_hit, vandal_conf = (False, 0.0)
+    if VANDALISM_ON and vandalism_detector is not None:
+        vandal_hit, vandal_conf = vandalism_detector.update(frame, frame_count)
+
     robbery_hit, robbery_conf = (False, 0.0)
     if ROBBERY_ON and robbery_detector is not None:
         robbery_hit, robbery_conf = robbery_detector.update(frame, frame_count)
@@ -2015,18 +2206,27 @@ while _running:
             # vandalism rules, which are unaffected. "both" still runs the
             # per-track model so its overlay stays available for comparison,
             # but the scene verdict is what decides.
-            if SCENE_MODE_ON:
+            is_violent_x3d, x3d_conf = (False, 0.0)
+            if VIOLENCE_ON and SCENE_MODE_ON:
                 if VIOLENCE_MODE == "both":
                     x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
                     _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
                 is_violent_x3d, x3d_conf = scene_violent, scene_conf
-            else:
+            elif VIOLENCE_ON:
                 is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
                 _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
                 _draw_x3d_crop_box(frame, x3d_detector.get_crop_box(tid), is_violent_x3d, x3d_conf)
 
             in_vbox = max((_vbox_overlap_ratio(p_box, vb) for vb in live_vboxes), default=0.0) >= VBOX_ASSAULT_THRESHOLD
-            is_assault = is_violent_x3d or in_vbox
+            # Gated on VIOLENCE_ON as a whole, not just is_violent_x3d, so
+            # turning the Physical Violence detector off actually silences
+            # ASSAULT alerts regardless of source -- including in_vbox, which
+            # comes from the weapon model's own "violence zone" class (see
+            # _run_weapon_detection) and would otherwise keep raising ASSAULT
+            # through a detector the dashboard shows as Off. ARMED THREAT is
+            # untouched here -- that's has_weapon's call, gated by its own
+            # WEAPON_DETECTION_ENABLED flag below.
+            is_assault = VIOLENCE_ON and (is_violent_x3d or in_vbox)
 
             override_confirm = max(1, ASSAULT_CONFIRM_FRAMES - 1) if (crowded and in_vbox) else None
             state = ts.update(is_assault, has_weapon, frame_count, override_assault_confirm=override_confirm)
@@ -2149,6 +2349,19 @@ while _running:
             triggered_alerts_this_frame.append({"id": incident_id,
                                                 "conf": float(robbery_conf),
                                                 "event": "ROBBERY"})
+
+    # ─── VANDALISM MODEL ALERT ───
+    # Outside the pose block for the same reason as robbery: property damage is
+    # often one person at a wall or a vehicle, which is exactly what a tracker
+    # drops. The rule-based path below is kept as a separate, independent
+    # signal -- it measured 8.3% recall at 0% FPR, so it adds little but costs
+    # nothing and fires on a different kind of evidence.
+    if VANDALISM_ON and vandalism_detector is not None:
+        incident_id = _episode_incident_id("vandalism-model", vandal_hit, frame_count)
+        if incident_id:
+            triggered_alerts_this_frame.append({"id": incident_id,
+                                                "conf": float(vandal_conf),
+                                                "event": "VANDALISM"})
 
     # ─── SCENE-MODE FALLBACK: alert with nobody tracked ───
     # Deliberately OUTSIDE the pose block. This is the whole point of scene

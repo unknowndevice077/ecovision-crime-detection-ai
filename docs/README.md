@@ -1,8 +1,22 @@
 # Docs folder index
 
-Fourteen files live here and they are not equal. Three are the research core,
+Fifteen files live here and they are not equal. Four are the research core,
 four are defense material, three are engineering records, two are stale
 exports that would misrepresent the work if cited, and two are drafts.
+
+---
+
+## Start here
+
+**Showing this to the panel? Read `START_HERE_PANEL.md` first** — it names the
+four documents to actually put in front of them (the HTML and PDF ones), in
+order, and says which files not to hand over. Everything below is the full
+index, most of it working material rather than presentation material.
+
+| File | Content |
+|---|---|
+| `START_HERE_PANEL.md` | **The reading order for the defense.** Which four documents to show, what to say about each, the three sections to read if you only have five minutes, and what to keep back. |
+| `ecovision_full_report.md` | **Everything, in one document, written as a research report.** Abstract, related work, architecture, data, training, results, negative results, threats to validity, future work. Consolidates every other file here into one narrative — read this for the whole picture, then follow its §13 document map into the specialised files for detail. The separate documents remain authoritative for their own subjects. |
 
 ---
 
@@ -12,7 +26,9 @@ exports that would misrepresent the work if cited, and two are drafts.
 |---|---|
 | `detection_performance_report.md` | Every measured number for all three detectors, each with the caveat that limits it. The authoritative source for any figure quoted elsewhere — nothing here is estimated. |
 | `progress_report_violence_detection.md` | 1,715 lines. The full development narrative for the violence detector: what was tried, what failed, why, with derivations. §§27–32 cover the daynight checkpoint and its adoption. |
-| `related_work_notes.md` | Literature notes: Sultani MIL, RTFM, MGFN, CUE-Net, object-centric WSAD. |
+| `model_training_and_data.md` | **The methodology/RRL reference.** One section per model — what it does, how it is implemented, which datasets built it *with links and licences*, the exact training configuration, what it measures, and what would improve it. Also records the design decisions that were made rather than defaulted (why separate models instead of one softmax; why `phone` is a class; why `Sign` was removed) and an ordered improvement list. |
+| `data_splits_and_leakage.md` | **Read before quoting any accuracy in this project.** How every split is grouped, the measured leakage on each (all zero as of 21 Aug), and the limitations that survive a clean audit. Records the 99.4% / 14.6% / 12.0% overlap that invalidated the previous weapon detector's metrics, and why the audit deliberately shares no code with the scripts that build the splits. |
+| `related_work_notes.md` | Literature notes in two parts. Part I: Sultani MIL, RTFM, MGFN, CUE-Net, object-centric WSAD. Part II (21 Aug): the vandalism-dataset survey — every public alternative to UCF-Crime checked class-by-class — plus scene bias, spatial cropping, and the project's own non-literature findings. Verification status is marked per citation. |
 
 ## Defense material
 
@@ -46,9 +62,8 @@ Document what was built rather than what was found.
 
 | File | Reason |
 |---|---|
-| `progress_report_violence_detection.pdf` | Exported 12 Aug. The `.md` gained §30–32 on 14 Aug (venue-overlap analysis, the confirmation-requirement result, the property-crime build) — this PDF predates all three and shows an earlier, worse picture of the work. |
-| `progress_report_violence_detection.html` | Same export, same date, same gap. |
-| `model_behavior_defense - Copy.pdf` | A 45 KB fragment from before the animations, glossary and training sections existed. The current file is several hundred KB. |
+| `archive/stale-exports-2026-08/` | The 12 Aug PDF and HTML exports of the progress report, **moved out of `docs/` on 22 Aug** so they cannot be picked up by mistake. See that folder's `WHY_ARCHIVED.md`. |
+| `archive/model_behavior_defense - Copy.pdf` | A 45 KB fragment from before the animations, glossary and training sections existed. The current file is several hundred KB. |
 
 Regenerate rather than trust an export. For the defense document:
 
@@ -77,3 +92,28 @@ One caveat applies to all three: recall on the actual deployment cameras is
 unmeasured, because no labelled incident has ever been recorded on them. That
 follows from the problem — violence cannot be labelled on footage where none
 has happened — rather than from a gap in the measurement work.
+
+**Note on the 70.3% above:** that figure belongs to the trained *vandalism*
+model, not to any weapon figure. It has been misattributed once in working
+notes; the weapon detector's own baseline is 79.7% recall (TP 1255 / FP 5 /
+TN 578 / FN 319) on the final epoch-98 checkpoint. The epoch-68 checkpoint
+measured 74.3%; both were reproduced independently by two scripts on 21 Aug.
+
+---
+
+## Status as of 21 Aug — headline figures above not yet updated
+
+All three retrains are now complete. The headline table above still shows the
+19 Aug snapshot; these are the current measurements.
+
+| Class | Change | Result |
+|---|---|---|
+| Graffiti marks | Retrained on 7,943 images (was 1,177) | **Beats deployed on all four metrics** on the same untouched 165-image benchmark: mAP50 0.734 vs 0.718, recall 0.646 vs 0.602. Not yet deployed. |
+| Weapons | Rebuilt leakage-free, `Sign` class removed, crashed run resumed to epoch 100 | Final epoch-98 checkpoint: **79.7% recall / 85.0% accuracy** at deployed thresholds, up from 74.3% / 81.0%. Re-swept thresholds give **89.0% recall at 3.1% FPR** (gun 0.30 / knife 0.23). Not yet deployed. |
+| Vandalism | Scene count 11 → 26 sources | **82.4% accuracy vs a 62.7% baseline** — the class now carries positive information, where the previous model was 8.1 points *below* its baseline. **Still disabled:** FPR 36.8% against deployed robbery's 5.6%. |
+
+Also measured and recorded rather than assumed: the rule-based vandalism route
+was instrumented per condition and scored 8.3% recall (0% before the graffiti
+detector unblocked its gate), and a change-detection prototype reached 3 of 4
+events but false-alarmed on all four held-out cameras. Both remain disabled.
+See `data_splits_and_leakage.md` for why any figure here is quotable at all.

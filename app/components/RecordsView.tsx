@@ -337,6 +337,7 @@ export default function RecordsView() {
                   </a>
                   <button
                     title="Cut this time range into a new clip"
+                    aria-label="Cut this time range into a new clip"
                     onClick={handleExtractClip}
                     disabled={extracting}
                     className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white flex items-center gap-1.5 transition-opacity hover:opacity-90 disabled:opacity-50"
