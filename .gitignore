@@ -128,6 +128,19 @@ Thumbs.db
 !docs/
 !docs/**
 
+# ...EXCEPT docs/local-only/ -- deployment/ops docs with real network
+# topology, hardware and site specifics for the actual pilot deployment.
+# Was committed once (docs/deployment_plan.html, a512c4d) and purged from
+# history with git-filter-repo on 2026-08-25 (it no longer appears in any
+# commit) precisely because this kind of detail about a real, running
+# public-safety camera system has no business being world-readable on a
+# public GitHub repo. Anything in here stays local to whichever machine
+# checked it out. Must come AFTER the !docs/** re-inclusion above -- git
+# resolves conflicting patterns by last-match-wins, so this line ignores
+# strictly this one subfolder without needing the broader docs/ carve-out
+# to change at all.
+docs/local-only/
+
 # The app's own image assets. A blanket *.png rule previously excluded
 # electron/logo.png, without which the installer builds with no icon and no
 # masthead -- a clone could not reproduce the shipped UI.
