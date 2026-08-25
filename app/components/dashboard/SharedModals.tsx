@@ -60,7 +60,7 @@ export default function SharedModals({ isFullscreenGrid, setIsFullscreenGrid, sh
           >
             <div className="flex items-center gap-2.5">
               <Shield size={16} style={{ color: 'var(--accent)' }} />
-              <span className="text-[12px] font-bold tracking-wide text-white uppercase">Video Wall</span>
+              <span className="text-[12px] font-bold tracking-wide text-[var(--text)] uppercase">Video Wall</span>
               <span className="data text-[10px] px-1.5 py-0.5 border" style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}>
                 {String(cameras.length).padStart(2, '0')} FEEDS
               </span>
@@ -108,7 +108,7 @@ export default function SharedModals({ isFullscreenGrid, setIsFullscreenGrid, sh
                 aria-label="Cancel camera registration"
                 onClick={() => setShowModal(false)}
                 style={{ color: 'var(--text-3)' }}
-                className="transition-colors hover:text-white"
+                className="transition-colors hover:text-[var(--text)]"
               >
                 <X size={15} />
               </button>
@@ -119,7 +119,7 @@ export default function SharedModals({ isFullscreenGrid, setIsFullscreenGrid, sh
                 <label htmlFor="cam-name" className="label block mb-1.5">Camera name</label>
                 <input
                   id="cam-name"
-                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  className="data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
                   style={inputStyle}
                   placeholder="e.g. Main Gate — North"
                   disabled={isSubmitting}
@@ -129,7 +129,7 @@ export default function SharedModals({ isFullscreenGrid, setIsFullscreenGrid, sh
                 <label htmlFor="cam-url" className="label block mb-1.5">Stream path (RTSP)</label>
                 <input
                   id="cam-url"
-                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  className="data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
                   style={inputStyle}
                   placeholder="rtsp://…"
                   disabled={isSubmitting}

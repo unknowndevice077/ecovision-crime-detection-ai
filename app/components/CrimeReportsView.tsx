@@ -449,7 +449,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
 
   const finalLogsDisplay = filteredIncidents;
   const fieldStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
-  const inputClass = "data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors";
+  const inputClass = "data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors";
   const labelClass = "label block mb-1";
 
   return (
@@ -565,7 +565,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
               <button
                 title="Back to all incidents"
                 onClick={() => { updatePoleSelectionIcons(null); setSelectedPoleId(null); setIsManualFilingActive(false); }}
-                className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider transition-colors hover:text-white shrink-0"
+                className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider transition-colors hover:text-[var(--text)] shrink-0"
                 style={{ color: 'var(--text-2)' }}
               >
                 <ArrowLeft size={12} /> Back
@@ -575,7 +575,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
             )}
 
             <div className="min-w-0 flex-1 text-center">
-              <div className="text-[11px] font-bold text-white uppercase tracking-wide truncate">
+              <div className="text-[11px] font-bold text-[var(--text)] uppercase tracking-wide truncate">
                 {selectedPole ? selectedPole.name : 'All Incidents'}
               </div>
             </div>
@@ -611,7 +611,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                     title="Select incident type"
                     value={manualType}
                     onChange={(e) => setFormManualType(e.target.value)}
-                    className="data w-full border p-1.5 text-[11px] text-white outline-none focus:border-[var(--accent)]"
+                    className="data w-full border p-1.5 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
                     style={fieldStyle}
                   >
                     <option value="ASSAULT">Assault</option>
@@ -626,7 +626,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                     title="Select severity"
                     value={manualSeverity}
                     onChange={(e) => setFormManualSeverity(e.target.value)}
-                    className="data w-full border p-1.5 text-[11px] text-white outline-none focus:border-[var(--accent)]"
+                    className="data w-full border p-1.5 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
                     style={fieldStyle}
                   >
                     <option value="LOW">Low</option>
@@ -642,7 +642,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                   value={manualNarrative}
                   onChange={(e) => setFormManualNarrative(e.target.value)}
                   placeholder="What was observed…"
-                  className="w-full h-14 border p-2 text-[11px] text-white resize-none outline-none focus:border-[var(--accent)]"
+                  className="w-full h-14 border p-2 text-[11px] text-[var(--text)] resize-none outline-none focus:border-[var(--accent)]"
                   style={fieldStyle}
                 />
               </div>
@@ -713,7 +713,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                       </span>
                     </div>
 
-                    <h5 className="text-[13px] font-bold uppercase text-white tracking-wide">{inc.type}</h5>
+                    <h5 className="text-[13px] font-bold uppercase text-[var(--text)] tracking-wide">{inc.type}</h5>
 
                     {inc.screenshot_path && !isImageBroken ? (
                       <div className="w-full h-24 border overflow-hidden relative" style={{ background: '#000', borderColor: 'var(--line)' }}>
@@ -815,7 +815,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
               <div className="flex items-center gap-2.5">
                 <FileSignature size={15} style={{ color: 'var(--accent)' }} />
                 <div>
-                  <div className="text-[12px] font-bold uppercase tracking-wide text-white leading-none">Official Police Incident Report</div>
+                  <div className="text-[12px] font-bold uppercase tracking-wide text-[var(--text)] leading-none">Official Police Incident Report</div>
                   <div className="label mt-1">Republic of the Philippines · Ormoc Police District</div>
                 </div>
               </div>
@@ -823,7 +823,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                 title="Close report filing form"
                 aria-label="Close report filing form"
                 onClick={closeModal}
-                className="transition-colors hover:text-white"
+                className="transition-colors hover:text-[var(--text)]"
                 style={{ color: 'var(--text-3)' }}
               >
                 <X size={16} />
@@ -841,7 +841,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                 </div>
                 <div>
                   <span className={labelClass}>Type</span>
-                  <span className="text-[12px] font-bold uppercase text-white">{filingTarget.type}</span>
+                  <span className="text-[12px] font-bold uppercase text-[var(--text)]">{filingTarget.type}</span>
                 </div>
                 <div>
                   <span className={labelClass}>Occurred</span>

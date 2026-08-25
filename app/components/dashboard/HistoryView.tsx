@@ -112,7 +112,7 @@ export default function HistoryView() {
               placeholder="Search narrative or case ID…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="data w-full pl-7 pr-2 py-1.5 text-[11px] text-white border outline-none"
+              className="data w-full pl-7 pr-2 py-1.5 text-[11px] text-[var(--text)] border outline-none"
               style={inputStyle}
             />
           </div>
@@ -198,7 +198,7 @@ export default function HistoryView() {
                 </span>
 
                 <div className="min-w-0">
-                  <div className="text-[12px] font-bold text-white tracking-wide">{record.type}</div>
+                  <div className="text-[12px] font-bold text-[var(--text)] tracking-wide">{record.type}</div>
                   <p className="text-[10px] leading-snug mt-0.5 line-clamp-2" style={{ color: 'var(--text-2)' }}>
                     {record.narrative || "No narrative on file."}
                   </p>

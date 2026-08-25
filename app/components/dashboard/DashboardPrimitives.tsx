@@ -42,7 +42,7 @@ export function CameraTile({ cam, aiUrl, alerted, onClick, large }: any) {
         <Wrapper
             onClick={onClick}
             className={`relative bg-black overflow-hidden group text-left w-full h-full border transition-colors${onClick ? ' hover-lift cursor-pointer' : ''}`}
-            style={{ borderColor: alerted ? 'var(--critical)' : 'var(--line)' }}
+            style={{ borderColor: alerted ? 'var(--critical)' : 'var(--line)', borderRadius: 'var(--radius-md)' }}
             aria-label={onClick ? `Open ${cam.name} full view` : undefined}
         >
             <img
@@ -108,8 +108,8 @@ export function NavItem({ icon, label, badge, badgeTone = 'neutral', active, onC
             aria-current={active ? 'page' : undefined}
             className="w-full flex items-center justify-between gap-2 pl-3 pr-2.5 py-2.5 transition-all relative active:scale-[0.99]"
             style={{
-                background: active ? 'rgba(45,111,247,0.10)' : 'transparent',
-                color: active ? '#fff' : 'var(--text-2)',
+                background: active ? 'var(--accent-dim)' : 'transparent',
+                color: active ? 'var(--text)' : 'var(--text-2)',
             }}
             onMouseEnter={(e: any) => { if (!active) e.currentTarget.style.background = 'var(--panel-2)'; }}
             onMouseLeave={(e: any) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
@@ -151,7 +151,7 @@ export function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
                 <span className="label">{label}</span>
                 <span style={{ color: 'var(--text-3)' }} aria-hidden="true">{icon}</span>
             </div>
-            <div className="data text-2xl font-bold text-white leading-none">{value}</div>
+            <div className="data text-2xl font-bold leading-none" style={{ color: 'var(--text)' }}>{value}</div>
             {typeof bar === 'number' && (
                 <div
                     className="mt-2.5 h-1 w-full"
@@ -199,7 +199,7 @@ export function IncidentRow({ alert, onConfirm, onDismiss }: any) {
                 )}
                 <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2 mb-1">
-                        <span className="text-[12px] font-bold text-white tracking-wide truncate">
+                        <span className="text-[12px] font-bold tracking-wide truncate" style={{ color: 'var(--text)' }}>
                             {alert.type}
                         </span>
                         <span className="data text-[10px] shrink-0" style={{ color: 'var(--text-3)' }}>

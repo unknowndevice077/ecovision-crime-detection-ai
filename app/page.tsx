@@ -16,6 +16,7 @@ import {
 } from './components/dashboard/DashboardPrimitives';
 import PTZControls from './components/PTZControls';
 import AiModelsPanel from './components/AiModelsPanel';
+import ThemeToggle from './components/ThemeToggle';
 import {
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin,
   Maximize2, X, Sun, User,
@@ -88,6 +89,12 @@ export default function EcoVisionSentinel() {
   const [currentSourceLabel, setCurrentSourceLabel] = useState<string>('');
   const [sourceIsNetwork, setSourceIsNetwork] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  // Declutter: the SRC input/apply row is a genuinely technical control
+  // (device index or a raw RTSP URL) that most sessions never touch --
+  // tucked behind an icon by default rather than permanently occupying the
+  // video wall header, purely a visual grouping change, not a behavioral
+  // one (handleApplyCameraSource etc. are untouched).
+  const [srcPanelOpen, setSrcPanelOpen] = useState(false);
   const [applyState, setApplyState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const router = useRouter();
 
@@ -465,11 +472,8 @@ const fetchCameras = async (userObj: any) => {
       >
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex items-center gap-2 pr-3 border-r" style={{ borderColor: 'var(--line)' }}>
-            <Shield size={15} style={{ color: 'var(--accent)' }} className="stroke-[2.2]" />
-            <span className="text-[11px] font-bold tracking-[0.18em] text-white">ECOVISION</span>
-            <span className="data text-[9px] px-1 py-px border" style={{ color: 'var(--text-3)', borderColor: 'var(--line)' }}>
-              SENTINEL
-            </span>
+            <Shield size={15} style={{ color: 'var(--cyan)' }} className="stroke-[2.2]" />
+            <span className="disp text-[12.5px] font-extrabold tracking-[0.02em]" style={{ color: 'var(--text)' }}>EcoVision Sentinel</span>
           </div>
 
           {/* System health -- reads instantly, no navigation required.
@@ -503,7 +507,7 @@ const fetchCameras = async (userObj: any) => {
           {pendingAlerts.length > 0 ? (
             <div
               className="flex items-center gap-2 px-2.5 h-7 border pulse-alert"
-              style={{ background: 'rgba(229,52,47,0.12)', borderColor: 'var(--critical)' }}
+              style={{ background: 'var(--critical-dim)', borderColor: 'var(--critical)', borderRadius: 'var(--radius-sm)' }}
             >
               <AlertOctagon size={13} style={{ color: 'var(--critical)' }} />
               <span className="data text-[11px] font-bold" style={{ color: 'var(--critical)' }}>
@@ -511,16 +515,18 @@ const fetchCameras = async (userObj: any) => {
               </span>
             </div>
           ) : (
-            <div className="flex items-center gap-2 px-2.5 h-7 border" style={{ borderColor: 'var(--line)' }}>
+            <div className="flex items-center gap-2 px-2.5 h-7 border" style={{ borderColor: 'var(--line)', borderRadius: 'var(--radius-sm)' }}>
               <span className="status-dot ok" />
               <span className="label">No Active Incidents</span>
             </div>
           )}
 
-          <div className="flex items-center gap-2 px-2.5 h-7 border" style={{ borderColor: 'var(--line)' }}>
+          <div className="flex items-center gap-2 px-2.5 h-7 border" style={{ borderColor: 'var(--line)', borderRadius: 'var(--radius-sm)' }}>
             <span className="data text-[10px]" style={{ color: 'var(--text-3)' }}><SystemDateText /></span>
-            <span className="data text-[12px] font-bold text-white"><SystemClockText /></span>
+            <span className="data text-[12px] font-bold" style={{ color: 'var(--text)' }}><SystemClockText /></span>
           </div>
+
+          <ThemeToggle />
 
           <button
             onClick={() => setActiveTab('profile')}
@@ -528,12 +534,13 @@ const fetchCameras = async (userObj: any) => {
             className="flex items-center gap-2 h-7 px-2.5 border transition-colors"
             style={{
               borderColor: activeTab === 'profile' ? 'var(--accent)' : 'var(--line)',
-              background: activeTab === 'profile' ? 'rgba(45,111,247,0.12)' : 'transparent',
+              background: activeTab === 'profile' ? 'var(--accent-dim)' : 'transparent',
+              borderRadius: 'var(--radius-sm)',
             }}
           >
             <User size={12} style={{ color: 'var(--text-2)' }} />
             <div className="flex items-baseline gap-1.5">
-              <span className="data text-[10px] text-white">{currentUser.username || 'OPERATOR'}</span>
+              <span className="data text-[10px]" style={{ color: 'var(--text)' }}>{currentUser.username || 'OPERATOR'}</span>
               <span className="label" style={{ fontSize: '8px' }}>{currentUser.role}</span>
             </div>
           </button>
@@ -667,59 +674,86 @@ const fetchCameras = async (userObj: any) => {
                         All Feeds
                       </button>
                     )}
-                    {/* Camera source selector: local index OR network stream URL */}
-                    <div className="relative flex items-center gap-1.5 h-6 px-1.5 border" style={{ borderColor: 'var(--line)' }}>
-                      {sourceIsNetwork
-                        ? <Wifi size={11} style={{ color: 'var(--ok)' }} />
-                        : <CameraIcon size={11} style={{ color: 'var(--text-3)' }} />}
-                      <span className="label" style={{ fontSize: '8px' }}>SRC</span>
-                      <input
-                        type="text"
-                        value={camIndexInput}
-                        onChange={(e) => setCamIndexInput(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') handleApplyCameraSource(); }}
-                        placeholder={sourceIsNetwork ? currentSourceLabel : '0'}
-                        title={
-                          'Camera source: a local device index (e.g. 0) or a network stream URL' +
-                          ' (rtsp://user:pass@10.0.0.12:554/stream1). Any ONVIF/RTSP camera works.' +
-                          (currentSourceLabel ? `\nCurrently: ${currentSourceLabel}` : '')
-                        }
-                        className="data bg-transparent border-none text-[10px] text-white outline-none"
-                        style={{ width: sourceIsNetwork ? 168 : 32,
-                                 textAlign: sourceIsNetwork ? 'left' : 'center' }}
-                      />
-                      {!sourceIsNetwork && availableCameras.length > 0 && (
-                        <span className="data text-[9px]" style={{ color: 'var(--text-3)' }}>
-                          [{availableCameras.join(',')}]
-                        </span>
-                      )}
+                    {/* Camera source selector: local index OR network stream URL.
+                        Collapsed behind an icon by default -- a raw device index
+                        or RTSP URL is a setup-time control, not something an
+                        operator's eye needs competing for space with the feed
+                        count and incident count every single shift. */}
+                    <div className="relative">
                       <button
-                        onClick={handleApplyCameraSource}
-                        disabled={applyState === 'saving'}
-                        title="Apply camera source"
-                        aria-label="Apply camera source"
-                        className="h-4 w-4 flex items-center justify-center transition-colors disabled:opacity-40"
-                        style={{ color: 'var(--accent)' }}
+                        onClick={() => setSrcPanelOpen(o => !o)}
+                        title="Camera source"
+                        aria-label="Camera source"
+                        className="h-6 w-6 flex items-center justify-center border transition-colors"
+                        style={{
+                          borderColor: srcPanelOpen ? 'var(--accent)' : 'var(--line)',
+                          background: srcPanelOpen ? 'var(--accent-dim)' : 'transparent',
+                          color: sourceIsNetwork ? 'var(--ok)' : 'var(--text-2)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}
                       >
-                        {applyState === 'saving' ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                        {sourceIsNetwork ? <Wifi size={12} /> : <CameraIcon size={12} />}
                       </button>
-                      {applyState === 'saved' && <span className="data text-[9px]" style={{ color: 'var(--ok)' }}>OK</span>}
-                      {applyState === 'error' && <span className="data text-[9px]" style={{ color: 'var(--critical)' }}>ERR</span>}
-                      {sourceError && (
-                        <span
-                          className="data absolute top-7 right-0 whitespace-nowrap px-1.5 py-0.5 border text-[9px] z-20"
-                          style={{ borderColor: 'var(--critical)', color: 'var(--critical)', background: 'var(--panel)' }}
+
+                      {srcPanelOpen && (
+                        <div
+                          className="absolute right-0 top-8 z-30 p-2.5 border animate-scale-in"
+                          style={{ background: 'var(--panel)', borderColor: 'var(--line)', borderRadius: 'var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,.25)' }}
                         >
-                          {sourceError}
-                        </span>
+                          <div className="label mb-1.5">Camera source</div>
+                          <div className="relative flex items-center gap-1.5 h-7 px-2 border" style={{ borderColor: 'var(--line)', borderRadius: 'var(--radius-sm)' }}>
+                            <input
+                              type="text"
+                              autoFocus
+                              value={camIndexInput}
+                              onChange={(e) => setCamIndexInput(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') handleApplyCameraSource(); }}
+                              placeholder={sourceIsNetwork ? currentSourceLabel : '0'}
+                              title={
+                                'Camera source: a local device index (e.g. 0) or a network stream URL' +
+                                ' (rtsp://user:pass@10.0.0.12:554/stream1). Any ONVIF/RTSP camera works.' +
+                                (currentSourceLabel ? `\nCurrently: ${currentSourceLabel}` : '')
+                              }
+                              className="data bg-transparent border-none text-[10px] outline-none"
+                              style={{ width: sourceIsNetwork ? 190 : 40,
+                                       textAlign: sourceIsNetwork ? 'left' : 'center',
+                                       color: 'var(--text)' }}
+                            />
+                            {!sourceIsNetwork && availableCameras.length > 0 && (
+                              <span className="data text-[9px]" style={{ color: 'var(--text-3)' }}>
+                                [{availableCameras.join(',')}]
+                              </span>
+                            )}
+                            <button
+                              onClick={handleApplyCameraSource}
+                              disabled={applyState === 'saving'}
+                              title="Apply camera source"
+                              aria-label="Apply camera source"
+                              className="h-4 w-4 flex items-center justify-center transition-colors disabled:opacity-40"
+                              style={{ color: 'var(--accent)' }}
+                            >
+                              {applyState === 'saving' ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                            </button>
+                            {applyState === 'saved' && <span className="data text-[9px]" style={{ color: 'var(--ok)' }}>OK</span>}
+                            {applyState === 'error' && <span className="data text-[9px]" style={{ color: 'var(--critical)' }}>ERR</span>}
+                          </div>
+                          {sourceError && (
+                            <div
+                              className="data mt-1.5 px-2 py-1 border text-[9px]"
+                              style={{ borderColor: 'var(--critical)', color: 'var(--critical)', background: 'var(--critical-dim)', borderRadius: 'var(--radius-sm)' }}
+                            >
+                              {sourceError}
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
 
                     <button
                       title="Fullscreen video wall"
                       onClick={() => setIsFullscreenGrid(true)}
-                      className="h-6 w-6 flex items-center justify-center border transition-colors hover:bg-white/5"
-                      style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}
+                      className="h-6 w-6 flex items-center justify-center border transition-colors hover:bg-[var(--panel-2)]"
+                      style={{ borderColor: 'var(--line)', color: 'var(--text-2)', borderRadius: 'var(--radius-sm)' }}
                     >
                       <Maximize2 size={12} />
                     </button>
@@ -770,6 +804,7 @@ const fetchCameras = async (userObj: any) => {
                     style={{
                       color: pendingAlerts.length ? 'var(--critical)' : 'var(--text-3)',
                       borderColor: pendingAlerts.length ? 'var(--critical)' : 'var(--line)',
+                      borderRadius: 'var(--radius-sm)',
                     }}
                   >
                     {String(pendingAlerts.length).padStart(2, '0')}
@@ -881,7 +916,7 @@ const fetchCameras = async (userObj: any) => {
                       <div className="flex justify-between items-start mb-2.5">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className={`status-dot ${cam.status === 'offline' ? 'off' : 'ok'}`} />
-                          <span className="text-[11px] font-bold text-white truncate">{cam.name}</span>
+                          <span className="text-[11px] font-bold truncate" style={{ color: 'var(--text)' }}>{cam.name}</span>
                         </div>
                         {can('manage_cameras') && (
                           <button
@@ -1021,8 +1056,8 @@ const fetchCameras = async (userObj: any) => {
                 <label htmlFor="cam-name" className="label block mb-1">Camera Name</label>
                 <input
                   id="cam-name"
-                  className="data w-full px-2.5 py-2 text-[11px] text-white border outline-none"
-                  style={{ background: 'var(--bg)', borderColor: 'var(--line)' }}
+                  className="data w-full px-2.5 py-2 text-[11px] border outline-none"
+                  style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
                   placeholder="e.g. Sector C Entrance"
                 />
               </div>
@@ -1030,8 +1065,8 @@ const fetchCameras = async (userObj: any) => {
                 <label htmlFor="cam-url" className="label block mb-1">Stream URL</label>
                 <input
                   id="cam-url"
-                  className="data w-full px-2.5 py-2 text-[11px] text-white border outline-none"
-                  style={{ background: 'var(--bg)', borderColor: 'var(--line)' }}
+                  className="data w-full px-2.5 py-2 text-[11px] border outline-none"
+                  style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
                   placeholder="rtsp://..."
                 />
               </div>

@@ -827,6 +827,48 @@ carry the current measurements and an explicit note that the weapon figures
 Current dashboard headlines: violence 95.0% detection rate, robbery 65.3%
 recall, weapons 89.0% recall, vandalism 125.25 alarms/hr (disabled).
 
+### 9.4 Operational and deployment limitations — added 2026-08-26
+
+§9.1–9.3 are model-level threats to validity. These are system-level ones,
+found while writing the pilot's operational plans
+(`docs/privacy_compliance_plan.md`, `docs/scaling_plan.md`,
+`docs/incident_response_plan.md`, `docs/recovery_plan.md`) — worth stating
+with equal honesty, because a working model is not the same claim as a
+deployable system.
+
+- **This is a single-camera pilot, and the architecture assumes it.**
+  `maincode/main.py` is written one-camera-per-process throughout
+  (`CAMERA_SOURCE`, `/set_camera_index`). The `cameras` table and
+  barangay/station ownership already support many cameras at the data layer
+  — the detection runtime does not yet.
+- **The multi-camera ceiling is compute-bound, not memory-bound, and lower
+  than it looks.** Measured on the pilot's GTX 1660 SUPER: one camera
+  process uses ~400MB VRAM but hits 58% GPU compute during an active
+  detection burst. A VRAM-only calculation suggests ~12 cameras fit; the
+  real, compute-bound ceiling on the current architecture is 2–4. Full
+  reasoning and a path past it in `docs/scaling_plan.md`.
+- **No automated evidence retention policy exists yet.** Alert clips,
+  snapshots, and incident rows currently persist indefinitely — a
+  compliance gap under RA 10173's proportionality principle, not just a
+  disk-space one. Designed, not built; see `docs/privacy_compliance_plan.md` §5.
+- **No chain-of-custody guarantee on saved clips.** A clip is a file on
+  disk today, with no hash recorded at capture time and no protection
+  against silent alteration or deletion. See `docs/incident_response_plan.md` §3.
+- **Confirmed incidents don't reach a responder unless someone is already
+  looking at the dashboard.** `confirm-and-report` updates the database and
+  broadcasts over websocket; it does not yet notify anyone outside the app.
+  An SMS/Telegram notification design exists (`docs/incident_response_plan.md`
+  §2) but is not implemented.
+- **No database backup cadence exists.** The single SQLite file holding
+  every incident, user, and camera record has no scheduled backup. Flagged
+  as the highest-priority operational gap in `docs/recovery_plan.md`.
+
+None of these are claims that the detection models don't work — §9.1–9.3
+already cover that honestly. These are the difference between "the model
+detects violence at 95% recall" and "a barangay can run this unattended and
+trust what happens after an alert fires." Both are true statements about
+this project right now; conflating them is the mistake to avoid at defense.
+
 ---
 
 ## 10. Future work
@@ -902,3 +944,8 @@ python graffiti_change_detect.py             # change-detection sweep
 | [`progress_report_violence_detection.md`](progress_report_violence_detection.md) | violence development narrative, 1,715 lines |
 | [`vandalism_data_collection.md`](vandalism_data_collection.md) | the filming protocol |
 | [`datasets_used.txt`](../../EcoVisionImagesTraining/datasets_used.txt) | RRL dataset list with links and licences |
+| [`privacy_compliance_plan.md`](privacy_compliance_plan.md) | RA 10173 mapping, retention policy, gaps |
+| [`evaluation_plan.md`](evaluation_plan.md) | plain-language evaluation methodology (recall vs. false-alarm protocol) |
+| [`scaling_plan.md`](scaling_plan.md) | measured per-camera GPU/RAM/compute cost, multi-camera architecture |
+| [`incident_response_plan.md`](incident_response_plan.md) | confirm→notify flow, SMS/Telegram design, chain of custody |
+| [`recovery_plan.md`](recovery_plan.md) | failure-mode procedures, priority-ordered |

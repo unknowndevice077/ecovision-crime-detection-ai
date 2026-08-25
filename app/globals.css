@@ -5,7 +5,7 @@
 @config "../tailwind.config.ts";
 
 /* ==========================================================================
-   EcoVision Sentinel -- Command Console design tokens
+   EcoVision Sentinel -- Command Console design tokens ("Daylight Ops")
    --------------------------------------------------------------------------
    Design intent: this is a 24/7 security monitoring station, not a consumer
    app. Priorities, in order:
@@ -15,37 +15,164 @@
      3. Low visual noise -- an operator stares at this for a full shift;
         gradients, glows and idle animation cause fatigue and dilute real
         alerts
+
+   REDESIGNED 2026-08-25 ("Daylight Ops" direction, chosen from three
+   proposals -- see the design canvas this was picked from). What changed
+   and why:
+     - Light AND dark themes, not dark-only. Default follows the OS's
+       prefers-color-scheme; :root[data-theme="light"|"dark"] on <html> is
+       an explicit per-user override (see ThemeToggle.tsx), stored in
+       localStorage, applied by an inline script in layout.tsx BEFORE first
+       paint so there is no flash of the wrong theme.
+     - The dark palette's own contrast steps were part of the "bland, black
+       and white" complaint: --panel used to sit barely one shade off --bg
+       (#111419 vs #0A0C10). Both themes now have real, deliberate steps
+       between bg/panel/panel-2/line/line-2.
+     - Manrope (display) + Public Sans (body) + JetBrains Mono (data)
+       replace the generic system-font stack -- see layout.tsx, which loads
+       them via next/font/google (self-hosted at build time, not a runtime
+       CDN fetch -- this app needs to work without guaranteed internet).
+     - THE SAFETY-CRITICAL STATUS COLORS (critical/warn/ok) KEEP THE SAME
+       HUES in both themes and both palettes below -- only their exact value
+       shifts (deepened for AA contrast against a white panel in light
+       mode). An operator's red-means-danger association must not change
+       with a theme toggle.
+     - A small radius scale (--radius-sm/md) replaces uniformly-sharp
+       corners -- soft enough to feel considered, nowhere near "rounded
+       consumer app".
+     - --dur-fast/base and --ease exist so hover/press/tab-change motion
+       reads as one deliberate system instead of ad hoc transition-colors
+       calls with whatever duration was typed that day. Nothing here adds
+       idle/looping animation beyond what already existed (sentinel-pulse,
+       reserved for a genuinely active threat) -- "smooth" means state
+       CHANGES feel considered, not more motion.
    ========================================================================== */
 :root {
-  --bg:        #0A0C10;   /* base canvas */
-  --panel:     #111419;   /* panel surface */
-  --panel-2:   #161A21;   /* raised surface / hover */
-  --line:      #232936;   /* borders, dividers */
-  --line-2:    #2E3644;   /* emphasized border */
+  /* ---- dark (default) ---- */
+  --bg:        #0C1014;
+  --panel:     #151B22;
+  --panel-2:   #1C242E;
+  --line:      #26313D;
+  --line-2:    rgba(55, 69, 84, 0.85);
 
-  --text:      #DDE3EC;   /* primary text */
-  --text-2:    #8892A4;   /* secondary / labels */
-  --text-3:    #5C6474;   /* tertiary / disabled */
+  --text:      #E7EDF3;
+  --text-2:    #93A2B3;
+  --text-3:    #5C6C7E;
 
-  --accent:    #2D6FF7;   /* institutional blue -- selection, active nav */
-  --critical:  #E5342F;   /* active threat, requires action */
-  --warn:      #E08A00;   /* degraded, pending review */
-  --ok:        #1FA34A;   /* nominal */
+  --accent:       #3E82FF;
+  --accent-dim:   rgba(62, 130, 255, 0.14);
+  --cyan:         #33C6D9;   /* "live" secondary accent -- recording/streaming state */
+  --cyan-dim:     rgba(51, 198, 217, 0.14);
+
+  --critical:     #F0453F;
+  --critical-dim: rgba(240, 69, 63, 0.13);
+  --warn:         #E2A324;
+  --warn-dim:     rgba(226, 163, 36, 0.13);
+  --ok:           #33BE71;
+  --ok-dim:       rgba(51, 190, 113, 0.13);
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --dur-fast: 0.12s;
+  --dur-base: 0.2s;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/* System preference, when the user has never explicitly chosen -- beaten by
+   an explicit [data-theme] either direction (rules below). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg:        #EEF1F5;
+    --panel:     #FFFFFF;
+    --panel-2:   #F3F5F8;
+    --line:      #DCE1E8;
+    --line-2:    rgba(199, 206, 218, 0.9);
+
+    --text:      #1A2029;
+    --text-2:    #5B6675;
+    --text-3:    #8A93A3;
+
+    --accent:       #2E6FE8;
+    --accent-dim:   rgba(46, 111, 232, 0.10);
+    --cyan:         #0E93A8;
+    --cyan-dim:     rgba(14, 147, 168, 0.10);
+
+    --critical:     #D63530;
+    --critical-dim: rgba(214, 53, 48, 0.08);
+    --warn:         #B67A0E;
+    --warn-dim:     rgba(182, 122, 14, 0.10);
+    --ok:           #1E9955;
+    --ok-dim:       rgba(30, 153, 85, 0.09);
+  }
+}
+
+/* Explicit override wins over system preference either direction. */
+:root[data-theme="light"] {
+  --bg:        #EEF1F5;
+  --panel:     #FFFFFF;
+  --panel-2:   #F3F5F8;
+  --line:      #DCE1E8;
+  --line-2:    rgba(199, 206, 218, 0.9);
+
+  --text:      #1A2029;
+  --text-2:    #5B6675;
+  --text-3:    #8A93A3;
+
+  --accent:       #2E6FE8;
+  --accent-dim:   rgba(46, 111, 232, 0.10);
+  --cyan:         #0E93A8;
+  --cyan-dim:     rgba(14, 147, 168, 0.10);
+
+  --critical:     #D63530;
+  --critical-dim: rgba(214, 53, 48, 0.08);
+  --warn:         #B67A0E;
+  --warn-dim:     rgba(182, 122, 14, 0.10);
+  --ok:           #1E9955;
+  --ok-dim:       rgba(30, 153, 85, 0.09);
+}
+
+:root[data-theme="dark"] {
+  --bg:        #0C1014;
+  --panel:     #151B22;
+  --panel-2:   #1C242E;
+  --line:      #26313D;
+  --line-2:    rgba(55, 69, 84, 0.85);
+
+  --text:      #E7EDF3;
+  --text-2:    #93A2B3;
+  --text-3:    #5C6C7E;
+
+  --accent:       #3E82FF;
+  --accent-dim:   rgba(62, 130, 255, 0.14);
+  --cyan:         #33C6D9;
+  --cyan-dim:     rgba(51, 198, 217, 0.14);
+
+  --critical:     #F0453F;
+  --critical-dim: rgba(240, 69, 63, 0.13);
+  --warn:         #E2A324;
+  --warn-dim:     rgba(226, 163, 36, 0.13);
+  --ok:           #33BE71;
+  --ok-dim:       rgba(51, 190, 113, 0.13);
 }
 
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: var(--font-body), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  transition: background-color var(--dur-base) var(--ease), color var(--dur-base) var(--ease);
+}
+
+.disp {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
 }
 
 /* All numeric/identifier data uses tabular monospace so columns align and
    digits don't jitter as values update -- important when reading timestamps
    and confidence values off a live feed. */
 .data {
-  font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-mono), ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -105,9 +232,9 @@ body {
   to   { opacity: 1; transform: scale(1); }
 }
 
-.animate-fade-in     { animation: fade-in 0.18s ease-out both; }
-.animate-rise-in      { animation: rise-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
-.animate-scale-in     { animation: scale-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-fade-in     { animation: fade-in 0.18s var(--ease) both; }
+.animate-rise-in      { animation: rise-in 0.22s var(--ease) both; }
+.animate-scale-in     { animation: scale-in 0.16s var(--ease) both; }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in, .animate-rise-in, .animate-scale-in { animation: none; }
@@ -115,14 +242,29 @@ body {
 
 /* Small hover/press feedback for clickable panels (camera tiles, cards) --
    pairs with the transition-colors already used everywhere else in the app. */
-.hover-lift { transition: transform 0.15s ease; }
+.hover-lift { transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
 .hover-lift:hover  { transform: translateY(-1px); }
 .hover-lift:active { transform: translateY(0) scale(0.99); }
+
+/* Cheap, targeted theme-switch transition -- applied to <html> for ~200ms
+   by ThemeToggle right when the user flips the toggle, then removed. NOT a
+   permanent universal-selector transition: this dashboard re-renders live
+   incident data and video tiles constantly, and `* { transition: ... }`
+   would tax every one of those repaints for a smoothness effect that only
+   ever matters at the single moment of a theme switch. Scoping it to a
+   short-lived class keeps the toggle feeling considered without costing
+   anything the other 99.9% of the time. */
+.theme-transition,
+.theme-transition * {
+  transition: background-color var(--dur-base) var(--ease),
+              border-color var(--dur-base) var(--ease),
+              color var(--dur-base) var(--ease) !important;
+}
 
 /* Burned-in video overlay text -- mimics real CCTV OSD, kept legible over
    arbitrary bright/dark footage via a hard shadow rather than a panel. */
 .osd {
-  font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-mono), ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 1px rgba(0, 0, 0, 1);
   letter-spacing: 0.04em;
@@ -134,13 +276,13 @@ body {
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background: var(--line-2);
   border: 2px solid var(--bg);
-  border-radius: 0;
+  border-radius: var(--radius-sm);
 }
-.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3B4557; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 0; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: var(--radius-sm); }
 
 /* Leaflet marker reset (CrimeReportsView) */
 .custom-div-icon {
@@ -149,11 +291,11 @@ body {
 }
 
 ::selection {
-  background: rgba(45, 111, 247, 0.35);
-  color: #fff;
+  background: var(--accent-dim);
+  color: var(--text);
 }
 
-select { color-scheme: dark; }
+select { color-scheme: light dark; }
 
 input:focus-visible,
 button:focus-visible,

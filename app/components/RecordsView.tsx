@@ -191,7 +191,7 @@ export default function RecordsView() {
               placeholder="YYYY-MM-DD"
               value={filterDate}
               onChange={(e) => setFilterDate(e.target.value)}
-              className="data bg-transparent text-[11px] text-white outline-none w-[92px]"
+              className="data bg-transparent text-[11px] text-[var(--text)] outline-none w-[92px]"
             />
           </div>
 
@@ -309,7 +309,7 @@ export default function RecordsView() {
                       title="Segment start time"
                       value={startTime}
                       onChange={(e) => setStartTime(e.target.value)}
-                      className="data border px-2 py-1 text-[11px] text-white outline-none focus:border-[var(--accent)] w-[68px] text-center"
+                      className="data border px-2 py-1 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)] w-[68px] text-center"
                       style={inputStyle}
                     />
                   </div>
@@ -320,7 +320,7 @@ export default function RecordsView() {
                       title="Segment end time"
                       value={endTime}
                       onChange={(e) => setEndTime(e.target.value)}
-                      className="data border px-2 py-1 text-[11px] text-white outline-none focus:border-[var(--accent)] w-[68px] text-center"
+                      className="data border px-2 py-1 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)] w-[68px] text-center"
                       style={inputStyle}
                     />
                   </div>
@@ -392,7 +392,7 @@ export default function RecordsView() {
                   >
                     <div className="flex justify-between items-start gap-2">
                       <div className="min-w-0">
-                        <div className="data text-[11px] font-bold text-white truncate">{track.filename}</div>
+                        <div className="data text-[11px] font-bold text-[var(--text)] truncate">{track.filename}</div>
                         <div className="data text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
                           {track.recorded_at} · {track.duration}
                         </div>
@@ -438,7 +438,7 @@ export default function RecordsView() {
                             placeholder="Add case notes…"
                             value={editNotes}
                             onChange={(e) => setEditNotes(e.target.value)}
-                            className="w-full border text-[11px] text-white p-1.5 outline-none focus:border-[var(--accent)]"
+                            className="w-full border text-[11px] text-[var(--text)] p-1.5 outline-none focus:border-[var(--accent)]"
                             style={inputStyle}
                             rows={2}
                           />
@@ -467,7 +467,7 @@ export default function RecordsView() {
                           <button
                             title="Edit notes"
                             onClick={() => { setEditingId(track.id); setEditNotes(track.notes); }}
-                            className="shrink-0 transition-colors hover:text-white"
+                            className="shrink-0 transition-colors hover:text-[var(--text)]"
                             style={{ color: 'var(--text-3)' }}
                           >
                             <Edit3 size={11} />

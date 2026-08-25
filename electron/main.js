@@ -12,6 +12,15 @@ app.disableHardwareAcceleration();
 let backendProc = null;
 let aiProc = null;
 let nextProc = null;
+
+// Recovery plan §3 ("Backend or AI-core process dies while Electron keeps
+// running"): previously there was no recovery from this short of the user
+// noticing and reopening the app themselves. isShuttingDown distinguishes a
+// deliberate close (killAll(), below) from an actual crash -- only the
+// latter should trigger a restart. Capped and backed off rather than
+// restart-looping forever if a process is crashing on every launch (a bad
+// weights file, a corrupt DB) -- see watchForCrash().
+let isShuttingDown = false;
 let mainWindow = null;
 
 const isPackaged = app.isPackaged;
@@ -204,6 +213,16 @@ function spawnPython(scriptPath, cwd, extraEnv = {}, scriptArgs = []) {
       // whatever's sitting in that folder; disabled, every install runs the
       // exact same package set we shipped, deterministically.
       PYTHONNOUSERSITE: "1",
+      // BUG FOUND 2026-08-25 (user report: optimize weights -> cancel ->
+      // close app -> reopen -> the whole laptop crashed). killAll() below
+      // already tree-kills this process tree on a normal close, but only
+      // runs if Electron's own shutdown code executes at all -- a crashed
+      // or force-killed Electron leaves it running forever with no signal
+      // that anything happened, still holding its share of a 6 GB GPU.
+      // Windows has no PDEATHSIG-equivalent, so port_utils.start_parent_
+      // watchdog() polls for this PID instead and self-exits when it's
+      // gone. See that function's docstring for the full mechanism.
+      ECOVISION_PARENT_PID: String(process.pid),
       HOST,
       ...extraEnv,
     },
@@ -212,6 +231,40 @@ function spawnPython(scriptPath, cwd, extraEnv = {}, scriptArgs = []) {
   proc.stdout.on("data", (d) => console.log(`[${tag}] ${d}`));
   proc.stderr.on("data", (d) => console.error(`[${tag}] ${d}`));
   proc.on("exit", (code) => console.log(`[${tag}] exited with code ${code}`));
+  return proc;
+}
+
+// Recovery plan §3. spawnFn() must attach its own stdout/stderr forwarding
+// (it gets called again on every restart, so that wiring has to travel with
+// it rather than being attached once by the caller). setProc() lets the
+// caller's own backendProc/aiProc/nextProc module variable stay pointed at
+// whichever process instance is currently alive, since killAll() and other
+// code elsewhere read those variables directly.
+const RESTART_BACKOFF_MS = [2000, 5000, 15000];
+const MAX_RESTART_ATTEMPTS = 3;
+
+function watchForCrash(tag, spawnFn, setProc, attempts = 0) {
+  const proc = spawnFn();
+  setProc(proc);
+  proc.on("exit", (code) => {
+    // code === 0 is a clean/deliberate exit (not this app's crash path);
+    // isShuttingDown covers the app-level close, where every child is
+    // expected to exit non-zero (killTree uses SIGKILL/taskkill) and that
+    // must NOT be treated as a crash to recover from.
+    if (isShuttingDown || code === 0) return;
+    const nextAttempt = attempts + 1;
+    if (nextAttempt > MAX_RESTART_ATTEMPTS) {
+      console.error(`[${tag}] crashed ${attempts} time(s) in a row -- giving up automatic restart.`);
+      sendLaunchLog(`[${tag}] keeps crashing and could not be restarted automatically. Please restart the app.`);
+      return;
+    }
+    const delay = RESTART_BACKOFF_MS[Math.min(attempts, RESTART_BACKOFF_MS.length - 1)];
+    console.warn(`[${tag}] exited unexpectedly (code ${code}) -- restarting in ${delay}ms (attempt ${nextAttempt}/${MAX_RESTART_ATTEMPTS})`);
+    sendLaunchLog(`[${tag}] exited unexpectedly -- restarting (attempt ${nextAttempt}/${MAX_RESTART_ATTEMPTS})`);
+    setTimeout(() => {
+      if (!isShuttingDown) watchForCrash(tag, spawnFn, setProc, nextAttempt);
+    }, delay);
+  });
   return proc;
 }
 
@@ -944,6 +997,11 @@ function runPreflight() {
 
 async function launchMainApp() {
   killAll();
+  // killAll() above latches isShuttingDown so its own SIGKILL/taskkill exits
+  // aren't mistaken for a crash -- but this is also the start of a fresh
+  // launch (including a retry after a failed one), so it must come back off
+  // here or every watchForCrash() attached below would be permanently inert.
+  isShuttingDown = false;
   try {
     const { backendDir, backendScript, maincodeDir, aiScript } = getScriptPaths();
     const appDataDir = getAppDataDir();
@@ -1024,23 +1082,27 @@ async function launchMainApp() {
 
     sendLaunchProgress(10, "Starting backend API...");
     sendLaunchStep("backend", "active");
-    backendProc = spawnPython(backendScript, backendDir, {
-      // MUST match writeGeneratedEnv()'s APP_ENV value. This is passed as an
-      // explicit child-process env var, which is already set in os.environ
-      // before backend.py's load_dotenv() ever runs -- and load_dotenv()'s
-      // default (override=False) does NOT replace a variable that's already
-      // set. So THIS value wins over whatever .env says, silently. It was
-      // "production" here until 2026-08-19, independently of writeGeneratedEnv
-      // also forcing "production" -- fixing only one of the two still left
-      // the desktop app loading the Docker-only config.production.json (see
-      // the writeGeneratedEnv fix from 2026-08-18 for the full story). Two
-      // sources of truth for the same value is exactly how that stayed
-      // broken after the first fix; "desktop" is now set in both places.
-      APP_ENV: "desktop",
-      PORT: String(BACKEND_DESIRED_PORT),
-    });
-    backendProc.stderr.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
-    backendProc.stdout.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+    const spawnBackend = () => {
+      const p = spawnPython(backendScript, backendDir, {
+        // MUST match writeGeneratedEnv()'s APP_ENV value. This is passed as an
+        // explicit child-process env var, which is already set in os.environ
+        // before backend.py's load_dotenv() ever runs -- and load_dotenv()'s
+        // default (override=False) does NOT replace a variable that's already
+        // set. So THIS value wins over whatever .env says, silently. It was
+        // "production" here until 2026-08-19, independently of writeGeneratedEnv
+        // also forcing "production" -- fixing only one of the two still left
+        // the desktop app loading the Docker-only config.production.json (see
+        // the writeGeneratedEnv fix from 2026-08-18 for the full story). Two
+        // sources of truth for the same value is exactly how that stayed
+        // broken after the first fix; "desktop" is now set in both places.
+        APP_ENV: "desktop",
+        PORT: String(BACKEND_DESIRED_PORT),
+      });
+      p.stderr.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+      p.stdout.on("data", (d) => { backendLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+      return p;
+    };
+    backendProc = watchForCrash("backend", spawnBackend, (p) => { backendProc = p; });
 
     let backendPort, aiPort, frontendPort;
 
@@ -1055,15 +1117,19 @@ async function launchMainApp() {
     }
 
     sendLaunchStep("ai", "active");
-    aiProc = spawnPython(aiScript, maincodeDir, {
-      // See the matching comment on the backend spawn above.
-      APP_ENV: "desktop",
-      AI_CORE_PORT: String(AI_CORE_DESIRED_PORT),
-      WEIGHTS_DIR: getWeightsDir(),
-      BACKEND_URL: `http://${HOST}:${backendPort}`,
-    });
-    aiProc.stderr.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
-    aiProc.stdout.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
+    const spawnAi = () => {
+      const p = spawnPython(aiScript, maincodeDir, {
+        // See the matching comment on the backend spawn above.
+        APP_ENV: "desktop",
+        AI_CORE_PORT: String(AI_CORE_DESIRED_PORT),
+        WEIGHTS_DIR: getWeightsDir(),
+        BACKEND_URL: `http://${HOST}:${backendPort}`,
+      });
+      p.stderr.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
+      p.stdout.on("data", (d) => { sendLaunchLog(d.toString().trimEnd()); });
+      return p;
+    };
+    aiProc = watchForCrash("ai", spawnAi, (p) => { aiProc = p; });
 
     try {
       aiPort = await waitForRuntimePort("ai_core");
@@ -1085,11 +1151,15 @@ async function launchMainApp() {
 
     writeRuntimeConfigForFrontend(`http://${HOST}:${backendPort}`, `http://${HOST}:${aiPort}`);
 
-    nextProc = spawnNextServer(frontendPort);
-    if (nextProc) {
-      nextProc.stderr.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
-      nextProc.stdout.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
-    }
+    const spawnNext = () => {
+      const p = spawnNextServer(frontendPort);
+      if (p) {
+        p.stderr.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+        p.stdout.on("data", (d) => { nextLog += d.toString(); sendLaunchLog(d.toString().trimEnd()); });
+      }
+      return p;
+    };
+    nextProc = watchForCrash("next", spawnNext, (p) => { nextProc = p; });
 
     try {
       await waitForPort(frontendPort, HOST, 60000);
@@ -1155,6 +1225,10 @@ function killTree(proc) {
 }
 
 function killAll() {
+  // Must be set before any killTree() call below -- those SIGKILL/taskkill
+  // the child, which fires its "exit" handler with a non-zero code, and
+  // watchForCrash() only knows this was deliberate by checking this flag.
+  isShuttingDown = true;
   if (backendProc) {
     killTree(backendProc);
     backendProc = null;

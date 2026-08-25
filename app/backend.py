@@ -41,14 +41,37 @@ from datetime import datetime, timedelta
 import time
 import hashlib
 import hmac
-import base64   
+import base64
 import secrets
 from dotenv import load_dotenv
-from db import get_conn, IntegrityError, DB_KIND, table_exists
-from port_utils import find_free_port, write_runtime_port, read_runtime_ports
+from db import get_conn, IntegrityError, DB_KIND, table_exists, SQLITE_PATH
+from port_utils import find_free_port, write_runtime_port, read_runtime_ports, start_parent_watchdog
+from maintenance import start_maintenance_scheduler
+from notifications import notify_incident_targets
 import uvicorn
 
 load_dotenv()
+
+def _kill_optimize_subprocess_on_parent_death():
+    # _optimize_proc is a module global defined much further down (the
+    # optimize-weights machinery, ~2600 lines below) -- referenced by name
+    # here rather than passed in, since Python resolves a bare global name
+    # at CALL time, not at function-definition time. By the time the
+    # watchdog thread can actually fire (Electron has to disappear AND a
+    # poll interval has to elapse), this module has long since finished
+    # executing top to bottom and the name exists either way.
+    proc = globals().get("_optimize_proc")
+    if proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+# See port_utils.start_parent_watchdog's own docstring for why this exists:
+# without it, an Electron process that dies without running its own
+# killAll() (a crash, a Task Manager kill, a hung previous run) leaves this
+# process running forever, still holding its share of the GPU.
+start_parent_watchdog(on_exit=_kill_optimize_subprocess_on_parent_death)
 # The standard fix, whenever you want it (not urgent, doesn't block anything above): 
 # split into FastAPI APIRouters — routers/auth.py, routers/incidents.py, 
 # routers/cameras.py, routers/admin.py, routers/devteam.py — each mounted onto the 
@@ -126,6 +149,23 @@ if "auth" not in sys_config or not sys_config.get("auth", {}).get("secret_key"):
         json.dump(sys_config, f, indent=2)
 SECRET_KEY = sys_config["auth"]["secret_key"]
 TOKEN_TTL_SECONDS = 7 * 24 * 3600  # 7 days
+
+def sha256_of_file(path: str) -> Optional[str]:
+    """Chain of custody (docs/incident_response_plan.md §3): hashes a clip or
+    screenshot's actual bytes at the moment it's finalized on disk, so the
+    file can later be verified as unaltered rather than trusted on faith.
+    Returns None (never raises) if the file is missing or unreadable --
+    callers store that as a NULL sha256, which just means "hash unavailable
+    for this row", not a broken insert."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as e:
+        print(f"⚠️  [chain-of-custody] Could not hash {path}: {e}")
+        return None
 
 def hash_password(password: str, salt: str = None) -> str:
     salt = salt or secrets.token_hex(16)
@@ -356,6 +396,91 @@ manager = ConnectionManager()
 app.mount("/static/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 app.mount("/static/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
 
+# --- SCHEMA MIGRATIONS FOR ALREADY-EXISTING DATABASES ---
+# init_db() below only applies schema_sqlite.sql/schema_final.sql wholesale
+# when the `users` table is missing (a genuinely fresh DB) -- an existing
+# install's DB never sees a column or table added to those files after the
+# fact. This runs unconditionally, every boot, on both fresh and existing
+# databases, and is written to be safe to run repeatedly: CREATE TABLE IF NOT
+# EXISTS and INSERT OR IGNORE are naturally idempotent; the ADD COLUMN calls
+# are individually guarded because neither SQLite nor this DB_KIND abstraction
+# supports "ADD COLUMN IF NOT EXISTS" portably.
+#
+# Added 2026-08-26 for the chain-of-custody hash columns and the
+# notify_targets/notify_log tables (docs/incident_response_plan.md).
+def _column_exists(cursor, table: str, column: str) -> bool:
+    if DB_KIND == "postgres":
+        cursor.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+            (table, column),
+        )
+    else:
+        cursor.execute(f"PRAGMA table_info({table})")
+        return any(row["name"] == column for row in cursor.fetchall())
+    return cursor.fetchone() is not None
+
+
+def _ensure_column(conn, cursor, table: str, column: str, coltype: str):
+    if _column_exists(cursor, table, column):
+        return
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        conn.commit()
+        print(f"💾 [DATABASE] Migrated: added {table}.{column}")
+    except Exception as e:
+        # Not fatal -- the feature that reads this column degrades to
+        # "hash unavailable" rather than the whole app failing to boot.
+        print(f"⚠️  [DATABASE] Could not add {table}.{column}: {e}")
+
+
+def _migrate_schema(conn, cursor):
+    _ensure_column(conn, cursor, "video_records", "sha256", "TEXT")
+    _ensure_column(conn, cursor, "incident_visibility", "screenshot_sha256", "TEXT")
+
+    if not table_exists(cursor, "notify_targets"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notify_targets (
+                id           TEXT PRIMARY KEY,
+                barangay_id  TEXT REFERENCES barangays(id) ON DELETE CASCADE,
+                station_id   TEXT REFERENCES police_stations(id) ON DELETE CASCADE,
+                channel      TEXT NOT NULL CHECK (channel IN ('telegram','sms')),
+                destination  TEXT NOT NULL,
+                label        TEXT,
+                active       INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created notify_targets")
+
+    if not table_exists(cursor, "notify_log"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notify_log (
+                id           TEXT PRIMARY KEY,
+                incident_id  TEXT REFERENCES incidents(id) ON DELETE CASCADE,
+                target_id    TEXT REFERENCES notify_targets(id) ON DELETE SET NULL,
+                channel      TEXT NOT NULL,
+                destination  TEXT NOT NULL,
+                status       TEXT NOT NULL CHECK (status IN ('sent','failed','skipped_unconfigured')),
+                error        TEXT,
+                sent_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created notify_log")
+
+    try:
+        cursor.execute(
+            "INSERT OR IGNORE INTO permission_keys (key, label) VALUES (?, ?)"
+            if DB_KIND != "postgres" else
+            "INSERT INTO permission_keys (key, label) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+            ("manage_notify_targets", "Manage Responder Notifications"),
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️  [DATABASE] Could not ensure manage_notify_targets permission key: {e}")
+
+
 # --- DATABASE INITIALIZATION ---
 def init_db():
     conn = get_conn()
@@ -370,6 +495,8 @@ def init_db():
         conn.executescript(open(SCHEMA_PATH).read())
         conn.commit()
         print(f"💾 [DATABASE] Applied {SCHEMA_FILENAME} to fresh {DB_KIND} database.")
+
+    _migrate_schema(conn, cursor)
 
     cursor.execute("SELECT id, password FROM users")
     for row_id, pw in cursor.fetchall():
@@ -442,6 +569,21 @@ def init_db():
     conn.close()
 
 init_db()
+
+# Recovery plan §4 / privacy plan §5: daily DB backup + evidence retention
+# sweep. Previously neither existed at all -- see docs/recovery_plan.md and
+# docs/privacy_compliance_plan.md for the reasoning behind the schedule and
+# the retention windows. Placed right after init_db() so a fresh DB (or the
+# bootstrap DEVTEAM account it creates) exists before the first sweep runs.
+start_maintenance_scheduler(
+    sqlite_path=SQLITE_PATH if DB_KIND == "sqlite" else None,
+    writable_dir=WRITABLE_DIR,
+    get_conn=get_conn,
+    table_exists=table_exists,
+    recordings_dir=RECORDINGS_DIR,
+    screenshots_dir=SCREENSHOTS_DIR,
+    db_kind=DB_KIND,
+)
 
 # --- NVIDIA SHADOWPLAY & 24/7 BACKGROUND RECORDING SYSTEMS ---
 class VideoRecordingEngine:
@@ -561,7 +703,7 @@ POLICE_SIDE_ROLES = {"PNP_OFFICER", "PNP_ADMIN", "DEVTEAM"}
 MODEL_VIEW_ROLES = {"DEVTEAM", "BARANGAY_ADMIN"}
 BARANGAY_SIDE_ROLES = {"BARANGAY_ADMIN", "BARANGAY_STAFF"}
 PNP_SIDE_ROLES = {"PNP_ADMIN", "PNP_OFFICER"}
-VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cameras", "confirm_dismiss_alerts"}
+VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cameras", "confirm_dismiss_alerts", "manage_notify_targets"}
 
 # Cameras are barangay property -- the barangay funded and installed the
 # smartpoles; PNP consumes the feed. Previously require_permission() waved
@@ -676,6 +818,16 @@ class CameraSchema(BaseModel):
     name: str
     url: str
     barangay_id: str
+
+class NotifyTargetSchema(BaseModel):
+    # Exactly one of these two should be set -- mirrors CameraSchema's own
+    # single-owner assumption, just with two possible owner kinds instead of
+    # one. See docs/incident_response_plan.md §2.
+    barangay_id: Optional[str] = None
+    station_id: Optional[str] = None
+    channel: str          # "telegram" | "sms"
+    destination: str      # Telegram chat_id, or a phone number
+    label: Optional[str] = None
 
 class StatusUpdateSchema(BaseModel):
     status: str
@@ -901,6 +1053,101 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
     cursor = conn.cursor()
     require_permission(cursor, payload, "manage_cameras")
     cursor.execute("DELETE FROM cameras WHERE id = ?", (cam_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
+
+
+# --- RESPONDER NOTIFICATIONS (Telegram/SMS on confirm-and-report) ---
+# docs/incident_response_plan.md §2. Scoped like cameras (barangay-owned) or
+# like a PNP admin's own station -- DEVTEAM sees everything, matching the
+# ADMIN_ROLES-bypass pattern used by require_permission()/apply_scope()
+# elsewhere in this file.
+@app.get("/api/notify_targets")
+async def list_notify_targets(authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_notify_targets")
+    role = payload.get("role")
+    if role == "DEVTEAM":
+        cursor.execute("SELECT * FROM notify_targets ORDER BY created_at DESC")
+    elif role in PNP_SIDE_ROLES:
+        cursor.execute(
+            "SELECT * FROM notify_targets WHERE station_id = ? ORDER BY created_at DESC",
+            (payload.get("station_id"),),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM notify_targets WHERE barangay_id = ? ORDER BY created_at DESC",
+            (payload.get("barangay_id"),),
+        )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+@app.post("/api/notify_targets")
+async def add_notify_target(target: NotifyTargetSchema, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_notify_targets")
+
+    if target.channel not in ("telegram", "sms"):
+        conn.close()
+        raise HTTPException(status_code=400, detail="channel must be 'telegram' or 'sms'")
+    if not target.barangay_id and not target.station_id:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Provide barangay_id or station_id")
+
+    # A non-DEVTEAM caller may only create a target scoped to their own
+    # barangay/station -- otherwise a barangay admin could register a
+    # responder in someone else's jurisdiction.
+    role = payload.get("role")
+    if role != "DEVTEAM":
+        if role in PNP_SIDE_ROLES and target.station_id != payload.get("station_id"):
+            conn.close()
+            raise HTTPException(status_code=403, detail="Can only manage targets for your own station")
+        if role not in PNP_SIDE_ROLES and target.barangay_id != payload.get("barangay_id"):
+            conn.close()
+            raise HTTPException(status_code=403, detail="Can only manage targets for your own barangay")
+
+    target_id = str(uuid.uuid4())
+    try:
+        cursor.execute(
+            """INSERT INTO notify_targets (id, barangay_id, station_id, channel, destination, label, active)
+               VALUES (?, ?, ?, ?, ?, ?, 1)""",
+            (target_id, target.barangay_id, target.station_id, target.channel, target.destination, target.label),
+        )
+        conn.commit()
+        return {"status": "created", "id": target_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/notify_targets/{target_id}")
+async def delete_notify_target(target_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_notify_targets")
+
+    role = payload.get("role")
+    if role != "DEVTEAM":
+        cursor.execute("SELECT barangay_id, station_id FROM notify_targets WHERE id = ?", (target_id,))
+        existing = cursor.fetchone()
+        if existing:
+            if role in PNP_SIDE_ROLES and existing["station_id"] != payload.get("station_id"):
+                conn.close()
+                raise HTTPException(status_code=403, detail="Can only manage targets for your own station")
+            if role not in PNP_SIDE_ROLES and existing["barangay_id"] != payload.get("barangay_id"):
+                conn.close()
+                raise HTTPException(status_code=403, detail="Can only manage targets for your own barangay")
+
+    cursor.execute("DELETE FROM notify_targets WHERE id = ?", (target_id,))
     conn.commit()
     conn.close()
     return {"status": "deleted"}
@@ -1151,6 +1398,12 @@ async def ai_trigger(data: AiTriggerSchema):
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4()).replace('-', '')[:8].upper()}"
     now = datetime.now()
     screenshot_url = data.screenshot_path or ""
+    # Chain of custody (docs/incident_response_plan.md §3) -- hash the
+    # snapshot's actual bytes now, at the moment this incident is created,
+    # not later when someone happens to look at it.
+    screenshot_hash = None
+    if screenshot_url:
+        screenshot_hash = sha256_of_file(os.path.join(SCREENSHOTS_DIR, os.path.basename(screenshot_url)))
 
     conn = get_conn()
     cursor = conn.cursor()
@@ -1168,8 +1421,8 @@ async def ai_trigger(data: AiTriggerSchema):
         (incident_id, "Autonomous edge detection triggered via spatiotemporal analysis classification matrix."),
     )
     cursor.execute(
-        "INSERT INTO incident_visibility (incident_id, map_hidden, screenshot_path) VALUES (?, 0, ?)",
-        (incident_id, screenshot_url),
+        "INSERT INTO incident_visibility (incident_id, map_hidden, screenshot_path, screenshot_sha256) VALUES (?, 0, ?, ?)",
+        (incident_id, screenshot_url, screenshot_hash),
     )
     conn.commit()
     conn.close()
@@ -1262,6 +1515,10 @@ async def panic_trigger(data: PanicSchema, request: Request):
     except Exception as e:
         print(f"⚠️  [PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
 
+    screenshot_hash = None
+    if screenshot_url:
+        screenshot_hash = sha256_of_file(os.path.join(SCREENSHOTS_DIR, os.path.basename(screenshot_url)))
+
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -1278,8 +1535,8 @@ async def panic_trigger(data: PanicSchema, request: Request):
         (incident_id, "Manual hardware safety interface switch depressed at source terminal."),
     )
     cursor.execute(
-        "INSERT INTO incident_visibility (incident_id, map_hidden, screenshot_path) VALUES (?, 0, ?)",
-        (incident_id, screenshot_url),
+        "INSERT INTO incident_visibility (incident_id, map_hidden, screenshot_path, screenshot_sha256) VALUES (?, 0, ?, ?)",
+        (incident_id, screenshot_url, screenshot_hash),
     )
     conn.commit()
     conn.close()
@@ -1358,9 +1615,26 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
          details.get("narrative"), details.get("nature_of_call"),
          details.get("arrival_reason"), details.get("additional_officers")),
     )
+    # Re-fetch the row for the notification: the UPDATE above only touched
+    # status/officer, and the message needs type/location/confidence/etc.,
+    # which the request payload doesn't carry.
+    cursor.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,))
+    incident_row = cursor.fetchone()
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "incidents", "id": incident_id, "event": "confirmed_and_reported"})
+
+    # docs/incident_response_plan.md §2. Deliberately AFTER commit+close and
+    # wrapped so a notification failure (bad credentials, network down,
+    # whatever) can never turn a successful confirm-and-report into an error
+    # response -- the incident is already confirmed at this point regardless
+    # of what happens below.
+    if incident_row is not None:
+        try:
+            notify_incident_targets(get_conn, dict(incident_row))
+        except Exception as e:
+            print(f"[notify] notify_incident_targets raised: {e}")
+
     return {"status": "confirmed_and_reported", "id": incident_id}
 
 @app.get("/api/incidents/{incident_id}/reports")
@@ -1568,12 +1842,12 @@ async def extract_record_segment(record_id: str, data: ExtractRangeSchema,
     cursor.execute(
         """INSERT INTO video_records
            (id, filename, file_path, recorded_at, duration, type, associated_incident_id,
-            crime_time_marker, notes, barangay_id)
-           VALUES (?, ?, ?, ?, ?, 'CLIP', ?, ?, ?, ?)""",
+            crime_time_marker, notes, barangay_id, sha256)
+           VALUES (?, ?, ?, ?, ?, 'CLIP', ?, ?, ?, ?, ?)""",
         (rid, out_name, out_path, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
          duration_label, row["associated_incident_id"], data.start,
          data.notes or f"Segment {data.start}–{data.end or 'end'} extracted from {row['filename']}.",
-         row["barangay_id"]),
+         row["barangay_id"], sha256_of_file(out_path)),
     )
     conn.commit()
     conn.close()
@@ -1602,6 +1876,24 @@ async def delete_record(record_id: str, authorization: Optional[str] = Header(No
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
+
+    # Chain of custody (docs/incident_response_plan.md §3): a clip tied to an
+    # incident that already has a filed report is evidence, not routine
+    # footage -- never deletable through this normal-use endpoint, regardless
+    # of role. (The maintenance retention sweep obeys the identical rule --
+    # see app/maintenance.py -- so this isn't a new restriction, just this
+    # endpoint catching up to the same one.)
+    if row["associated_incident_id"]:
+        cursor.execute(
+            "SELECT 1 FROM incident_reports WHERE incident_id = ? LIMIT 1",
+            (row["associated_incident_id"],),
+        )
+        if cursor.fetchone():
+            conn.close()
+            raise HTTPException(
+                status_code=409,
+                detail="This clip is evidence for a reported incident and cannot be deleted here.",
+            )
 
     file_removed = False
     try:
@@ -1643,10 +1935,11 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
     try:
         cursor.execute(
             """INSERT INTO video_records
-               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes, barangay_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes, barangay_id, sha256)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (rid, data.filename, fpath, now_str, data.duration, data.type,
-             data.associated_incident_id or None, data.crime_time_marker, data.notes, clip_barangay_id),
+             data.associated_incident_id or None, data.crime_time_marker, data.notes, clip_barangay_id,
+             sha256_of_file(fpath)),
         )
         conn.commit()
         return {"status": "registered", "id": rid}
@@ -1692,10 +1985,11 @@ async def ai_register_clip(data: ManualClipSchema):
     try:
         cursor.execute(
             """INSERT INTO video_records
-               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes, barangay_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, filename, file_path, recorded_at, duration, type, associated_incident_id, crime_time_marker, notes, barangay_id, sha256)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (rid, data.filename, fpath, now_str, data.duration, data.type,
-             data.associated_incident_id or None, data.crime_time_marker, data.notes, clip_barangay_id),
+             data.associated_incident_id or None, data.crime_time_marker, data.notes, clip_barangay_id,
+             sha256_of_file(fpath)),
         )
         conn.commit()
         # RecordsView subscribes via useLiveChannel("*"), so pushing this

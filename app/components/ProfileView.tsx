@@ -66,7 +66,7 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
             <User size={24} />
           </div>
           <div className="min-w-0">
-            <div className="text-[15px] font-bold text-white tracking-wide truncate">
+            <div className="text-[15px] font-bold text-[var(--text)] tracking-wide truncate">
               {currentUser.username || 'Unknown operator'}
             </div>
             <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--text-2)' }}>
@@ -80,7 +80,7 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
           <Field label="Clearance level">
             <div className="flex items-center gap-1.5">
               <Shield size={13} style={{ color: 'var(--accent)' }} />
-              <span className="text-[12px] font-bold text-white uppercase tracking-wide">
+              <span className="text-[12px] font-bold text-[var(--text)] uppercase tracking-wide">
                 {(currentUser.role || 'GUEST').toUpperCase()}
               </span>
             </div>

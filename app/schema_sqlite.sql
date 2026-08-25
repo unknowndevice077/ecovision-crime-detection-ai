@@ -92,7 +92,8 @@ INSERT OR IGNORE INTO permission_keys (key, label) VALUES
     ('view_records', 'View Video Records'),
     ('view_history', 'View Crime History'),
     ('manage_cameras', 'Manage Cameras'),
-    ('confirm_dismiss_alerts', 'Confirm / Dismiss Alerts');
+    ('confirm_dismiss_alerts', 'Confirm / Dismiss Alerts'),
+    ('manage_notify_targets', 'Manage Responder Notifications');
 
 CREATE TABLE IF NOT EXISTS user_permissions (
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -159,9 +160,11 @@ CREATE TABLE IF NOT EXISTS incident_reports (
 CREATE INDEX IF NOT EXISTS idx_incident_reports_incident ON incident_reports(incident_id);
 
 CREATE TABLE IF NOT EXISTS incident_visibility (
-    incident_id     TEXT PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,
-    map_hidden      INTEGER NOT NULL DEFAULT 0,
-    screenshot_path TEXT
+    incident_id       TEXT PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,
+    map_hidden        INTEGER NOT NULL DEFAULT 0,
+    screenshot_path   TEXT,
+    -- See video_records.sha256's comment -- same purpose, for the snapshot.
+    screenshot_sha256 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS video_records (
@@ -174,10 +177,49 @@ CREATE TABLE IF NOT EXISTS video_records (
     associated_incident_id TEXT REFERENCES incidents(id) ON DELETE SET NULL,
     crime_time_marker   TEXT,
     notes               TEXT,
-    barangay_id         TEXT REFERENCES barangays(id) ON DELETE SET NULL
+    barangay_id         TEXT REFERENCES barangays(id) ON DELETE SET NULL,
+    -- Chain of custody (docs/incident_response_plan.md §3): SHA-256 of the
+    -- file's bytes, computed once at the moment it's finalized on disk.
+    -- Lets anyone verify later that a clip handed over is bit-for-bit what
+    -- the detection system actually produced, not "trust me". NULL for rows
+    -- written before this column existed.
+    sha256              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_records_incident ON video_records(associated_incident_id);
 CREATE INDEX IF NOT EXISTS idx_records_recorded_at ON video_records(recorded_at);
+
+-- Notification targets -- docs/incident_response_plan.md §2. Responders
+-- (PNP officers, barangay tanod) to notify by SMS/Telegram when an incident
+-- is confirmed-and-reported. Scoped like cameras and incidents: exactly one
+-- of barangay_id/station_id is set, matching the barangay-owns-its-assets /
+-- station-is-a-lens split documented on the cameras table above.
+CREATE TABLE IF NOT EXISTS notify_targets (
+    id           TEXT PRIMARY KEY,
+    barangay_id  TEXT REFERENCES barangays(id) ON DELETE CASCADE,
+    station_id   TEXT REFERENCES police_stations(id) ON DELETE CASCADE,
+    channel      TEXT NOT NULL CHECK (channel IN ('telegram','sms')),
+    destination  TEXT NOT NULL,   -- Telegram chat_id, or a phone number for SMS
+    label        TEXT,            -- e.g. "Tanod Patrol", "Duty Officer"
+    active       INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_notify_targets_barangay ON notify_targets(barangay_id);
+CREATE INDEX IF NOT EXISTS idx_notify_targets_station ON notify_targets(station_id);
+
+-- One row per attempted send -- so a failed notification is visible instead
+-- of silently swallowed (docs/recovery_plan.md §7: "never let a failed
+-- notification look identical to nothing happened").
+CREATE TABLE IF NOT EXISTS notify_log (
+    id           TEXT PRIMARY KEY,
+    incident_id  TEXT REFERENCES incidents(id) ON DELETE CASCADE,
+    target_id    TEXT REFERENCES notify_targets(id) ON DELETE SET NULL,
+    channel      TEXT NOT NULL,
+    destination  TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('sent','failed','skipped_unconfigured')),
+    error        TEXT,
+    sent_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_notify_log_incident ON notify_log(incident_id);
 
 CREATE TABLE IF NOT EXISTS telemetry_readings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

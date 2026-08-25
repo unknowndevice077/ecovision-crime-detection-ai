@@ -643,7 +643,7 @@ export default function DevteamView() {
             <Radio size={14} className="text-[var(--accent)]" />
           </div>
           <div className="leading-tight">
-            <h1 className="text-[11px] tracking-[0.2em] uppercase text-[#fff]">Oversight Console</h1>
+            <h1 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Oversight Console</h1>
             <p className="text-[9px] tracking-[0.15em] text-[var(--text-2)] uppercase">All locations &middot; full authority</p>
           </div>
         </div>
@@ -703,7 +703,7 @@ export default function DevteamView() {
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder="search callsign or location"
-                className="bg-transparent text-[11px] text-[#fff] outline-none w-full placeholder:text-[var(--text-3)]"
+                className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
               />
             </div>
             <div className="flex-1 overflow-y-auto custom-scrollbar">
@@ -721,7 +721,7 @@ export default function DevteamView() {
                   >
                     <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{style.code}</span>
                     <div className="min-w-0 flex-1">
-                      <p className={`text-[11px] truncate ${active ? 'text-[#fff]' : 'text-[var(--text)]'}`}>{a.username}</p>
+                      <p className="text-[11px] truncate" style={{ color: 'var(--text)' }}>{a.username}</p>
                       <p className="text-[9px] text-[var(--text-2)] truncate">{a.barangay_id} &middot; {count} sub-account{count === 1 ? '' : 's'}</p>
                     </div>
                     {active && <span className="w-1 h-1 rounded-full bg-[var(--accent)] shrink-0" />}
@@ -744,7 +744,7 @@ export default function DevteamView() {
                       {ROLE_STYLES[selectedAdmin.role].code}
                     </span>
                     <div>
-                      <h2 className="text-[13px] text-[#fff] tracking-wide">{selectedAdmin.username}</h2>
+                      <h2 className="text-[13px] text-[var(--text)] tracking-wide">{selectedAdmin.username}</h2>
                       <p className="text-[10px] text-[var(--text-2)] mt-1 flex items-center gap-1 tracking-wide">
                         <MapPinned size={10} /> {selectedAdmin.assignment} &middot; {selectedAdmin.barangay_id}
                       </p>
@@ -796,7 +796,7 @@ export default function DevteamView() {
                         <div key={c.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(c.id) ? 'opacity-40' : ''}`}>
                           <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{style.code}</span>
                           <div className="min-w-0 flex-1">
-                            <p className="text-[11px] text-[#fff] truncate">{c.username}</p>
+                            <p className="text-[11px] text-[var(--text)] truncate">{c.username}</p>
                             <p className="text-[9px] text-[var(--text-2)] truncate">{c.assignment}</p>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
@@ -837,7 +837,7 @@ export default function DevteamView() {
                       <div className="flex items-center gap-3 min-w-0">
                         <span className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${roleMeta.border} ${roleMeta.text}`}>{roleMeta.code}</span>
                         <div className="min-w-0">
-                          <p className="text-[11px] text-[#fff] truncate">{loc.requester_username} <span className="text-[var(--text-2)]">requests</span> {loc.name}</p>
+                          <p className="text-[11px] text-[var(--text)] truncate">{loc.requester_username} <span className="text-[var(--text-2)]">requests</span> {loc.name}</p>
                           <p className="text-[9px] text-[var(--text-2)] flex items-center gap-1">
                             <MapPinned size={9} /> {loc.requester_role} &middot; {loc.requester_assignment} &middot; {new Date(loc.created_at).toLocaleDateString()}
                           </p>
@@ -866,7 +866,7 @@ export default function DevteamView() {
                 </div>
               ) : locationPairs.map(p => (
                 <div key={p.loc} className="flex items-center gap-4 px-4 py-3">
-                  <span className="text-[10px] text-[#fff] w-28 shrink-0 truncate uppercase tracking-wide">{p.loc}</span>
+                  <span className="text-[10px] text-[var(--text)] w-28 shrink-0 truncate uppercase tracking-wide">{p.loc}</span>
                   <SeatChip user={p.precinct} code="PD" />
                   <SeatChip user={p.barangay} code="BG" />
                 </div>
@@ -882,7 +882,7 @@ export default function DevteamView() {
           <div className="max-w-2xl border border-[var(--line)] p-6">
             <div className="flex items-center gap-2 mb-1">
               <UserPlus size={13} className="text-[var(--accent)]" />
-              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[#fff]">Create account — any role</h2>
+              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Create account — any role</h2>
             </div>
             <p className="text-[9px] text-[var(--text-2)] tracking-wide mb-5">
               Skips the self-signup approval queue. Connects the account to a location and grants permissions from the same tree admins use.
@@ -927,7 +927,7 @@ export default function DevteamView() {
                 <select
                   value={createForm.station_id}
                   onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
                 >
                   <option value="">
                     {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
@@ -945,7 +945,7 @@ export default function DevteamView() {
                 <button
                   type="button"
                   onClick={() => setLocPickerOpen(o => !o)}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none flex items-center justify-between transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none flex items-center justify-between transition-colors"
                 >
                   <span className={createForm.barangay_id ? '' : 'text-[var(--text-3)]'}>{createForm.barangay_id || 'select or type a barangay id'}</span>
                   <ChevronDown size={12} className="text-[var(--text-2)]" />
@@ -954,7 +954,7 @@ export default function DevteamView() {
                   value={createForm.barangay_id}
                   onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
                   placeholder="type to create a new barangay id, e.g. 'cogon'"
-                  className="w-full mt-2 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                  className="w-full mt-2 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
                 />
                 {locPickerOpen && knownLocationIds.length > 0 && (
                   <div className="mt-1 border border-[var(--line)] bg-[var(--panel)] max-h-32 overflow-y-auto custom-scrollbar">
@@ -962,7 +962,7 @@ export default function DevteamView() {
                       <button
                         key={loc}
                         onClick={() => { setCreateForm({ ...createForm, barangay_id: loc }); setLocPickerOpen(false); }}
-                        className="w-full text-left px-3 py-1.5 text-[10px] text-[var(--text)] hover:bg-[var(--panel-2)] hover:text-[#fff] transition-colors"
+                        className="w-full text-left px-3 py-1.5 text-[10px] text-[var(--text)] hover:bg-[var(--panel-2)] hover:text-[var(--text)] transition-colors"
                       >
                         {loc}
                       </button>
@@ -978,7 +978,7 @@ export default function DevteamView() {
                 <select
                   value={createForm.parent_admin_id}
                   onChange={e => setCreateForm({ ...createForm, parent_admin_id: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
                 >
                   <option value="">Auto-attach to location captain</option>
                   {eligibleParents.map(p => (
@@ -1067,7 +1067,7 @@ export default function DevteamView() {
                   value={newStationName}
                   onChange={e => setNewStationName(e.target.value)}
                   placeholder="e.g. Ormoc City Police Station"
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
                 />
               </div>
               <button
@@ -1095,7 +1095,7 @@ export default function DevteamView() {
               <div key={st.id} className="border border-[var(--line)]">
                 <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
                   <div className="min-w-0">
-                    <div className="text-[11px] text-[#fff] tracking-wide truncate">{st.name}</div>
+                    <div className="text-[11px] text-[var(--text)] tracking-wide truncate">{st.name}</div>
                     <div className="text-[9px] text-[var(--text-3)] mt-0.5">
                       {st.id} · {st.staff_count} staff · {st.barangay_ids.length} barangay{st.barangay_ids.length === 1 ? '' : 's'}
                     </div>
@@ -1180,7 +1180,7 @@ export default function DevteamView() {
               <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
                 <div className="flex items-center gap-2">
                   <MapPinned size={12} className="text-[var(--accent)]" />
-                  <span className="text-[10px] tracking-[0.15em] uppercase text-[#fff]">{group.loc}</span>
+                  <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">{group.loc}</span>
                   <span className="text-[9px] text-[var(--text-2)]">&middot; {group.cameras.length} camera{group.cameras.length === 1 ? '' : 's'}</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1193,7 +1193,7 @@ export default function DevteamView() {
                   <div key={cam.id} className="flex items-center gap-3 px-4 py-2.5">
                     <Video size={12} className={cam.status === 'online' ? 'text-[var(--ok)]' : 'text-[var(--critical)]'} />
                     <div className="min-w-0 flex-1">
-                      <p className="text-[11px] text-[#fff] truncate">{cam.name}</p>
+                      <p className="text-[11px] text-[var(--text)] truncate">{cam.name}</p>
                       <p className="text-[9px] text-[var(--text-2)] font-mono truncate">{cam.url}</p>
                     </div>
                     <span className={`text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border ${cam.status === 'online' ? 'border-[var(--ok)]/25 text-[var(--ok)]' : 'border-[var(--critical)]/25 text-[var(--critical)]'}`}>
@@ -1226,7 +1226,7 @@ export default function DevteamView() {
             <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
               <Gauge size={13} className="text-[var(--accent)]" />
               <div className="min-w-0 flex-1">
-                <span className="text-[11px] tracking-[0.12em] uppercase text-[#fff]">Optimize weights for this PC</span>
+                <span className="text-[11px] tracking-[0.12em] uppercase text-[var(--text)]">Optimize weights for this PC</span>
                 <p className="text-[9.5px] leading-relaxed text-[var(--text-2)] mt-1">
                   Compiles a TensorRT engine for each model, tuned to this machine's GPU.
                   Optional and reversible — the .pt weights keep working the whole time, and
@@ -1239,7 +1239,7 @@ export default function DevteamView() {
                   onClick={() => startOptimize(true)}
                   disabled={optimizeBusy || !!optimizeState?.running}
                   title="Delete every .engine file, returning to the .pt weights"
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-[9.5px] tracking-[0.1em] uppercase border border-[var(--line-2)] text-[var(--text-2)] hover:border-[var(--text-3)] hover:text-[#fff] disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[9.5px] tracking-[0.1em] uppercase border border-[var(--line-2)] text-[var(--text-2)] hover:border-[var(--text-3)] hover:text-[var(--text)] disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Undo2 size={11} /> Revert
                 </button>
@@ -1271,7 +1271,7 @@ export default function DevteamView() {
                     {s.state === 'done' ? (
                       <span className="text-[var(--ok)]">
                         {s.before_ms?.toFixed(1)}ms → {s.after_ms?.toFixed(1)}ms
-                        <span className="text-[#fff]"> ({s.speedup?.toFixed(2)}x)</span>
+                        <span className="text-[var(--text)]"> ({s.speedup?.toFixed(2)}x)</span>
                       </span>
                     ) : s.state === 'failed' ? (
                       <span className="text-[var(--critical)] truncate max-w-[50%]" title={s.error}>failed: {s.error}</span>
@@ -1325,7 +1325,7 @@ export default function DevteamView() {
                   <Brain size={13} style={{ color: accent }} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-[11px] tracking-[0.12em] uppercase text-[#fff]">{m.display_name}</span>
+                      <span className="text-[11px] tracking-[0.12em] uppercase text-[var(--text)]">{m.display_name}</span>
                       {m.experimental && (
                         <span className="text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border border-[var(--warn)]/30 text-[var(--warn)]">
                           Experimental
@@ -1361,7 +1361,7 @@ export default function DevteamView() {
                       <div key={s.label} className="px-4 py-3">
                         <p className="text-[8.5px] tracking-[0.12em] uppercase text-[var(--text-3)]">{s.label}</p>
                         <p className="text-[19px] leading-tight mt-1 font-mono tabular-nums"
-                           style={{ color: s.good === false ? 'var(--warn)' : '#fff' }}>
+                           style={{ color: s.good === false ? 'var(--warn)' : 'var(--text)' }}>
                           {s.value}<span className="text-[11px] text-[var(--text-2)]">{s.unit}</span>
                         </p>
                         {s.note && <p className="text-[9px] leading-snug text-[var(--text-2)] mt-1">{s.note}</p>}
@@ -1374,9 +1374,9 @@ export default function DevteamView() {
                 <div className="px-4 py-3 space-y-2">
                   <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-[9.5px] text-[var(--text-2)] font-mono">
                     <span title="Chosen on the validation split for the best measured accuracy -- not something to hand-tune from the dashboard.">
-                      threshold <span className="text-[#fff]">{m.threshold}</span>
+                      threshold <span className="text-[var(--text)]">{m.threshold}</span>
                     </span>
-                    <span>confirmations <span className="text-[#fff]">{m.consecutive_required}</span></span>
+                    <span>confirmations <span className="text-[var(--text)]">{m.consecutive_required}</span></span>
                     <span>weights {m.weights_present
                       ? <span className="text-[var(--ok)]">present</span>
                       : <span className="text-[var(--critical)]">MISSING</span>}</span>
@@ -1415,7 +1415,7 @@ export default function DevteamView() {
               ) : (
                 <Gauge size={13} className="text-[var(--accent)] shrink-0" />
               )}
-              <span className="text-[10px] tracking-[0.15em] uppercase text-[#fff] flex-1">
+              <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)] flex-1">
                 {optimizeState?.running
                   ? (optimizeIsRevert ? 'Reverting to .pt weights…' : 'Optimizing for this machine…')
                   : optimizeState?.cancelled
@@ -1487,7 +1487,7 @@ export default function DevteamView() {
           <div className="bg-[var(--panel)] border border-[var(--warn)]/30 w-full max-w-md p-6 font-mono">
             <div className="flex items-center gap-2 mb-4 pb-3 border-b border-[var(--panel-2)]">
               <AlertTriangle size={14} className="text-[var(--warn)]" />
-              <span className="text-[10px] tracking-[0.15em] uppercase text-[#fff]">
+              <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">
                 Turn on {confirmEnable.display_name}?
               </span>
             </div>
@@ -1499,7 +1499,7 @@ export default function DevteamView() {
                 <div key={s.label} className="flex items-baseline justify-between px-3 py-2">
                   <span className="text-[9.5px] text-[var(--text-2)]">{s.label}</span>
                   <span className="text-[11px] tabular-nums"
-                        style={{ color: s.good === false ? 'var(--warn)' : '#fff' }}>
+                        style={{ color: s.good === false ? 'var(--warn)' : 'var(--text)' }}>
                     {s.value}{s.unit}
                   </span>
                 </div>
@@ -1539,7 +1539,7 @@ export default function DevteamView() {
                 </span>
                 <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">{editingUser.role.replace('_', ' ')}</span>
               </div>
-              <button onClick={() => setEditingUser(null)}><X size={15} className="text-[var(--text-2)] hover:text-[#fff]" /></button>
+              <button onClick={() => setEditingUser(null)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
             <div className="space-y-3">
               <div>
@@ -1547,7 +1547,7 @@ export default function DevteamView() {
                 <input
                   value={editDraft.username}
                   onChange={e => setEditDraft({ ...editDraft, username: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
                 />
               </div>
               <div>
@@ -1555,7 +1555,7 @@ export default function DevteamView() {
                 <input
                   value={editDraft.assignment}
                   onChange={e => setEditDraft({ ...editDraft, assignment: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
                 />
               </div>
 
@@ -1573,7 +1573,7 @@ export default function DevteamView() {
                     <select
                       value={editDraft.station_id}
                       onChange={e => setEditDraft({ ...editDraft, station_id: e.target.value })}
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none transition-colors"
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
                     >
                       <option value="">
                         {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
@@ -1594,7 +1594,7 @@ export default function DevteamView() {
                       value={editDraft.barangay_id}
                       onChange={e => setEditDraft({ ...editDraft, barangay_id: e.target.value })}
                       placeholder="barangay id"
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
                     />
                   </div>
                 )
@@ -1608,14 +1608,14 @@ export default function DevteamView() {
                     value={editDraft.password}
                     onChange={e => setEditDraft({ ...editDraft, password: e.target.value })}
                     placeholder="leave blank to keep current"
-                    className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 pr-8 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                    className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 pr-8 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
                   />
                   <button
                     type="button"
                     onClick={() => setShowEditPassword(s => !s)}
                     title={showEditPassword ? 'Hide password' : 'Show password'}
                     tabIndex={-1}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[#fff] transition-colors"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors"
                   >
                     {showEditPassword ? <EyeOff size={12} /> : <Eye size={12} />}
                   </button>
@@ -1669,7 +1669,7 @@ function StatCell({ icon, label, val, accent, last }: any) {
     <div className={`flex items-center gap-2.5 py-3 pr-6 ${!last ? 'border-r border-[var(--panel-2)] mr-6' : ''}`}>
       <span className={accent || 'text-[var(--text-2)]'}>{icon}</span>
       <div className="leading-tight">
-        <span className={`text-[13px] font-semibold tabular-nums ${accent || 'text-[#fff]'}`}>{val}</span>
+        <span className={`text-[13px] font-semibold tabular-nums ${accent || 'text-[var(--text)]'}`}>{val}</span>
         <p className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)]">{label}</p>
       </div>
     </div>
@@ -1681,7 +1681,7 @@ function TabButton({ icon, label, active, onClick, badge }: any) {
     <button
       onClick={onClick}
       className={`flex items-center gap-2 px-4 py-2.5 text-[9px] tracking-[0.15em] uppercase border-b-2 -mb-px transition-colors ${
-        active ? 'border-[var(--accent)] text-[#fff]' : 'border-transparent text-[var(--text-2)] hover:text-[var(--text)]'
+        active ? 'border-[var(--accent)] text-[var(--text)]' : 'border-transparent text-[var(--text-2)] hover:text-[var(--text)]'
       }`}
     >
       {icon} {label}
@@ -1720,7 +1720,7 @@ function FieldInput({ label, value, onChange, type = 'text', placeholder }: any)
           value={value}
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
-          className={`w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[#fff] outline-none placeholder:text-[var(--text-3)] transition-colors ${isPassword ? 'pr-8' : ''}`}
+          className={`w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors ${isPassword ? 'pr-8' : ''}`}
         />
         {isPassword && (
           <button
@@ -1728,7 +1728,7 @@ function FieldInput({ label, value, onChange, type = 'text', placeholder }: any)
             onClick={() => setShow(s => !s)}
             title={show ? 'Hide password' : 'Show password'}
             tabIndex={-1}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[#fff] transition-colors"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors"
           >
             {show ? <EyeOff size={12} /> : <Eye size={12} />}
           </button>

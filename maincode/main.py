@@ -60,14 +60,21 @@ import torch
 try:
     # Packaged builds have port_utils.py copied next to this file (see
     # package.json extraResources), so this plain import succeeds there.
-    from port_utils import find_free_port, write_runtime_port
+    from port_utils import find_free_port, write_runtime_port, start_parent_watchdog
 except ModuleNotFoundError:
     # Running from the repo in dev: port_utils.py lives in app\, not
     # maincode\, so sys.path[0] (this file's dir) doesn't contain it.
     # run_dev_system.bat sets PYTHONPATH for this, but fall back here too so
     # invoking "python maincode/main.py" directly still works.
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
-    from port_utils import find_free_port, write_runtime_port
+    from port_utils import find_free_port, write_runtime_port, start_parent_watchdog
+
+# See port_utils.start_parent_watchdog's own docstring: this is the process
+# holding the actual GPU models (pose, weapons, X3D x3) for as long as it
+# runs, so it self-terminating promptly once Electron disappears -- rather
+# than lingering until someone notices -- is the main point of this whole
+# mechanism, not a nice-to-have.
+start_parent_watchdog()
 # ──────────────────────────────────────────────────────────────────────────────
 # 0. DEPENDENCY CHECK
 # ──────────────────────────────────────────────────────────────────────────────

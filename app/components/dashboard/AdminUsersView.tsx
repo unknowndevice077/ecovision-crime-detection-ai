@@ -239,7 +239,7 @@ export default function AdminUsersView() {
                 style={{ borderColor: 'var(--line)' }}
               >
                 <div className="min-w-0">
-                  <div className="data text-[12px] font-bold text-white truncate">{u.username}</div>
+                  <div className="data text-[12px] font-bold text-[var(--text)] truncate">{u.username}</div>
                   <div className="text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
                     {activeCount} permission{activeCount === 1 ? '' : 's'} granted
                   </div>
@@ -295,7 +295,7 @@ export default function AdminUsersView() {
           <div className="border w-full max-w-sm" style={modalShell}>
             <div className="h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
               <span className="label" style={{ color: 'var(--text)' }}>New User</span>
-              <button onClick={() => setShowCreate(false)} title="Cancel" className="transition-colors hover:text-white" style={{ color: 'var(--text-3)' }}>
+              <button onClick={() => setShowCreate(false)} title="Cancel" className="transition-colors hover:text-[var(--text)]" style={{ color: 'var(--text-3)' }}>
                 <X size={15} />
               </button>
             </div>
@@ -306,7 +306,7 @@ export default function AdminUsersView() {
                   placeholder="Username" required
                   value={newUser.username}
                   onChange={e => setNewUser({ ...newUser, username: e.target.value })}
-                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  className="data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
                   style={inputStyle}
                 />
               </div>
@@ -317,7 +317,7 @@ export default function AdminUsersView() {
                     type={showNewPassword ? 'text' : 'password'} placeholder="Password" required
                     value={newUser.password}
                     onChange={e => setNewUser({ ...newUser, password: e.target.value })}
-                    className="data w-full border p-2.5 pr-9 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                    className="data w-full border p-2.5 pr-9 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
                     style={inputStyle}
                   />
                   <button
@@ -338,7 +338,7 @@ export default function AdminUsersView() {
                   placeholder="e.g. Patrol Unit 3" required
                   value={newUser.assignment}
                   onChange={e => setNewUser({ ...newUser, assignment: e.target.value })}
-                  className="data w-full border p-2.5 text-[12px] text-white outline-none focus:border-[var(--accent)] transition-colors"
+                  className="data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
                   style={inputStyle}
                 />
               </div>
@@ -369,7 +369,7 @@ export default function AdminUsersView() {
               <button
                 onClick={() => { setResetResult(null); setCopied(false); }}
                 title="Close"
-                className="transition-colors hover:text-white"
+                className="transition-colors hover:text-[var(--text)]"
                 style={{ color: 'var(--text-3)' }}
               >
                 <X size={15} />
@@ -377,7 +377,7 @@ export default function AdminUsersView() {
             </div>
             <div className="p-4 space-y-3">
               <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
-                New password for <span className="text-white font-bold">{resetResult.username}</span>.
+                New password for <span className="text-[var(--text)] font-bold">{resetResult.username}</span>.
                 Shown once -- copy it now and hand it to them directly.
               </p>
               <div className="flex items-center gap-2">
@@ -420,7 +420,7 @@ export default function AdminUsersView() {
               <span className="label flex items-center gap-1.5" style={{ color: 'var(--text)' }}>
                 <ShieldCheck size={12} style={{ color: 'var(--accent)' }} /> Permissions
               </span>
-              <button onClick={() => setEditingPerms(null)} title="Cancel" className="transition-colors hover:text-white" style={{ color: 'var(--text-3)' }}>
+              <button onClick={() => setEditingPerms(null)} title="Cancel" className="transition-colors hover:text-[var(--text)]" style={{ color: 'var(--text-3)' }}>
                 <X size={15} />
               </button>
             </div>

@@ -180,7 +180,7 @@ export default function AiModelsPanel() {
                   </button>
                 </div>
                 {m.metrics?.headline ? (
-                  <div className="data text-base font-bold text-white leading-none">
+                  <div className="data text-base font-bold leading-none" style={{ color: 'var(--text)' }}>
                     {m.metrics.headline.value}{m.metrics.headline.unit}
                     <span className="text-[9px] font-normal ml-1" style={{ color: 'var(--text-3)' }}>{m.metrics.headline.label}</span>
                   </div>
@@ -255,7 +255,7 @@ export default function AiModelsPanel() {
                 {s.state === 'done' ? (
                   <span style={{ color: 'var(--ok)' }}>
                     {s.before_ms?.toFixed(1)}ms → {s.after_ms?.toFixed(1)}ms
-                    <span className="text-white"> ({s.speedup?.toFixed(2)}x)</span>
+                    <span style={{ color: 'var(--text)' }}> ({s.speedup?.toFixed(2)}x)</span>
                   </span>
                 ) : s.state === 'failed' ? (
                   <span style={{ color: 'var(--critical)' }} className="truncate max-w-[50%]" title={s.error}>failed</span>
@@ -290,7 +290,7 @@ export default function AiModelsPanel() {
           <div className="border w-full max-w-md p-6" style={{ background: 'var(--panel)', borderColor: 'var(--warn)' }}>
             <div className="flex items-center gap-2 mb-4 pb-3 border-b" style={{ borderColor: 'var(--panel-2)' }}>
               <AlertTriangle size={14} style={{ color: 'var(--warn)' }} />
-              <span className="text-[10px] tracking-[0.15em] uppercase" style={{ color: '#fff' }}>
+              <span className="text-[10px] tracking-[0.15em] uppercase" style={{ color: 'var(--text)' }}>
                 Turn on {confirmEnable.display_name}?
               </span>
             </div>
@@ -301,7 +301,7 @@ export default function AiModelsPanel() {
               {confirmEnable.metrics?.stats?.map(s => (
                 <div key={s.label} className="flex items-baseline justify-between px-3 py-2">
                   <span className="text-[9.5px]" style={{ color: 'var(--text-2)' }}>{s.label}</span>
-                  <span className="text-[11px]" style={{ color: s.good === false ? 'var(--warn)' : '#fff' }}>
+                  <span className="text-[11px]" style={{ color: s.good === false ? 'var(--warn)' : 'var(--text)' }}>
                     {s.value}{s.unit}
                   </span>
                 </div>

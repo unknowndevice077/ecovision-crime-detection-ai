@@ -84,7 +84,7 @@ export default function SignupPage() {
 
   const fieldStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
   const fieldClass =
-    "data w-full px-2.5 py-2.5 text-[12px] text-white border outline-none focus:border-[var(--accent)] transition-colors disabled:opacity-50";
+    "data w-full px-2.5 py-2.5 text-[12px] text-[var(--text)] border outline-none focus:border-[var(--accent)] transition-colors disabled:opacity-50";
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6" style={{ background: 'var(--bg)' }}>
@@ -94,7 +94,7 @@ export default function SignupPage() {
         <div className="flex items-center gap-2.5 mb-5 pb-4 border-b" style={{ borderColor: 'var(--line)' }}>
           <Shield size={20} style={{ color: 'var(--accent)' }} className="stroke-[2.2]" />
           <div>
-            <h1 className="text-[13px] font-bold tracking-[0.18em] text-white leading-none">ECOVISION SENTINEL</h1>
+            <h1 className="text-[13px] font-bold tracking-[0.18em] text-[var(--text)] leading-none">ECOVISION SENTINEL</h1>
             <p className="label mt-1.5">Security Monitoring System</p>
           </div>
         </div>
@@ -144,7 +144,7 @@ export default function SignupPage() {
                   onClick={() => setShowPassword(s => !s)}
                   title={showPassword ? 'Hide password' : 'Show password'}
                   tabIndex={-1}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-3)] hover:text-white transition-colors"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-3)] hover:text-[var(--text)] transition-colors"
                 >
                   {showPassword ? <EyeOff size={13} /> : <Eye size={13} />}
                 </button>
@@ -257,7 +257,7 @@ export default function SignupPage() {
         </div>
 
         <div className="mt-3 pt-3 border-t space-y-2" style={{ borderColor: 'var(--line)' }}>
-          <Link href="/loginpage/login" className="label block transition-colors hover:text-white">
+          <Link href="/loginpage/login" className="label block transition-colors hover:text-[var(--text)]">
             ← Back to sign-in
           </Link>
           <p className="text-[10px] leading-relaxed" style={{ color: 'var(--text-3)' }}>
