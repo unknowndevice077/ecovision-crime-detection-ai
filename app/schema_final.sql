@@ -199,6 +199,16 @@ CREATE TABLE IF NOT EXISTS video_records (
 CREATE INDEX IF NOT EXISTS idx_records_incident ON video_records(associated_incident_id);
 CREATE INDEX IF NOT EXISTS idx_records_recorded_at ON video_records(recorded_at);
 
+-- Per-camera detector overrides. See schema_sqlite.sql's matching comment
+-- for the full reasoning -- kept identical field-for-field.
+CREATE TABLE IF NOT EXISTS camera_model_config (
+    camera_id  TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+    model_key  TEXT NOT NULL CHECK (model_key IN ('violence','robbery','vandalism','vandalism_marks','weapon')),
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (camera_id, model_key)
+);
+
 -- Notification targets -- docs/incident_response_plan.md §2. Responders
 -- (PNP officers, barangay tanod) to notify by SMS/Telegram when an incident
 -- is confirmed-and-reported. Scoped like cameras and incidents: exactly one

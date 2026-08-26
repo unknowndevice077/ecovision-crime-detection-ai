@@ -453,6 +453,19 @@ def _migrate_schema(conn, cursor):
         conn.commit()
         print("💾 [DATABASE] Migrated: created notify_targets")
 
+    if not table_exists(cursor, "camera_model_config"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS camera_model_config (
+                camera_id  TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                model_key  TEXT NOT NULL CHECK (model_key IN ('violence','robbery','vandalism','vandalism_marks','weapon')),
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (camera_id, model_key)
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created camera_model_config")
+
     if not table_exists(cursor, "notify_log"):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS notify_log (
@@ -1448,15 +1461,24 @@ async def camera_name(camera_id: str):
     caller is the local AI pipeline, not a browser, and a camera's own
     display name isn't sensitive. Give it a service credential if this
     backend is ever exposed beyond localhost.
+
+    Also returns this camera's per-camera detector overrides (added
+    alongside camera_model_config -- see that table's comment): main.py
+    resolves its own camera_id here once at startup anyway, so piggybacking
+    the model map on the same call avoids a second unauthenticated
+    round-trip for the same "what should THIS camera do" question. Same
+    once-at-startup, restart-to-apply rule as the name lookup above.
     """
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM cameras WHERE id = ?", (camera_id,))
     row = cursor.fetchone()
-    conn.close()
     if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail=f"No camera registered with id {camera_id!r}")
-    return {"id": camera_id, "name": row["name"]}
+    models = _camera_model_map(cursor, camera_id)
+    conn.close()
+    return {"id": camera_id, "name": row["name"], "models": models}
 
 @app.post("/api/esp32/register")
 async def esp32_register(request: Request):
@@ -2948,6 +2970,137 @@ async def set_detection_model(
         "requires_restart": True,
         "message": "Saved. Restart detection for this to take effect.",
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PER-CAMERA DETECTOR OVERRIDES
+#
+# set_detection_model above is a GLOBAL switch -- one flag in config.json,
+# applying to every camera the whole deployment runs. This is the missing
+# per-camera layer: a barangay owns its cameras (same precedent as
+# manage_cameras) and can restrict which detectors run on EACH of its own
+# cameras individually -- a market-stall camera runs vandalism + robbery
+# only, a corridor camera runs violence only, a flagship node runs
+# everything. A model must be enabled BOTH globally AND for the specific
+# camera to actually run there -- this table can only narrow what the
+# global switch already allows, never widen it. No row for a (camera,
+# model) pair means enabled, so a camera untouched by this feature behaves
+# exactly as it always has.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _camera_owned_by(cursor, camera_id: str, payload: dict) -> bool:
+    """DEVTEAM can touch any camera. Everyone else must own it -- the
+    camera's barangay_id must match the caller's own barangay_id. PNP roles
+    never reach this: manage_cameras is barangay-only (BARANGAY_ONLY_PERMISSIONS),
+    enforced by require_permission() before this is ever called."""
+    if payload.get("role") == "DEVTEAM":
+        return True
+    cursor.execute("SELECT barangay_id FROM cameras WHERE id = ?", (camera_id,))
+    row = cursor.fetchone()
+    if not row:
+        return False
+    return (row["barangay_id"] or "").lower() == (payload.get("barangay_id") or "").lower()
+
+
+def _camera_model_map(cursor, camera_id: str) -> dict:
+    """Every DETECTION_CLASSES key, defaulting to True, overridden by
+    whatever rows actually exist for this camera."""
+    out = {name: True for name in DETECTION_CLASSES}
+    cursor.execute(
+        "SELECT model_key, enabled FROM camera_model_config WHERE camera_id = ?",
+        (camera_id,),
+    )
+    for row in cursor.fetchall():
+        out[row["model_key"]] = bool(row["enabled"])
+    return out
+
+
+@app.get("/api/cameras/{camera_id}/models")
+async def get_camera_models(camera_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+    if not _camera_owned_by(cursor, camera_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Camera not found (or outside your jurisdiction)")
+    models = _camera_model_map(cursor, camera_id)
+    conn.close()
+    return {"camera_id": camera_id, "models": models}
+
+
+@app.get("/api/cameras/models")
+async def list_camera_models(authorization: Optional[str] = Header(None)):
+    """Bulk form of the above -- every camera in the caller's scope plus its
+    model map, in one round trip. Powers the barangay Models panel without
+    an N+1 fetch per camera."""
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+    sql, params = apply_scope(payload, "SELECT id, name, barangay_id FROM cameras", [])
+    cursor.execute(sql, tuple(params))
+    cameras = [dict(r) for r in cursor.fetchall()]
+    for cam in cameras:
+        cam["models"] = _camera_model_map(cursor, cam["id"])
+    conn.close()
+    return {"cameras": cameras}
+
+
+@app.patch("/api/cameras/{camera_id}/models/{model_key}")
+async def set_camera_model(
+    camera_id: str, model_key: str,
+    body: dict = Body(...),
+    authorization: Optional[str] = Header(None),
+):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+
+    if model_key not in DETECTION_CLASSES:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"Unknown detection class: {model_key}")
+    if not _camera_owned_by(cursor, camera_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Camera not found (or outside your jurisdiction)")
+    if "enabled" not in body:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Nothing to change")
+
+    enabled = bool(body["enabled"])
+    # This layer can only narrow, never widen, the global switch -- refuse to
+    # "enable" a camera override for a model that's off system-wide, since
+    # that would silently do nothing and look like a bug when the camera
+    # still doesn't detect it.
+    if enabled:
+        try:
+            cfg = _read_config_file()
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"Cannot read config.json: {e}")
+        block = cfg.get("detection", {}).get(model_key, {})
+        if not bool(block.get("enabled", True)):
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"{model_key} is off system-wide -- ask DevTeam to enable it globally first.",
+            )
+
+    cursor.execute(
+        """INSERT INTO camera_model_config (camera_id, model_key, enabled, updated_at)
+           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT (camera_id, model_key) DO UPDATE SET
+             enabled = excluded.enabled, updated_at = excluded.updated_at""",
+        (camera_id, model_key, 1 if enabled else 0),
+    )
+    conn.commit()
+    conn.close()
+    await manager.broadcast({
+        "channel": "camera_models", "event": "changed",
+        "camera_id": camera_id, "model_key": model_key, "enabled": enabled,
+    })
+    return {"ok": True, "camera_id": camera_id, "model_key": model_key, "enabled": enabled}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -61,6 +61,24 @@ type OptimizeState = {
   preconditions: { ok: boolean; detail: string } | null;
 };
 
+// Mirrors backend.py's DETECTION_CLASSES tuple exactly -- order and keys
+// both matter here since these are used as object keys against the
+// /api/cameras/models response, not just display labels.
+const CAMERA_MODEL_KEYS: { key: string; label: string }[] = [
+  { key: 'violence', label: 'Violence' },
+  { key: 'weapon', label: 'Weapon' },
+  { key: 'robbery', label: 'Robbery' },
+  { key: 'vandalism', label: 'Vandalism' },
+  { key: 'vandalism_marks', label: 'Graffiti Marks' },
+];
+
+type CameraWithModels = {
+  id: string;
+  name: string;
+  barangay_id: string;
+  models: Record<string, boolean>;
+};
+
 export default function AiModelsPanel() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [models, setModels] = useState<DetectionModel[]>([]);
@@ -71,8 +89,56 @@ export default function AiModelsPanel() {
   const [modelBusy, setModelBusy] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
   const [confirmEnable, setConfirmEnable] = useState<DetectionModel | null>(null);
+  const [cameras, setCameras] = useState<CameraWithModels[]>([]);
+  const [camerasLoaded, setCamerasLoaded] = useState(false);
+  const [cameraCellBusy, setCameraCellBusy] = useState<string | null>(null); // `${camera_id}:${model_key}`
 
   const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  const fetchCameraModels = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/cameras/models`, { headers: authHeaders() });
+      if (res.ok) setCameras((await res.json()).cameras || []);
+    } catch { /* leave the previous list up */ }
+    finally { setCamerasLoaded(true); }
+  };
+
+  // A camera override can only narrow a model that's already on globally --
+  // same rule the backend enforces (set_camera_model refuses to "enable" a
+  // camera override for a class that's off system-wide). Checking it here
+  // too means the toggle just looks disabled instead of firing a request
+  // that's going to come back as an error.
+  const globallyOff = (key: string) => models.find(m => m.name === key)?.enabled === false;
+
+  const toggleCameraModel = async (cam: CameraWithModels, modelKey: string) => {
+    const next = !cam.models[modelKey];
+    if (next && globallyOff(modelKey)) {
+      flash(`${modelKey} is off system-wide -- ask DevTeam to enable it globally first.`);
+      return;
+    }
+    const cellId = `${cam.id}:${modelKey}`;
+    setCameraCellBusy(cellId);
+    // Optimistic update, rolled back on failure -- a grid of toggles feels
+    // wrong if every click waits on a round trip before the switch moves.
+    setCameras(prev => prev.map(c => c.id === cam.id ? { ...c, models: { ...c.models, [modelKey]: next } } : c));
+    try {
+      const res = await fetch(`${API_URL}/api/cameras/${cam.id}/models/${modelKey}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        flash(d.detail || 'Could not save');
+        setCameras(prev => prev.map(c => c.id === cam.id ? { ...c, models: { ...c.models, [modelKey]: !next } } : c));
+      }
+    } catch {
+      flash('Could not reach the server');
+      setCameras(prev => prev.map(c => c.id === cam.id ? { ...c, models: { ...c.models, [modelKey]: !next } } : c));
+    } finally {
+      setCameraCellBusy(null);
+    }
+  };
 
   const fetchModels = async () => {
     try {
@@ -120,7 +186,8 @@ export default function AiModelsPanel() {
     } catch { /* leave the previous panel up */ }
   };
 
-  React.useEffect(() => { fetchModels(); fetchOptimizeStatus(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  React.useEffect(() => { fetchModels(); fetchOptimizeStatus(); fetchCameraModels(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useLiveChannel("camera_models", fetchCameraModels);
   useLiveChannel("optimize_weights", fetchOptimizeStatus);
 
   const startOptimize = async (revert: boolean) => {
@@ -200,6 +267,89 @@ export default function AiModelsPanel() {
             <span style={{ fontWeight: 700 }}>Restart required.</span> Detection reads this
             once at startup — your change is saved but won't take effect until it restarts.
           </p>
+        )}
+      </div>
+
+      {/* Per-camera detector overrides -- narrows the global switch above for
+          one specific camera this barangay owns. Never widens it: a model
+          that's Off globally can't be turned on here (see globallyOff). */}
+      <div className="border p-3" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+        <div className="flex items-center gap-2 mb-1">
+          <Gauge size={14} style={{ color: 'var(--text-3)' }} />
+          <span className="label">Models per camera</span>
+        </div>
+        <p className="text-[9.5px] leading-relaxed mb-3" style={{ color: 'var(--text-2)' }}>
+          Choose which detectors run on each of your cameras -- e.g. a market-stall camera can
+          run vandalism only, while a corridor camera runs violence only.
+        </p>
+        {!camerasLoaded ? (
+          <p className="text-[10.5px]" style={{ color: 'var(--text-2)' }}>Loading…</p>
+        ) : cameras.length === 0 ? (
+          <p className="text-[10.5px]" style={{ color: 'var(--text-2)' }}>No cameras registered yet.</p>
+        ) : (
+          <div className="overflow-x-auto custom-scrollbar">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr>
+                  <th className="text-[9px] uppercase tracking-wide font-normal pb-2 pr-3" style={{ color: 'var(--text-3)' }}>
+                    Camera
+                  </th>
+                  {CAMERA_MODEL_KEYS.map(({ key, label }) => (
+                    <th
+                      key={key}
+                      className="text-[9px] uppercase tracking-wide font-normal pb-2 px-2 text-center"
+                      style={{ color: globallyOff(key) ? 'var(--text-3)' : 'var(--text-2)' }}
+                      title={globallyOff(key) ? `${label} is off system-wide` : undefined}
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cameras.map(cam => (
+                  <tr key={cam.id} className="border-t" style={{ borderColor: 'var(--line)' }}>
+                    <td className="text-[10.5px] py-2 pr-3 truncate max-w-[160px]" style={{ color: 'var(--text)' }}>
+                      {cam.name}
+                    </td>
+                    {CAMERA_MODEL_KEYS.map(({ key }) => {
+                      const on = cam.models[key] !== false;
+                      const cellId = `${cam.id}:${key}`;
+                      const disabled = cameraCellBusy === cellId || (!on && globallyOff(key));
+                      return (
+                        <td key={key} className="text-center px-2 py-2">
+                          <button
+                            onClick={() => toggleCameraModel(cam, key)}
+                            disabled={disabled}
+                            title={
+                              globallyOff(key)
+                                ? `${key} is off system-wide -- enable it globally first`
+                                : on ? 'Running on this camera' : 'Not running on this camera'
+                            }
+                            className="w-8 h-4 relative border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            style={{
+                              borderColor: on ? 'var(--ok)' : 'var(--line-2)',
+                              background: on ? 'var(--ok-dim)' : 'transparent',
+                              borderRadius: 'var(--radius-sm)',
+                            }}
+                          >
+                            <span
+                              className="absolute top-0.5 h-2.5 w-2.5 transition-all"
+                              style={{
+                                left: on ? '18px' : '2px',
+                                background: on ? 'var(--ok)' : 'var(--text-3)',
+                                borderRadius: 'var(--radius-sm)',
+                              }}
+                            />
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

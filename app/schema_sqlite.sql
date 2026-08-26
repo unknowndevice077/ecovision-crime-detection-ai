@@ -188,6 +188,24 @@ CREATE TABLE IF NOT EXISTS video_records (
 CREATE INDEX IF NOT EXISTS idx_records_incident ON video_records(associated_incident_id);
 CREATE INDEX IF NOT EXISTS idx_records_recorded_at ON video_records(recorded_at);
 
+-- Per-camera detector overrides. A barangay owns its cameras (see the note
+-- on the cameras table) and can restrict WHICH detectors run on EACH of its
+-- own cameras individually -- e.g. a camera pointed at a market stall runs
+-- vandalism + robbery only, a corridor camera runs violence only, a flagship
+-- node runs everything. This sits ON TOP of the global on/off switch in
+-- config.json (DETECTION_CLASSES, set_detection_model): a model must be
+-- enabled BOTH globally AND for this specific camera to actually run there.
+-- No row for a (camera, model) pair means enabled -- so every camera that
+-- existed before this table was added keeps running exactly what it always
+-- ran, with zero migration needed.
+CREATE TABLE IF NOT EXISTS camera_model_config (
+    camera_id  TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+    model_key  TEXT NOT NULL CHECK (model_key IN ('violence','robbery','vandalism','vandalism_marks','weapon')),
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (camera_id, model_key)
+);
+
 -- Notification targets -- docs/incident_response_plan.md §2. Responders
 -- (PNP officers, barangay tanod) to notify by SMS/Telegram when an incident
 -- is confirmed-and-reported. Scoped like cameras and incidents: exactly one

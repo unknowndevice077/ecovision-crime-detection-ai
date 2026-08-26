@@ -1382,16 +1382,44 @@ camera_source = _normalise_source(_configured_source)
 # backend isn't reachable yet this early in startup).
 CAMERA_NAME = sys_config["camera"].get("name", "Cogon Core Smartpole Node")
 _camera_id = sys_config["camera"].get("camera_id")
+# Per-camera detector overrides (docs/incident_response_plan.md-adjacent
+# feature, backend.py's camera_model_config table): a barangay can turn a
+# detector off for THIS specific camera while leaving it on globally. Empty
+# dict = no override for any class = every *_ON flag below keeps whatever
+# the global config.json already gave it, so a camera with no camera_id
+# configured (or an unreachable backend) behaves exactly as before this
+# feature existed.
+_camera_model_overrides = {}
 if _camera_id:
     try:
         _resp = requests.get(f"{sys_config['networking']['api_url'].rstrip('/')}/api/camera_name/{_camera_id}", timeout=3.0)
         if _resp.ok:
-            CAMERA_NAME = _resp.json()["name"]
+            _cam_data = _resp.json()
+            CAMERA_NAME = _cam_data["name"]
+            _camera_model_overrides = _cam_data.get("models") or {}
             print(f"📷 [CAMERA] Resolved live name for camera_id={_camera_id!r}: {CAMERA_NAME!r}")
+            _disabled_here = [k for k, v in _camera_model_overrides.items() if not v]
+            if _disabled_here:
+                print(f"📷 [CAMERA] Per-camera overrides for {_camera_id!r}: disabled here -> {_disabled_here}")
         else:
             print(f"⚠️  [CAMERA] camera_id={_camera_id!r} not found ({_resp.status_code}) -- using config.json's camera.name fallback: {CAMERA_NAME!r}")
     except Exception as e:
         print(f"⚠️  [CAMERA] Could not reach backend to resolve camera_id={_camera_id!r}: {e} -- using config.json's camera.name fallback: {CAMERA_NAME!r}")
+
+# Apply the per-camera overrides fetched above. Each line ANDs the existing
+# (global-config-derived) flag with this camera's override -- a camera
+# override can only turn something OFF that the global switch already
+# turned ON, never the reverse (matches the same rule backend.py's
+# set_camera_model enforces server-side). .get(key, True) means "no row for
+# this camera+model" reads as enabled, so nothing changes for a camera
+# nobody has touched in the Models panel yet.
+VIOLENCE_ON = VIOLENCE_ON and _camera_model_overrides.get("violence", True)
+ROBBERY_ON = ROBBERY_ON and _camera_model_overrides.get("robbery", True)
+VANDALISM_ON = VANDALISM_ON and _camera_model_overrides.get("vandalism", True)
+WEAPON_DETECTION_ENABLED = WEAPON_DETECTION_ENABLED and _camera_model_overrides.get("weapon", True)
+if not _camera_model_overrides.get("vandalism_marks", True):
+    vandal_mark_model = None
+    print("📷 [CAMERA] vandalism_marks disabled for this camera -- marks model unloaded.")
 # Kept as a separate name because the 0-9 scanner and the Monitor view's index
 # picker are only meaningful for local devices.
 camera_idx = camera_source if isinstance(camera_source, int) else None

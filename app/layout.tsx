@@ -38,7 +38,19 @@ const THEME_INIT_SCRIPT = `
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${manrope.variable} ${publicSans.variable} ${jetbrainsMono.variable}`}>
+    <html
+      lang="en"
+      className={`${manrope.variable} ${publicSans.variable} ${jetbrainsMono.variable}`}
+      // THEME_INIT_SCRIPT below sets data-theme on this element BEFORE
+      // hydration runs, on purpose (see its own comment) -- so the server-
+      // rendered HTML (no data-theme yet) and the first client read always
+      // differ on this one attribute. That's the intended fix for a theme
+      // flash, not a bug, but React's hydration diff doesn't know that and
+      // flags it as a mismatch. suppressHydrationWarning on just this
+      // element tells React "yes, this one attribute is expected to
+      // differ" without silencing real mismatches anywhere else in the tree.
+      suppressHydrationWarning
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         {/* TEMP: Figma capture script, reverted after use */}
