@@ -1754,4 +1754,130 @@ reasoning sounded right.
 
 ---
 
+## 34. Robbery: Two More Attempts at "Train It More", Both Negative Results
+
+Asked directly to retrain robbery with more care around negative-set
+overfitting. Before starting a new run, checked what already existed in
+`D:\EcoVisionImagesTraining` -- two attempts were already sitting there,
+one finished but never checked against the live-pipeline baseline, one
+finished training but never evaluated at all. Both are now checked. Neither
+beats what's deployed. Nothing was redeployed; `x3d_xs_robbery_scene.pt`
+(robbery3, §32's 84.2% acc / 65.3% recall / 86.5% precision / 5.6% FPR on
+139 clips from 8 unseen scenes) stays the shipped model.
+
+### 34.1 Is the deployed model itself overfit to its negatives?
+
+Worth checking first, since the question was about avoiding this, not just
+about a new run. Robbery3's own training log looks alarming in isolation:
+`train_acc` climbs to 87-89% while `val_acc` sits at 60-65% and never
+moves, triggering early stopping -- textbook overfitting shape, and the
+same shape vandalism's rejected first attempt had (§32.5a).
+
+The difference is what happens on the metric that matters. Vandalism's
+in-training gap predicted a real failure: 87.5% FPR on genuinely unseen
+scenes. Robbery3's in-training gap does **not** predict its held-out
+result -- 5.6% FPR and 86.5% precision on 8 scenes the training run never
+saw. The in-training `val_acc` here is explicitly a weak signal by its own
+logged footer ("clean center-crop frames, no pose-tracking/buffer/
+hysteresis involved... NOT the number to cite"), and this is the concrete
+case where trusting it would have meant rejecting a model that actually
+generalizes. **Conclusion: robbery3 is not overfit to its negatives in any
+way that shows up in real-world false-alarm behavior.** The instinct to
+distrust a big train/val gap is right in general (see vandalism); it just
+isn't the same story here, and the only way to tell the two apart is the
+honest held-out number, not the training curve.
+
+### 34.2 Attempt 1 (already run, 2026-08-19): more epochs, different init -- overfits harder, and fails on a genuinely new source
+
+`robbery4` (`train_robbery4.log`/`.err`): same manifest and scene count as
+robbery3, initialized from `x3d_xs_violence_scene_corpus_neg.pt` instead of
+Kinetics, `unfreeze_blocks=2`. Its in-training curve is worse than
+robbery3's, not better -- `train_acc` reaches 90-92% against `val_acc`
+oscillating 64-70% with no improving trend across 13 epochs before early
+stopping.
+
+Its held-out evaluation (`_scratch/eval_robbery4.log`, already run, against
+CamNuvem-sourced property-crime clips it had never seen) confirms the
+in-training signal was right to distrust it this time: **59.0% accuracy,
+19.3% recall** -- it misses 67 of 83 real positives, most scored near-zero
+confidence (0.005-0.15) rather than close-but-under-threshold. This is a
+genuine cross-source generalization failure, not a threshold problem. Not
+deployed.
+
+### 34.3 Attempt 2 (already built, never finished): MIL on 400 source videos -- the "more diverse negatives" approach, run to its actual conclusion
+
+This is the direct answer to "make sure it's not overqualifying the
+negatives" -- a prior session had already built exactly this, and left it
+one command short of an answer.
+
+**What existed:** `train_robbery_mil_v2.py`, a Sultani-et-al.-style
+multiple-instance-learning head trained on **150 negative bags from 150
+distinct UCF-Crime `Normal_Videos` sources** (against robbery3's 26 training
+scenes total, positive and negative combined) plus 150 Robbery / 100
+Burglary / 100 Stealing / 50 Shoplifting positive bags -- video-level weak
+labels only, no manual temporal annotation, which is exactly how it reaches
+~400 source videos instead of 26. Leakage control excludes all 8 test-source
+and 9 val-source videos of the original manifest from MIL training,
+verified in the script itself (`held_out_sources()`). Features were
+pre-extracted through robbery3's own frozen backbone (not generic
+Kinetics features -- already adapted to this project's domain) and the MIL
+head was trained to completion: 300 epochs, best val bag-AUC **0.942** at
+epoch 51.
+
+**What was missing:** `eval_mil_head.py` existed, fully written, with the
+correct protocol already encoded (threshold chosen on val, applied
+unchanged to test; an explicit "dominated everywhere" check across every
+threshold from 0.01 to 0.99 so a recall win bought purely by alarming more
+can't be mistaken for a real one) -- and had never been run. Ran it.
+
+**Result, on the identical 139-clip test split robbery3 was scored on:**
+
+| | MIL (best test threshold shown) | robbery3 (deployed) |
+|---|---|---|
+| Accuracy | 54.7-78.4% depending on threshold | 84.2% |
+| Recall | up to 77.6% | 65.3% |
+| Precision | 42.2-73.2% | 86.5% |
+| FPR | 12.2-57.8% | 5.6% |
+| ROC-AUC (threshold-free) | 0.759 | -- |
+
+The script's own dominance check is unambiguous: **no threshold gives MIL
+robbery3's recall (65.3%) without exceeding robbery3's FPR (5.6%).** MIL's
+higher recall at low thresholds is bought by alarming far more often --
+at threshold 0.1, 57.8% FPR means it fires on well over half of normal
+clips. That is alert fatigue, not sensitivity, for a system where the
+report's own recurring theme is that both failure directions are costly.
+**Verdict: DO NOT DEPLOY. robbery3 stays.**
+
+### 34.4 Why more diverse negatives didn't win here, when it worked for violence
+
+§26 found the opposite result for violence -- real-CCTV negatives *halved*
+its false-alarm rate. The difference is what MIL actually optimizes.
+Sultani et al.'s ranking loss only backpropagates through the
+highest-scoring segment of each bag (`mil_loss`'s `.max()` on both sides);
+it is built to answer "does this video contain an anomaly *somewhere*",
+a video-level question, well (0.942 bag-AUC says it does). Clip-level
+deployment asks a different, harder question -- "is *this specific
+5-second window* the anomaly" -- and nothing in the training objective
+ever supervises that distinction directly, so precision at the clip level
+was never what MIL was trained to protect. Robbery3's 26 scenes are fewer,
+but every one carries a precise temporal label answering the exact
+question being asked at inference time. More diverse negatives helped
+violence because violence's problem was negative *coverage* (few real-CCTV
+examples of any kind); robbery's negatives were already reasonably
+representative -- what's scarce is positive scene diversity, and MIL's added
+positives (Burglary/Stealing/Shoplifting, not Robbery itself) are a
+related but not identical class to the one being scored.
+
+### 34.5 What would actually move robbery's recall
+
+Unchanged from §32.5a's own conclusion, and now confirmed twice more by
+two failed shortcuts around it: **more filmed, precisely-annotated robbery
+scenes -- not more epochs, not a different init, and not weak-label data
+from adjacent classes.** Both attempts here tried to buy scene diversity
+without new footage and both came up short in a measured, specific way
+rather than an ambiguous one, which at least closes off two options
+instead of leaving them as untested assumptions.
+
+---
+
 *This report was compiled from the session's logged experimental results (`eval_history.csv`, `train_log.csv`) and the measurement scripts referenced throughout, all retained in the project repository for reproducibility.*
