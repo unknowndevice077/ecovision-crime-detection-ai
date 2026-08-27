@@ -68,6 +68,27 @@ goto :do_uninstall
 REM nothing to do -- fall through
 
 :do_uninstall
+REM BUG FOUND 2026-08-27: nothing here ever stopped the running app before
+REM deleting its folder. If EcoVisionSentinel.exe (or the backend/AI-core
+REM Python children it spawns) is still running, Windows refuses to delete
+REM files still open by those processes -- rd /s /q then fails SILENTLY on
+REM exactly those files and deletes everything else around them. What's left
+REM behind is specifically the locked DLLs and python.exe under
+REM resources\python-env\, which is exactly "resources doesn't get removed"
+REM reported after testing this uninstaller with the app still running.
+REM
+REM /T kills the process tree, not just the named process -- electron/main.js
+REM spawns backend.py/main.py as real child processes, so this reaches them
+REM too as long as the app hasn't already crashed into orphans (and if it
+REM has, port_utils.start_parent_watchdog already self-terminates those
+REM within ~5s, so there is nothing left here to kill by the time someone
+REM gets to running this).
+echo Stopping EcoVision Sentinel if it is running...
+taskkill /F /IM EcoVisionSentinel.exe /T >nul 2>&1
+REM Give the OS a moment to actually release the file handles -- taskkill
+REM returning doesn't guarantee every handle is closed yet.
+timeout /t 2 /nobreak >nul 2>&1
+
 REM Remove the Start Menu shortcut and the Add/Remove Programs entry first --
 REM both point at files that are about to be deleted, and a stale shortcut or
 REM a registry entry with no uninstaller behind it is worse than none.

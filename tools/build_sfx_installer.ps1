@@ -124,9 +124,18 @@ Rename-Item -Path $unpacked -NewName "EcoVisionSentinel"
 try {
     # mx=3 rather than mx=9: on a 6 GB payload the stronger setting costs about
     # forty minutes to save roughly 5%, and this gets rebuilt often.
+    #
+    # BUG FOUND 2026-08-27: -mmt=on (multi-threaded compression) produced a
+    # payload with silently corrupted torch/lib CUDA DLLs -- caught only
+    # because [4/4]'s integrity test below used to not gate the build (see
+    # that fix too). Two consecutive -mmt=on builds corrupted different sets
+    # of files (1, then 11), which is the signature of a race condition, not
+    # a deterministic bug in one file. -mmt=off is slower but produces a
+    # byte-for-byte reproducible archive -- worth the extra time for
+    # something that ships to an end user's machine.
     Write-Host "[3/4] Compressing payload (several minutes)..."
     Remove-Item $payload -Force -EA SilentlyContinue
-    & $sevenZip a -t7z -mx=3 -mmt=on $payload $staged | Out-Null
+    & $sevenZip a -t7z -mx=3 -mmt=off $payload $staged | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "7z compression failed" }
 }
 finally {
@@ -157,7 +166,20 @@ cmd /c "copy /b `"$sfxMod`" + `"$config`" + `"$payload`" `"$output`"" | Out-Null
 if (-not (Test-Path $output)) { throw "failed to assemble $output" }
 
 Write-Host "`nVerifying archive integrity..."
-& $sevenZip t $output -y | Select-String "Everything is Ok" | ForEach-Object { Write-Host "       $_" }
+# BUG FOUND 2026-08-27: this used to be
+#   & $sevenZip t $output -y | Select-String "Everything is Ok" | ForEach-Object { Write-Host $_ }
+# which never checked $LASTEXITCODE or the ABSENCE of "Everything is Ok" --
+# it just printed the success line IF one happened to appear, then fell
+# through to "BUILT" regardless. Two builds in a row had 7z print
+# "ERROR: Data Error" for corrupted CUDA DLLs directly to the console AND
+# still exited this script with code 0, because nothing here ever looked at
+# whether the test actually passed. An installer that fails its own
+# integrity check must never be reported as built.
+$testOutput = & $sevenZip t $output -y
+$testOutput | ForEach-Object { Write-Host "       $_" }
+if ($LASTEXITCODE -ne 0 -or -not ($testOutput -match "Everything is Ok")) {
+    throw "Archive integrity check FAILED -- see Data Error lines above. Not shipping a corrupted installer."
+}
 
 $mb = (Get-Item $output).Length / 1MB
 Write-Host ("`nBUILT  {0}  ({1:N0} MB)" -f (Split-Path $output -Leaf), $mb)

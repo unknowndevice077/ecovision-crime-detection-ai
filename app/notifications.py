@@ -20,8 +20,8 @@ Env vars (see .env.example):
 import os
 import uuid
 import requests
+from telegram_bot import send_message as send_telegram, format_crime_alert
 
-TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/sendMessage"
 SEMAPHORE_API_URL = "https://api.semaphore.co/api/v4/messages"
 SEND_TIMEOUT_SECONDS = 8  # a notification must never be allowed to hang the request thread
 
@@ -32,24 +32,6 @@ def _telegram_configured():
 
 def _semaphore_configured():
     return bool(os.environ.get("SEMAPHORE_API_KEY"))
-
-
-def send_telegram(chat_id: str, text: str):
-    """Returns (status, error) where status is 'sent' | 'failed' | 'skipped_unconfigured'."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not token:
-        return "skipped_unconfigured", "TELEGRAM_BOT_TOKEN not set"
-    try:
-        resp = requests.post(
-            TELEGRAM_API_BASE.format(token=token),
-            json={"chat_id": chat_id, "text": text},
-            timeout=SEND_TIMEOUT_SECONDS,
-        )
-        if resp.ok and resp.json().get("ok"):
-            return "sent", None
-        return "failed", f"Telegram API returned {resp.status_code}: {resp.text[:300]}"
-    except requests.RequestException as e:
-        return "failed", str(e)
 
 
 def send_sms(phone: str, text: str):
@@ -72,17 +54,17 @@ def send_sms(phone: str, text: str):
         return "failed", str(e)
 
 
-def _format_message(incident: dict) -> str:
-    """Operational content only -- no narrative text, no raw lat/lng, no
-    attachment over SMS. See docs/incident_response_plan.md §2 ('Message
-    content') and docs/privacy_compliance_plan.md for why: a notification
-    should carry only what a responder needs to act, nothing that expands
-    who has access to personal data beyond necessary."""
+def _format_sms_message(incident: dict) -> str:
+    """SMS costs money per message and has no history to scroll back
+    through, so it carries a bit more than the Telegram alert -- date/time
+    and the case_id for follow-up. Still operational content only -- no
+    narrative text, no raw lat/lng. See docs/incident_response_plan.md §2
+    ('Message content') and docs/privacy_compliance_plan.md for why."""
     return (
-        f"[EcoVision] {incident.get('type', 'INCIDENT')} detected — "
+        f"EcoVision: {incident.get('type', 'INCIDENT')} detected -- "
         f"{incident.get('location_name') or 'location unknown'}\n"
         f"{incident.get('occurred_date', '')} {incident.get('occurred_time', '')} "
-        f"· confidence {incident.get('confidence', '?')}\n"
+        f"conf {incident.get('confidence', '?')}\n"
         f"Case: {incident.get('case_id', incident.get('id', '?'))}"
     )
 
@@ -124,13 +106,17 @@ def notify_incident_targets(get_conn, incident: dict):
         conn.close()
         return []
 
-    message = _format_message(incident)
     results = []
     for target in targets:
         if target["channel"] == "telegram":
+            message = format_crime_alert(
+                incident.get("type", "INCIDENT"),
+                incident.get("confidence", "?"),
+                incident.get("location_name") or "location unknown",
+            )
             status, error = send_telegram(target["destination"], message)
         elif target["channel"] == "sms":
-            status, error = send_sms(target["destination"], message)
+            status, error = send_sms(target["destination"], _format_sms_message(incident))
         else:
             status, error = "failed", f"Unknown channel: {target['channel']}"
 

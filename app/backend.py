@@ -48,6 +48,7 @@ from db import get_conn, IntegrityError, DB_KIND, table_exists, SQLITE_PATH
 from port_utils import find_free_port, write_runtime_port, read_runtime_ports, start_parent_watchdog
 from maintenance import start_maintenance_scheduler
 from notifications import notify_incident_targets
+from telegram_bot import start_telegram_registration_poller
 import uvicorn
 
 load_dotenv()
@@ -597,6 +598,12 @@ start_maintenance_scheduler(
     screenshots_dir=SCREENSHOTS_DIR,
     db_kind=DB_KIND,
 )
+
+# Telegram registration poller (app/telegram_bot.py) -- lets an officer get
+# their own chat_id by messaging the bot, since this backend has no public
+# endpoint for Telegram to webhook into. No-ops if TELEGRAM_BOT_TOKEN isn't
+# set in .env.
+start_telegram_registration_poller()
 
 # --- NVIDIA SHADOWPLAY & 24/7 BACKGROUND RECORDING SYSTEMS ---
 class VideoRecordingEngine:
