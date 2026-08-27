@@ -1712,4 +1712,46 @@ from scratch, and the violence model has already learned them.
 
 ---
 
+## 33. §28.1 Wired: Per-Camera Threshold Calibration Is No Longer Just a Measurement
+
+§28.1 measured the win (46 alarms/hr -> 20/hr network-wide, paid only by the
+camera that needed it) but stopped there -- no code path existed to apply it.
+As of 2026-08-28 it does.
+
+**Shape, deliberately copied from the existing per-camera model on/off
+feature (`camera_model_config`).** A new table, `camera_threshold_config`
+(`camera_id`, `model_key` in `violence|robbery|vandalism`, `threshold`,
+`consecutive_required`), no row means "use `config.json`'s global value" --
+the same absent-means-default rule as every other per-camera override in this
+project, so a camera nobody has calibrated behaves exactly as it did before
+this existed. `main.py` fetches it in the same startup call that already
+resolves camera name and per-camera model on/off (`/api/camera_name/{id}`),
+and applies it by setting `.threshold`/`.consecutive` directly on the
+already-constructed `SceneViolenceDetector` instance -- the class already
+accepted these as constructor overrides for the robbery/vandalism case, this
+just reaches them post-construction for the camera-specific case.
+
+**Deliberately NOT a dashboard number input.** Both existing AI Models panels
+(barangay-scoped and DevTeam) carry standing comments that threshold editing
+was removed from the UI on 2026-08-23 specifically because a number typed
+into a box invalidates the measured accuracy shown next to it with no
+warning. A per-camera override is still a threshold, so it inherits that
+rule: the only way to set one is `tools/calibrate_camera_quiet.py`, which
+runs the real deployed detector against a camera's own quiet footage and
+recommends the p99.5 raw confidence as its threshold -- a measured number,
+not a typed one. The dashboard (DevTeam AI Models tab) gained one read-only
+line, "N cameras calibrated," so it's visible that calibration happened
+without offering a way to fake it from the UI.
+
+**What this has NOT been validated against yet.** No real camera has been
+calibrated with it -- §28.1's numbers came from a research script against
+recorded footage, not this code path. The `p99.5`-of-quiet-footage
+methodology, the `[0.05, 0.95]` sanity clamp, and the ownership/permission
+checks are new surface that wants its own smoke test on a real deployment
+before being relied on, the same way every other capability in this report
+was checked against real footage rather than assumed correct because the
+reasoning sounded right.
+
+---
+
 *This report was compiled from the session's logged experimental results (`eval_history.csv`, `train_log.csv`) and the measurement scripts referenced throughout, all retained in the project repository for reproducibility.*

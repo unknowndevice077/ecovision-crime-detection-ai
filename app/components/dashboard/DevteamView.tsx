@@ -292,6 +292,13 @@ export default function DevteamView() {
   const [modelBusy, setModelBusy] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
   const [confirmEnable, setConfirmEnable] = useState<DetectionModel | null>(null);
+  // Read-only visibility onto camera_threshold_config (docs/progress_report_
+  // violence_detection.md §28.1) -- deliberately NOT an edit control, same
+  // reasoning as the reverted-editable-threshold comment below: a per-camera
+  // number is set by tools/calibrate_camera_quiet.py against that camera's
+  // own quiet footage, not typed into a box here. This just answers "is
+  // anything actually calibrated right now".
+  const [thresholdCounts, setThresholdCounts] = useState<Record<string, number>>({});
 
   // REVERSED 2026-08-23 (was editable for "weapon" only, since 2026-08-19):
   // every threshold here is the value measured to give the model's reported
@@ -311,6 +318,21 @@ export default function DevteamView() {
       }
     } catch { /* leave the previous list up rather than blanking the panel */ }
     finally { setModelsLoaded(true); }
+  };
+
+  const fetchThresholdCounts = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/cameras/thresholds`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const d = await res.json();
+      const counts: Record<string, number> = {};
+      for (const cam of d.cameras || []) {
+        for (const key of Object.keys(cam.thresholds || {})) {
+          counts[key] = (counts[key] || 0) + 1;
+        }
+      }
+      setThresholdCounts(counts);
+    } catch { /* purely informational -- leave whatever counts were last shown */ }
   };
 
   const applyModelChange = async (m: DetectionModel, body: Record<string, unknown>) => {
@@ -689,7 +711,7 @@ export default function DevteamView() {
           icon={<Brain size={12} />}
           label="AI Models"
           active={tab === 'models'}
-          onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); }}
+          onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); fetchThresholdCounts(); }}
         />
       </div>
 
@@ -1377,6 +1399,13 @@ export default function DevteamView() {
                       threshold <span className="text-[var(--text)]">{m.threshold}</span>
                     </span>
                     <span>confirmations <span className="text-[var(--text)]">{m.consecutive_required}</span></span>
+                    {thresholdCounts[m.name] > 0 && (
+                      <span
+                        title="Cameras running their own calibrated threshold instead of this global value -- see docs/progress_report_violence_detection.md §28.1 and tools/calibrate_camera_quiet.py."
+                      >
+                        <span className="text-[var(--ok)]">{thresholdCounts[m.name]}</span> camera{thresholdCounts[m.name] === 1 ? '' : 's'} calibrated
+                      </span>
+                    )}
                     <span>weights {m.weights_present
                       ? <span className="text-[var(--ok)]">present</span>
                       : <span className="text-[var(--critical)]">MISSING</span>}</span>

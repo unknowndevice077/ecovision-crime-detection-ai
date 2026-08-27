@@ -1390,6 +1390,10 @@ _camera_id = sys_config["camera"].get("camera_id")
 # configured (or an unreachable backend) behaves exactly as before this
 # feature existed.
 _camera_model_overrides = {}
+# Same absent-means-default guard as _camera_model_overrides: initialized
+# empty here so the per-camera-threshold block below never references a
+# variable that a failed/unreachable request left undefined.
+_camera_threshold_overrides = {}
 if _camera_id:
     try:
         _resp = requests.get(f"{sys_config['networking']['api_url'].rstrip('/')}/api/camera_name/{_camera_id}", timeout=3.0)
@@ -1397,6 +1401,7 @@ if _camera_id:
             _cam_data = _resp.json()
             CAMERA_NAME = _cam_data["name"]
             _camera_model_overrides = _cam_data.get("models") or {}
+            _camera_threshold_overrides = _cam_data.get("thresholds") or {}
             print(f"📷 [CAMERA] Resolved live name for camera_id={_camera_id!r}: {CAMERA_NAME!r}")
             _disabled_here = [k for k, v in _camera_model_overrides.items() if not v]
             if _disabled_here:
@@ -1420,6 +1425,33 @@ WEAPON_DETECTION_ENABLED = WEAPON_DETECTION_ENABLED and _camera_model_overrides.
 if not _camera_model_overrides.get("vandalism_marks", True):
     vandal_mark_model = None
     print("📷 [CAMERA] vandalism_marks disabled for this camera -- marks model unloaded.")
+
+# Per-camera OPERATING-POINT overrides (backend.py's camera_threshold_config
+# table, docs/progress_report_violence_detection.md §28.1): a barangay can
+# retune threshold/consecutive for THIS specific camera without touching
+# config.json, e.g. a wide flyover camera calibrated hotter than a quiet
+# storefront. Piggybacked on the same /api/camera_name response the model
+# overrides above came from -- no extra round trip. Empty/missing keys mean
+# "no override" and every detector keeps the threshold it was already built
+# with (SceneViolenceDetector.threshold/.consecutive, set from
+# config.json's scene_confidence_threshold/scene_confidence_required or the
+# robbery/vandalism confidence_threshold/consecutive_required at
+# construction, a few hundred lines above).
+for _model_key, _detector in (
+    ("violence", scene_detector),
+    ("robbery", robbery_detector),
+    ("vandalism", vandalism_detector),
+):
+    _override = _camera_threshold_overrides.get(_model_key)
+    if not _override or _detector is None:
+        continue
+    if _override.get("threshold") is not None:
+        _detector.threshold = float(_override["threshold"])
+    if _override.get("consecutive_required") is not None:
+        _detector.consecutive = int(_override["consecutive_required"])
+    print(f"📷 [CAMERA] Per-camera threshold for {_camera_id!r}/{_model_key}: "
+          f"threshold={_detector.threshold} consecutive={_detector.consecutive} "
+          f"(source: {_override.get('calibrated_from', 'manual')})")
 # Kept as a separate name because the 0-9 scanner and the Monitor view's index
 # picker are only meaningful for local devices.
 camera_idx = camera_source if isinstance(camera_source, int) else None

@@ -467,6 +467,21 @@ def _migrate_schema(conn, cursor):
         conn.commit()
         print("💾 [DATABASE] Migrated: created camera_model_config")
 
+    if not table_exists(cursor, "camera_threshold_config"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS camera_threshold_config (
+                camera_id             TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                model_key             TEXT NOT NULL CHECK (model_key IN ('violence','robbery','vandalism')),
+                threshold             REAL NOT NULL CHECK (threshold > 0 AND threshold < 1),
+                consecutive_required  INTEGER CHECK (consecutive_required IS NULL OR consecutive_required BETWEEN 1 AND 10),
+                calibrated_from       TEXT,
+                updated_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (camera_id, model_key)
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created camera_threshold_config")
+
     if not table_exists(cursor, "notify_log"):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS notify_log (
@@ -1475,6 +1490,11 @@ async def camera_name(camera_id: str):
     the model map on the same call avoids a second unauthenticated
     round-trip for the same "what should THIS camera do" question. Same
     once-at-startup, restart-to-apply rule as the name lookup above.
+
+    2026-08-28: also piggybacks camera_threshold_config (§28.1 per-camera
+    operating points) for the same reason -- one more unauthenticated
+    round-trip main.py would otherwise need at the exact same point in
+    startup, for the exact same "what should THIS camera do" question.
     """
     conn = get_conn()
     cursor = conn.cursor()
@@ -1484,8 +1504,9 @@ async def camera_name(camera_id: str):
         conn.close()
         raise HTTPException(status_code=404, detail=f"No camera registered with id {camera_id!r}")
     models = _camera_model_map(cursor, camera_id)
+    thresholds = _camera_threshold_map(cursor, camera_id)
     conn.close()
-    return {"id": camera_id, "name": row["name"], "models": models}
+    return {"id": camera_id, "name": row["name"], "models": models, "thresholds": thresholds}
 
 @app.post("/api/esp32/register")
 async def esp32_register(request: Request):
@@ -3108,6 +3129,203 @@ async def set_camera_model(
         "camera_id": camera_id, "model_key": model_key, "enabled": enabled,
     })
     return {"ok": True, "camera_id": camera_id, "model_key": model_key, "enabled": enabled}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PER-CAMERA THRESHOLD OVERRIDES -- docs/progress_report_violence_detection.md
+# §28.1: one global threshold is necessarily too low for a noisy camera and
+# too high for the rest of the network. Same shape and same precedent as the
+# on/off overrides above (camera_model_config): a row here NARROWS/RETUNES a
+# single camera's operating point without touching config.json, and no row
+# means "use whatever the global config already says" -- a camera nobody has
+# calibrated behaves exactly as it always has.
+#
+# Scoped to violence/robbery/vandalism only -- the three SceneViolenceDetector
+# instances, which share one threshold+consecutive shape. weapon and
+# vandalism_marks are single-frame YOLO with per-class confidence, a
+# different knob entirely, and aren't part of this.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# (global_threshold_key, global_consecutive_key) in config.json's
+# detection.<model_key> block -- violence nests these under scene_* because
+# the same block also carries track-mode's plain confidence_threshold;
+# robbery/vandalism have no track mode so theirs are unprefixed.
+_THRESHOLD_MODEL_KEYS = ("violence", "robbery", "vandalism")
+_GLOBAL_THRESHOLD_CFG_KEYS = {
+    "violence":  ("scene_confidence_threshold", "scene_consecutive_required"),
+    "robbery":   ("confidence_threshold", "consecutive_required"),
+    "vandalism": ("confidence_threshold", "consecutive_required"),
+}
+
+
+def _global_threshold_defaults(cfg: dict) -> dict:
+    """{model_key: {"threshold":.., "consecutive_required":..}} read straight
+    out of config.json, so the UI can show what an uncalibrated camera is
+    actually running without duplicating those numbers in TypeScript (same
+    reasoning as the AI Models panel's numbers -- see final_checks.md §3.2)."""
+    det = cfg.get("detection", {})
+    out = {}
+    for key in _THRESHOLD_MODEL_KEYS:
+        thresh_key, consec_key = _GLOBAL_THRESHOLD_CFG_KEYS[key]
+        block = det.get(key, {})
+        out[key] = {
+            "threshold": block.get(thresh_key),
+            "consecutive_required": block.get(consec_key),
+        }
+    return out
+
+
+def _camera_threshold_map(cursor, camera_id: str) -> dict:
+    """Only rows that actually exist -- unlike _camera_model_map this does
+    NOT fill in every key, because absence here means something different to
+    the caller ('inherit the global value', not 'this specific value')."""
+    out = {}
+    cursor.execute(
+        """SELECT model_key, threshold, consecutive_required, calibrated_from, updated_at
+           FROM camera_threshold_config WHERE camera_id = ?""",
+        (camera_id,),
+    )
+    for row in cursor.fetchall():
+        out[row["model_key"]] = {
+            "threshold": row["threshold"],
+            "consecutive_required": row["consecutive_required"],
+            "calibrated_from": row["calibrated_from"],
+            "updated_at": row["updated_at"],
+        }
+    return out
+
+
+@app.get("/api/cameras/{camera_id}/thresholds")
+async def get_camera_thresholds(camera_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+    if not _camera_owned_by(cursor, camera_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Camera not found (or outside your jurisdiction)")
+    overrides = _camera_threshold_map(cursor, camera_id)
+    defaults = _global_threshold_defaults(_read_config_file())
+    conn.close()
+    return {"camera_id": camera_id, "overrides": overrides, "global_defaults": defaults}
+
+
+@app.get("/api/cameras/thresholds")
+async def list_camera_thresholds(authorization: Optional[str] = Header(None)):
+    """Bulk form, same rationale as list_camera_models: one round trip for
+    every camera in the caller's scope instead of an N+1 fetch per camera."""
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+    sql, params = apply_scope(payload, "SELECT id, name, barangay_id FROM cameras", [])
+    cursor.execute(sql, tuple(params))
+    cameras = [dict(r) for r in cursor.fetchall()]
+    for cam in cameras:
+        cam["thresholds"] = _camera_threshold_map(cursor, cam["id"])
+    defaults = _global_threshold_defaults(_read_config_file())
+    conn.close()
+    return {"cameras": cameras, "global_defaults": defaults}
+
+
+@app.patch("/api/cameras/{camera_id}/thresholds/{model_key}")
+async def set_camera_threshold(
+    camera_id: str, model_key: str,
+    body: dict = Body(...),
+    authorization: Optional[str] = Header(None),
+):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+
+    if model_key not in _THRESHOLD_MODEL_KEYS:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"No tunable threshold for: {model_key}")
+    if not _camera_owned_by(cursor, camera_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Camera not found (or outside your jurisdiction)")
+    if "threshold" not in body:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Nothing to change")
+
+    try:
+        threshold = float(body["threshold"])
+    except (TypeError, ValueError):
+        conn.close()
+        raise HTTPException(status_code=400, detail="threshold must be a number")
+    # Matches the schema CHECK, checked here too so the error is legible
+    # instead of a raw sqlite3.IntegrityError.
+    if not (0.05 <= threshold <= 0.95):
+        conn.close()
+        raise HTTPException(status_code=400, detail="threshold must be between 0.05 and 0.95")
+
+    consecutive = body.get("consecutive_required")
+    if consecutive is not None:
+        try:
+            consecutive = int(consecutive)
+        except (TypeError, ValueError):
+            conn.close()
+            raise HTTPException(status_code=400, detail="consecutive_required must be an integer")
+        if not (1 <= consecutive <= 10):
+            conn.close()
+            raise HTTPException(status_code=400, detail="consecutive_required must be between 1 and 10")
+
+    calibrated_from = body.get("calibrated_from", "manual")
+    if calibrated_from not in ("manual", "quiet_clip"):
+        calibrated_from = "manual"
+
+    cursor.execute(
+        """INSERT INTO camera_threshold_config
+               (camera_id, model_key, threshold, consecutive_required, calibrated_from, updated_at)
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT (camera_id, model_key) DO UPDATE SET
+             threshold = excluded.threshold,
+             consecutive_required = excluded.consecutive_required,
+             calibrated_from = excluded.calibrated_from,
+             updated_at = excluded.updated_at""",
+        (camera_id, model_key, threshold, consecutive, calibrated_from),
+    )
+    conn.commit()
+    conn.close()
+    await manager.broadcast({
+        "channel": "camera_thresholds", "event": "changed",
+        "camera_id": camera_id, "model_key": model_key,
+        "threshold": threshold, "consecutive_required": consecutive,
+    })
+    return {
+        "ok": True, "camera_id": camera_id, "model_key": model_key,
+        "threshold": threshold, "consecutive_required": consecutive,
+        "calibrated_from": calibrated_from,
+        "requires_restart": True,
+        "message": "Saved. Restart detection on this camera for it to take effect.",
+    }
+
+
+@app.delete("/api/cameras/{camera_id}/thresholds/{model_key}")
+async def clear_camera_threshold(camera_id: str, model_key: str, authorization: Optional[str] = Header(None)):
+    """Resets a camera back to the global config.json value -- the inverse of
+    set_camera_threshold, and deliberately a DELETE rather than PATCHing back
+    to some sentinel, so 'no override' stays represented as 'no row' rather
+    than a magic value the rest of this feature has to know about."""
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    require_permission(cursor, payload, "manage_cameras")
+    if not _camera_owned_by(cursor, camera_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Camera not found (or outside your jurisdiction)")
+    cursor.execute(
+        "DELETE FROM camera_threshold_config WHERE camera_id = ? AND model_key = ?",
+        (camera_id, model_key),
+    )
+    conn.commit()
+    conn.close()
+    await manager.broadcast({
+        "channel": "camera_thresholds", "event": "cleared",
+        "camera_id": camera_id, "model_key": model_key,
+    })
+    return {"ok": True, "camera_id": camera_id, "model_key": model_key, "requires_restart": True}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

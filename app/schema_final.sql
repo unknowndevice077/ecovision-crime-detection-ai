@@ -209,6 +209,19 @@ CREATE TABLE IF NOT EXISTS camera_model_config (
     PRIMARY KEY (camera_id, model_key)
 );
 
+-- Per-camera operating-point overrides. See schema_sqlite.sql's matching
+-- comment for the full reasoning (docs/progress_report_violence_detection.md
+-- §28.1) -- kept identical field-for-field.
+CREATE TABLE IF NOT EXISTS camera_threshold_config (
+    camera_id             TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+    model_key             TEXT NOT NULL CHECK (model_key IN ('violence','robbery','vandalism')),
+    threshold             REAL NOT NULL CHECK (threshold > 0 AND threshold < 1),
+    consecutive_required  INTEGER CHECK (consecutive_required IS NULL OR consecutive_required BETWEEN 1 AND 10),
+    calibrated_from       TEXT,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (camera_id, model_key)
+);
+
 -- Notification targets -- docs/incident_response_plan.md §2. Responders
 -- (PNP officers, barangay tanod) to notify by SMS/Telegram when an incident
 -- is confirmed-and-reported. Scoped like cameras and incidents: exactly one
