@@ -237,13 +237,31 @@ export default function AiModelsPanel() {
                     onClick={() => requestToggle(m)}
                     disabled={modelBusy === m.name || (!m.enabled && !m.weights_present)}
                     title={!m.weights_present ? 'Model file is missing' : (m.enabled ? 'Turn off' : 'Turn on')}
-                    className="text-[8px] font-bold uppercase px-1 py-0.5 border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    style={{
-                      color: m.enabled ? 'var(--ok)' : 'var(--text-3)',
-                      borderColor: m.enabled ? 'var(--ok)' : 'var(--line-2)',
-                    }}
+                    className="flex items-center gap-1.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    {m.enabled ? 'Active' : 'Off'}
+                    <span
+                      className="text-[8px] font-bold uppercase"
+                      style={{ color: m.enabled ? 'var(--ok)' : 'var(--text-3)' }}
+                    >
+                      {m.enabled ? 'Active' : 'Off'}
+                    </span>
+                    <span
+                      className="w-8 h-4 relative border transition-colors"
+                      style={{
+                        borderColor: m.enabled ? 'var(--ok)' : 'var(--line-2)',
+                        background: m.enabled ? 'var(--ok-dim)' : 'transparent',
+                        borderRadius: 'var(--radius-sm)',
+                      }}
+                    >
+                      <span
+                        className="absolute top-0.5 h-2.5 w-2.5 transition-all"
+                        style={{
+                          left: m.enabled ? '18px' : '2px',
+                          background: m.enabled ? 'var(--ok)' : 'var(--text-3)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}
+                      />
+                    </span>
                   </button>
                 </div>
                 {m.metrics?.headline ? (

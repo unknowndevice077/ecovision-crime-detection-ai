@@ -138,7 +138,13 @@ export default function DevteamView() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
   const [tab, setTab] = useState<Tab>('directory');
-  const [selectedAdminId, setSelectedAdminId] = useState<number | null>(null);
+  // Keys into locationDirectory below: a barangay's own id for a normal
+  // location row, or `station:<id>` for a station that has no barangay
+  // jurisdiction assigned yet (see locationDirectory's unassignedStations --
+  // that bucket exists so a station created before its jurisdiction is set
+  // still has somewhere for its PNP accounts to show up, instead of quietly
+  // disappearing from a purely per-barangay view).
+  const [selectedLocationKey, setSelectedLocationKey] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [editDraft, setEditDraft] = useState({ username: '', assignment: '', password: '', barangay_id: '', station_id: '' });
@@ -566,20 +572,121 @@ export default function DevteamView() {
     }
   };
 
-  const { admins, childrenByAdmin, selectedAdmin, selectedChildren } = useMemo(() => {
-    if (!data) return { admins: [], childrenByAdmin: new Map(), selectedAdmin: null, selectedChildren: [] };
+  // Per-LOCATION directory (replaces the old per-admin flat list). A
+  // barangay is a location; a location has at most one connected police
+  // station (found via that station's own jurisdiction list, stations.
+  // barangay_ids -- NOT via barangay_id on the PNP account, which is always
+  // null for PNP roles, see handleCreateUser's `barangay_id: isPnp ? null
+  // : ...`). Each location surfaces both seats: the station's PNP admin +
+  // its sub-accounts, and the barangay's own admin + its sub-accounts.
+  type LocationEntry = {
+    loc: PendingLocation; station: Station | undefined;
+    barangayAdmins: ManagedUser[]; barangayStaff: ManagedUser[];
+    pnpAdmins: ManagedUser[]; pnpStaff: ManagedUser[];
+  };
+  type UnassignedStationEntry = { station: Station; pnpAdmins: ManagedUser[]; pnpStaff: ManagedUser[] };
+
+  const locationDirectory = useMemo(() => {
+    if (!data) return { locations: [] as LocationEntry[], unassignedStations: [] as UnassignedStationEntry[] };
     const users: ManagedUser[] = data.users;
-    let adminList = users.filter(u => u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN');
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      adminList = adminList.filter(a => a.username.toLowerCase().includes(q) || a.barangay_id?.toLowerCase().includes(q));
-    }
-    const map = new Map<number, ManagedUser[]>();
-    users.filter(u => u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN')
-      .forEach(a => map.set(a.id, users.filter(u => u.parent_admin_id === a.id)));
-    const sel = adminList.find(a => a.id === selectedAdminId) || adminList[0] || null;
-    return { admins: adminList, childrenByAdmin: map, selectedAdmin: sel, selectedChildren: sel ? (map.get(sel.id) || []) : [] };
-  }, [data, selectedAdminId, search]);
+    const q = search.trim().toLowerCase();
+    const stationForLoc = (locId: string) => stations.find(st => st.barangay_ids.includes(locId));
+    // Computed over every location regardless of search, so a search that
+    // hides a barangay never makes its station look "unassigned" and get
+    // double-listed in both buckets.
+    const claimedStationIds = new Set(
+      allLocations.map(l => stationForLoc(l.id)?.id).filter((id): id is string => !!id)
+    );
+
+    // Search matches the location/station name AND any callsign (username)
+    // under it -- built before filtering, not instead of it, so "search
+    // callsign or location" stays true for both halves of that promise.
+    const matchesLoc = (loc: PendingLocation, station: Station | undefined, seatUsers: ManagedUser[]) => {
+      if (!q) return true;
+      if (loc.name.toLowerCase().includes(q) || loc.id.toLowerCase().includes(q)) return true;
+      if (station?.name.toLowerCase().includes(q)) return true;
+      return seatUsers.some(u => u.username.toLowerCase().includes(q));
+    };
+
+    const locations: LocationEntry[] = allLocations
+      .map(loc => {
+        const barangayAdmins = users.filter(u => u.role === 'BARANGAY_ADMIN' && u.barangay_id === loc.id);
+        const barangayStaff = users.filter(u => barangayAdmins.some(a => a.id === u.parent_admin_id));
+        const station = stationForLoc(loc.id);
+        const pnpAdmins = station ? users.filter(u => u.role === 'PNP_ADMIN' && u.station_id === station.id) : [];
+        const pnpStaff = station ? users.filter(u => pnpAdmins.some(a => a.id === u.parent_admin_id)) : [];
+        return { loc, station, barangayAdmins, barangayStaff, pnpAdmins, pnpStaff };
+      })
+      .filter(e => matchesLoc(e.loc, e.station, [...e.barangayAdmins, ...e.barangayStaff, ...e.pnpAdmins, ...e.pnpStaff]));
+
+    // Stations that exist but have no barangay jurisdiction yet (created,
+    // not yet assigned in the Stations tab) -- still get a row so their PNP
+    // accounts, if any were created early, aren't invisible.
+    const unassignedStations: UnassignedStationEntry[] = stations
+      .filter(st => !claimedStationIds.has(st.id))
+      .map(st => {
+        const pnpAdmins = users.filter(u => u.role === 'PNP_ADMIN' && u.station_id === st.id);
+        const pnpStaff = users.filter(u => pnpAdmins.some(a => a.id === u.parent_admin_id));
+        return { station: st, pnpAdmins, pnpStaff };
+      })
+      .filter(e => !q || e.station.name.toLowerCase().includes(q) || [...e.pnpAdmins, ...e.pnpStaff].some(u => u.username.toLowerCase().includes(q)));
+
+    return { locations, unassignedStations };
+  }, [data, allLocations, stations, search]);
+
+  const selectedLocationEntry = useMemo(() => {
+    const rows: Array<{ key: string; kind: 'location' | 'station'; entry: LocationEntry | UnassignedStationEntry }> = [
+      ...locationDirectory.locations.map(e => ({ key: e.loc.id, kind: 'location' as const, entry: e })),
+      ...locationDirectory.unassignedStations.map(e => ({ key: `station:${e.station.id}`, kind: 'station' as const, entry: e })),
+    ];
+    return rows.find(r => r.key === selectedLocationKey) || rows[0] || null;
+  }, [locationDirectory, selectedLocationKey]);
+
+  // One admin + its sub-accounts, for either seat (police or barangay) of
+  // the selected location. Shared renderer so the two seats stay visually
+  // identical rather than drifting apart as separate copies.
+  const renderSeat = (label: string, code: 'PD' | 'BG', seatAdmins: ManagedUser[], seatStaff: ManagedUser[], emptyText: string) => {
+    const style = ROLE_STYLES[code === 'PD' ? 'PNP_ADMIN' : 'BARANGAY_ADMIN'];
+    return (
+      <div className="border border-[var(--line)]">
+        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-[var(--line)]" style={{ background: style.bg }}>
+          <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{code}</span>
+          <span className="text-[9px] tracking-[0.2em] uppercase" style={{ color: 'var(--text-2)' }}>{label}</span>
+          <span className="ml-auto text-[9px]" style={{ color: 'var(--text-3)' }}>
+            {seatAdmins.length + seatStaff.length} account{seatAdmins.length + seatStaff.length === 1 ? '' : 's'}
+          </span>
+        </div>
+        {seatAdmins.length === 0 && seatStaff.length === 0 ? (
+          <div className="py-8 text-center">
+            <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">{emptyText}</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-[var(--panel-2)]">
+            {[...seatAdmins, ...seatStaff].map(u => {
+              const rowStyle = ROLE_STYLES[u.role] || style;
+              const isAdmin = u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN';
+              return (
+                <div key={u.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(u.id) ? 'opacity-40' : ''}`}>
+                  <span className={`text-[8px] font-bold px-1.5 py-1 border ${rowStyle.border} ${rowStyle.text} shrink-0`}>{rowStyle.code}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] text-[var(--text)] truncate">
+                      {u.username}
+                      {isAdmin && <span className="ml-2 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--text-3)' }}>admin</span>}
+                    </p>
+                    <p className="text-[9px] text-[var(--text-2)] truncate">{u.assignment}</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
+                    <button onClick={() => handleDelete(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Every barangay's two captain slots, side by side — makes the
   // "one location, two connected accounts" relationship visible instead
@@ -729,108 +836,103 @@ export default function DevteamView() {
               />
             </div>
             <div className="flex-1 overflow-y-auto custom-scrollbar">
-              {admins.length === 0 ? (
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching admins</p>
-              ) : admins.map(a => {
-                const count = (childrenByAdmin.get(a.id) || []).length;
-                const active = selectedAdmin?.id === a.id;
-                const style = ROLE_STYLES[a.role];
-                return (
-                  <button
-                    key={a.id}
-                    onClick={() => setSelectedAdminId(a.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left border-b border-[var(--panel-2)] transition-colors ${active ? 'bg-[var(--panel)]' : 'hover:bg-[var(--panel)]'}`}
-                  >
-                    <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{style.code}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[11px] truncate" style={{ color: 'var(--text)' }}>{a.username}</p>
-                      <p className="text-[9px] text-[var(--text-2)] truncate">{a.barangay_id} &middot; {count} sub-account{count === 1 ? '' : 's'}</p>
-                    </div>
-                    {active && <span className="w-1 h-1 rounded-full bg-[var(--accent)] shrink-0" />}
-                  </button>
-                );
-              })}
+              {locationDirectory.locations.length === 0 && locationDirectory.unassignedStations.length === 0 ? (
+                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching locations</p>
+              ) : (
+                <>
+                  {locationDirectory.locations.map(entry => {
+                    const key = entry.loc.id;
+                    const active = selectedLocationEntry?.key === key;
+                    const count = entry.barangayAdmins.length + entry.barangayStaff.length + entry.pnpAdmins.length + entry.pnpStaff.length;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedLocationKey(key)}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left border-b border-[var(--panel-2)] transition-colors ${active ? 'bg-[var(--panel)]' : 'hover:bg-[var(--panel)]'}`}
+                      >
+                        <MapPinned size={12} className="shrink-0" style={{ color: 'var(--text-2)' }} />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text)' }}>{entry.loc.name}</p>
+                          <p className="text-[9px] text-[var(--text-2)] truncate">
+                            {entry.station ? entry.station.name : 'no station assigned'} &middot; {count} account{count === 1 ? '' : 's'}
+                          </p>
+                        </div>
+                        {active && <span className="w-1 h-1 rounded-full bg-[var(--accent)] shrink-0" />}
+                      </button>
+                    );
+                  })}
+                  {locationDirectory.unassignedStations.map(entry => {
+                    const key = `station:${entry.station.id}`;
+                    const active = selectedLocationEntry?.key === key;
+                    const count = entry.pnpAdmins.length + entry.pnpStaff.length;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedLocationKey(key)}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left border-b border-[var(--panel-2)] transition-colors ${active ? 'bg-[var(--panel)]' : 'hover:bg-[var(--panel)]'}`}
+                      >
+                        <Radio size={12} className="shrink-0" style={{ color: 'var(--text-2)' }} />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text)' }}>{entry.station.name}</p>
+                          <p className="text-[9px] truncate" style={{ color: 'var(--warn)' }}>
+                            no barangay assigned &middot; {count} account{count === 1 ? '' : 's'}
+                          </p>
+                        </div>
+                        {active && <span className="w-1 h-1 rounded-full bg-[var(--accent)] shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </>
+              )}
             </div>
           </div>
 
           <div className="col-span-8 border border-[var(--line)] overflow-y-auto custom-scrollbar">
-            {!selectedAdmin ? (
+            {!selectedLocationEntry ? (
               <div className="h-full flex items-center justify-center">
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">Select an admin from the directory</p>
+                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">Select a location from the directory</p>
               </div>
-            ) : (
-              <div className="p-6">
-                <div className="flex items-start justify-between mb-6 pb-5 border-b border-[var(--panel-2)]">
-                  <div className="flex items-center gap-4">
-                    <span className={`text-[10px] font-bold px-2 py-1.5 border ${ROLE_STYLES[selectedAdmin.role].border} ${ROLE_STYLES[selectedAdmin.role].text}`}>
-                      {ROLE_STYLES[selectedAdmin.role].code}
-                    </span>
-                    <div>
-                      <h2 className="text-[13px] text-[var(--text)] tracking-wide">{selectedAdmin.username}</h2>
-                      <p className="text-[10px] text-[var(--text-2)] mt-1 flex items-center gap-1 tracking-wide">
-                        <MapPinned size={10} /> {selectedAdmin.assignment} &middot; {selectedAdmin.barangay_id}
+            ) : selectedLocationEntry.kind === 'location' ? (
+              (() => {
+                const entry = selectedLocationEntry.entry as LocationEntry;
+                return (
+                  <div className="p-6">
+                    <div className="mb-6 pb-5 border-b border-[var(--panel-2)]">
+                      <h2 className="text-[13px] text-[var(--text)] tracking-wide flex items-center gap-2">
+                        <MapPinned size={13} style={{ color: 'var(--text-2)' }} /> {entry.loc.name}
+                      </h2>
+                      <p className="text-[9px] text-[var(--text-3)] mt-1 tracking-wide uppercase">
+                        One location, two connected seats — the station covering it, and the barangay itself.
                       </p>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => openEdit(selectedAdmin)} className="flex items-center gap-1.5 px-3 py-1.5 border border-[var(--line)] hover:border-[var(--accent)]/40 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors text-[9px] tracking-[0.15em] uppercase">
-                      <Pencil size={11} /> Edit
-                    </button>
-                    <button onClick={() => handleDelete(selectedAdmin)} className="flex items-center gap-1.5 px-3 py-1.5 border border-[var(--line)] hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors text-[9px] tracking-[0.15em] uppercase">
-                      <Trash2 size={11} /> Remove
-                    </button>
-                  </div>
-                </div>
-
-                {/* CONNECTED COUNTERPART — the other captain sharing this
-                    location, surfaced explicitly instead of left implicit. */}
-                {(() => {
-                  const pair = locationPairs.find(p => p.loc === selectedAdmin.barangay_id);
-                  const counterpart = selectedAdmin.role === 'PNP_ADMIN' ? pair?.barangay : pair?.precinct;
-                  return (
-                    <div className="mb-6 flex items-center gap-3 px-3 py-2.5 border border-dashed border-[var(--line)]">
-                      <span className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] shrink-0">Connected at {selectedAdmin.barangay_id}</span>
-                      {counterpart ? (
-                        <span className={`text-[10px] px-2 py-0.5 border ${ROLE_STYLES[counterpart.role].border} ${ROLE_STYLES[counterpart.role].text}`}>
-                          {ROLE_STYLES[counterpart.role].code} &middot; {counterpart.username}
-                        </span>
-                      ) : (
-                        <span className="text-[9px] text-[var(--text-3)] uppercase tracking-wide">No counterpart yet — vacant</span>
+                    <div className="space-y-4">
+                      {renderSeat(
+                        entry.station ? `Police — ${entry.station.name}` : 'Police — no station covers this barangay yet',
+                        'PD', entry.pnpAdmins, entry.pnpStaff,
+                        entry.station ? 'No PNP admin created for this station yet' : 'Assign a station to this barangay in the Stations tab first',
                       )}
+                      {renderSeat(`Barangay — ${entry.loc.name}`, 'BG', entry.barangayAdmins, entry.barangayStaff, 'No barangay admin created for this location yet')}
                     </div>
-                  );
-                })()}
-
-                <div className="flex items-center gap-2 mb-3">
-                  <Users2 size={11} className="text-[var(--text-2)]" />
-                  <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text-2)]">Sub-accounts &middot; {selectedChildren.length}</span>
-                </div>
-
-                {selectedChildren.length === 0 ? (
-                  <div className="border border-dashed border-[var(--line)] py-10 text-center">
-                    <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No sub-accounts created by this admin yet</p>
                   </div>
-                ) : (
-                  <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                    {selectedChildren.map(c => {
-                      const style = ROLE_STYLES[c.role] || ROLE_STYLES.POLICE;
-                      return (
-                        <div key={c.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(c.id) ? 'opacity-40' : ''}`}>
-                          <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text} shrink-0`}>{style.code}</span>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-[11px] text-[var(--text)] truncate">{c.username}</p>
-                            <p className="text-[9px] text-[var(--text-2)] truncate">{c.assignment}</p>
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button onClick={() => openEdit(c)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
-                            <button onClick={() => handleDelete(c)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
-                          </div>
-                        </div>
-                      );
-                    })}
+                );
+              })()
+            ) : (
+              (() => {
+                const entry = selectedLocationEntry.entry as UnassignedStationEntry;
+                return (
+                  <div className="p-6">
+                    <div className="mb-6 pb-5 border-b border-[var(--panel-2)]">
+                      <h2 className="text-[13px] text-[var(--text)] tracking-wide flex items-center gap-2">
+                        <Radio size={13} style={{ color: 'var(--text-2)' }} /> {entry.station.name}
+                      </h2>
+                      <p className="text-[9px] mt-1 tracking-wide uppercase" style={{ color: 'var(--warn)' }}>
+                        This station has no barangay jurisdiction assigned yet — set it in the Stations tab so it appears under a location.
+                      </p>
+                    </div>
+                    {renderSeat(`Police — ${entry.station.name}`, 'PD', entry.pnpAdmins, entry.pnpStaff, 'No PNP admin created for this station yet')}
                   </div>
-                )}
-              </div>
+                );
+              })()
             )}
           </div>
         </div>

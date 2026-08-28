@@ -113,6 +113,18 @@
         "to": "maincode/port_utils.py"
       },
       {
+        "from": "app/maintenance.py",
+        "to": "backend/maintenance.py"
+      },
+      {
+        "from": "app/notifications.py",
+        "to": "backend/notifications.py"
+      },
+      {
+        "from": "app/telegram_bot.py",
+        "to": "backend/telegram_bot.py"
+      },
+      {
         "from": "app/schema_final.sql",
         "to": "backend/schema_final.sql"
       },
