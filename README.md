@@ -1,5 +1,7 @@
 # EcoVision Security Sentinel
 
+[![Downloads](https://img.shields.io/github/downloads/unknowndevice077/ecovision-crime-detection-ai/total.svg)](https://github.com/unknowndevice077/ecovision-crime-detection-ai/releases)
+
 Real-time AI-powered security monitoring and threat detection system. It watches a live camera feed, tracks people, detects weapons and violent behavior, and raises alerts — all through a single desktop app with a live dashboard.
 
 Built for **always-on deployment**: the intended use case is a dedicated machine (with a GPU) running continuously, watching a camera feed 24/7 and flagging incidents automatically for review.

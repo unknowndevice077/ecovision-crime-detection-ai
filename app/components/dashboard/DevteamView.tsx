@@ -691,19 +691,39 @@ export default function DevteamView() {
   // Every barangay's two captain slots, side by side — makes the
   // "one location, two connected accounts" relationship visible instead
   // of implicit in a shared barangay_id column.
+  //
+  // BUG FOUND 2026-08-28: this used to key BOTH roles by u.barangay_id.
+  // That's correct for a barangay admin, but handleCreateUser always sends
+  // barangay_id: null for PNP roles (a station can cover many barangays, so
+  // a PNP login can't be pinned to one) -- so every real PNP_ADMIN account
+  // fell into a single '—' bucket regardless of its station's actual
+  // jurisdiction, and a barangay with a station genuinely covering it
+  // (station_barangays) still showed "PD Vacant". A PNP admin's jurisdiction
+  // lives on their station instead (stations.barangay_ids, set on the
+  // Stations tab), so they're looked up per-barangay through their
+  // station's own coverage list -- the same fix already applied to the
+  // Directory tab's grouping.
   const locationPairs = useMemo(() => {
     if (!data) return [];
     const users: ManagedUser[] = data.users;
     const byLoc = new Map<string, { precinct?: ManagedUser; barangay?: ManagedUser }>();
     users.forEach(u => {
-      if (u.role !== 'PNP_ADMIN' && u.role !== 'BARANGAY_ADMIN') return;
-      const key = u.barangay_id || '—';
-      const entry = byLoc.get(key) || {};
-      if (u.role === 'PNP_ADMIN') entry.precinct = u; else entry.barangay = u;
-      byLoc.set(key, entry);
+      if (u.role !== 'BARANGAY_ADMIN' || !u.barangay_id) return;
+      const entry = byLoc.get(u.barangay_id) || {};
+      entry.barangay = u;
+      byLoc.set(u.barangay_id, entry);
+    });
+    stations.forEach(st => {
+      const precinct = users.find(u => u.role === 'PNP_ADMIN' && u.station_id === st.id);
+      if (!precinct) return;
+      st.barangay_ids.forEach(locId => {
+        const entry = byLoc.get(locId) || {};
+        entry.precinct = precinct;
+        byLoc.set(locId, entry);
+      });
     });
     return Array.from(byLoc.entries()).map(([loc, pair]) => ({ loc, ...pair }));
-  }, [data]);
+  }, [data, stations]);
 
   // Cameras grouped by location, each with whichever captain(s) are
   // responsible for that barangay_id -- reuses the same pairing logic as
