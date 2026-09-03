@@ -37,7 +37,7 @@
     "real-time"
   ],
   "author": "EcoVision Team",
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0",
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"
@@ -179,6 +179,14 @@
       {
         "from": "requirements.txt",
         "to": "requirements.txt"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "CITATIONS.md",
+        "to": "CITATIONS.md"
       }
     ]
   }

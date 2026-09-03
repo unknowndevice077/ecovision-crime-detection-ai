@@ -1,6 +1,7 @@
 # EcoVision Security Sentinel
 
 [![Downloads](https://img.shields.io/github/downloads/unknowndevice077/ecovision-crime-detection-ai/total.svg)](https://github.com/unknowndevice077/ecovision-crime-detection-ai/releases)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
 Real-time AI-powered security monitoring and threat detection system. It watches a live camera feed, tracks people, detects weapons and violent behavior, and raises alerts — all through a single desktop app with a live dashboard.
 
@@ -315,7 +316,9 @@ Run `EcoVisionSentinel-Setup-<version>.exe` directly. One folder-choice screen, 
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for full terms
+**GNU Affero General Public License v3.0** — see [LICENSE](LICENSE) for full terms.
+
+This project was Apache-2.0 until 3 Sep 2026, when relicensing to AGPL-3.0 became the correct call: `main.py`'s pose tracking and weapon detector run on the `ultralytics` package, which is itself AGPL-3.0-licensed unless you hold a paid Ultralytics Enterprise license (this project doesn't). Shipping that dependency inside a closed installer under a permissive license was a real compliance gap, not a formality — AGPL is copyleft, and its network clause means that if you deploy this so other people interact with it (e.g. a barangay or station dashboard reachable over a network), those users are entitled to the corresponding source too. Practically, since this repository is already public, that obligation is already met — but it's worth knowing if you fork this and *don't* keep the fork public. See [CITATIONS.md](CITATIONS.md) for the datasets the shipped model weights were trained on.
 
 ## Support
 
