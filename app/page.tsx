@@ -47,7 +47,7 @@ type Alert = {
   timestamp: string;
   confidence: number;
   status: 'pending' | 'confirmed' | 'dismissed';
-  cameraLinkId?: string;
+  cameraLinkId?: string | null;
 };
 
 type Camera = {
@@ -294,7 +294,13 @@ const fetchCameras = async (userObj: any) => {
           timestamp: inc.occurred_time,
           confidence: inc.confidence ?? 0.925,
           status: 'pending' as const,
-          cameraLinkId: inc.location_name && inc.location_name.includes("Entrance") ? "1" : "2",
+          // BUG FOUND 2026-09-03 (user report): this used to guess the
+          // camera by checking whether location_name contained the word
+          // "Entrance" -- worked only for the two original demo cameras,
+          // and would misattribute (or default to camera "2") for any other
+          // name. incidents.camera_id is now a real column, populated by
+          // main.py at detection time; this just reads it.
+          cameraLinkId: inc.camera_id ?? null,
           // Wasn't carried at all -- the Incident Queue could never show a
           // thumbnail no matter how correctly screenshot_path was stored,
           // because this mapping just never read it off the incident.
@@ -841,6 +847,7 @@ const fetchCameras = async (userObj: any) => {
                       <IncidentRow
                         key={alert.id}
                         alert={alert}
+                        cameras={cameras}
                         onConfirm={handleVerifyCrime}
                         onDismiss={handleDismissCrime}
                       />

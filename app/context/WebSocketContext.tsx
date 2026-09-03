@@ -65,12 +65,24 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
     ws.onmessage = (event) => {
       try {
-        const msg: AlertMessage = JSON.parse(event.data);
+        const msg: AlertMessage & { channel?: string } = JSON.parse(event.data);
         setLatestAlert(msg);
-        // Every incident-shaped broadcast should also nudge any view
-        // subscribed to "incidents" (Map, History) to refetch --
-        // cheap correctness win over trying to fully sync state client-side.
-        listenersRef.current.get("incidents")?.forEach((fn) => fn(msg));
+        // BUG FOUND 2026-09-02: this used to hardcode `.get("incidents")` --
+        // every broadcast, regardless of its own `channel` field, only ever
+        // reached listeners subscribed to "incidents" (plus "*"). The backend
+        // genuinely broadcasts distinct channels ("users", "camera_models",
+        // "optimize_weights", "records", ...) and AdminUsersView/AiModelsPanel
+        // subscribe to exactly those names expecting a live push -- but
+        // nothing ever routed a message to them, so a new user, a permission
+        // change, a detection-model toggle, and (worst of all) a live
+        // optimize_weights progress update all sat frozen for up to the 60s
+        // fallback poll instead of updating instantly. "incidents" and "*"
+        // subscribers were never affected, which is exactly why this went
+        // unnoticed: those are the two channels this repo's manual testing
+        // happened to exercise most.
+        if (msg.channel) {
+          listenersRef.current.get(msg.channel)?.forEach((fn) => fn(msg));
+        }
         listenersRef.current.get("*")?.forEach((fn) => fn(msg));
       } catch {
         // non-JSON / unrecognized payload, ignore

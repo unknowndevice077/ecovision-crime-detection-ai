@@ -619,13 +619,28 @@ pose_model, pose_file_name = load_model_with_fallback(
 # changed nothing, exactly like the documented-dead database.path key. The
 # system loaded the old detector no matter what the config said, and nothing
 # anywhere reported a conflict.
-_WEAPON_PT = os.path.basename(_resolve_weight(
-    sys_config["detection"].get("weapon", {}).get("model_path"),
-    "weapon_signs.pt"))
-_WEAPON_ENGINE = os.path.splitext(_WEAPON_PT)[0] + ".engine"
-violence_model, weapon_file_name = load_model_with_fallback(
-    _WEAPON_ENGINE, _WEAPON_PT, "detect", WEIGHTS_DIR
-)
+#
+# BUG FOUND 2026-09-03 (full account/feature sweep): this loaded
+# unconditionally regardless of detection.weapon.enabled. robbery
+# (ROBBERY_ON, below) already skips its own model load when off; this never
+# matched that pattern, so a deployment that turns weapon detection off still
+# pays its VRAM and startup-time cost for nothing -- _run_weapon_detection's
+# only call site (frame loop, below) already gates on WEAPON_DETECTION_ENABLED,
+# so leaving violence_model/weapon_file_name as None here is safe: the
+# warmup calls a few lines down are gated on WEAPON_DETECTION_ENABLED too.
+_WEAPON_DETECTION_ENABLED_EARLY = bool(
+    sys_config["detection"].get("weapon", {}).get("enabled", True))
+if _WEAPON_DETECTION_ENABLED_EARLY:
+    _WEAPON_PT = os.path.basename(_resolve_weight(
+        sys_config["detection"].get("weapon", {}).get("model_path"),
+        "weapon_signs.pt"))
+    _WEAPON_ENGINE = os.path.splitext(_WEAPON_PT)[0] + ".engine"
+    violence_model, weapon_file_name = load_model_with_fallback(
+        _WEAPON_ENGINE, _WEAPON_PT, "detect", WEIGHTS_DIR
+    )
+else:
+    violence_model, weapon_file_name = None, None
+    print("🚫 Weapon: disabled via config.json detection.weapon.enabled -- model not loaded")
 
 # Vandalism-marks detector (graffiti/tag). Separate small YOLO model, not part
 # of weapon_signs.pt -- see detection.vandalism.marks_model_path in config.json.
@@ -633,11 +648,27 @@ violence_model, weapon_file_name = load_model_with_fallback(
 # because this is a custom weight name Ultralytics has no hub fallback for; a
 # missing file must disable the signal, not attempt a network download that
 # will just fail.
+#
+# BUG FOUND 2026-09-03 (full account/feature sweep): loaded unconditionally
+# on file existence alone, regardless of detection.vandalism.enabled -- the
+# only call site (_run_vandal_mark_detection, submitted further down) already
+# guards on "VANDALISM_ON and vandal_mark_model is not None", and the
+# per-camera override further down already sets this back to None when a
+# camera's own override disables vandalism_marks, so leaving it None here
+# when the GLOBAL switch is off is exactly the same safe shape, just at
+# load time instead of after the fact. VANDALISM_ON itself is computed again,
+# identically, a bit further down (where the rest of the vandalism setup
+# lives) -- duplicated rather than moved, so this section doesn't have to
+# reorder anything to see a variable that's normally defined after it.
+_VANDALISM_ENABLED_EARLY = bool(
+    sys_config.get("detection", {}).get("vandalism", {}).get("enabled", False))
 _VANDAL_MARKS_PATH = _resolve_weight(
     sys_config["detection"].get("vandalism", {}).get("marks_model_path"),
     "vandalism_marks.pt")
 vandal_mark_model = None
-if os.path.exists(_VANDAL_MARKS_PATH):
+if not _VANDALISM_ENABLED_EARLY:
+    print("🚫 Vandalism-marks model not loaded -- detection.vandalism.enabled is false")
+elif os.path.exists(_VANDAL_MARKS_PATH):
     try:
         vandal_mark_model = YOLO(_VANDAL_MARKS_PATH, task="detect")
         print(f"📦 Loaded vandalism-marks model: {os.path.basename(_VANDAL_MARKS_PATH)}")
@@ -701,7 +732,16 @@ if not VIOLENCE_ON:
 
 SCENE_MODE_ON = VIOLENCE_MODE in ("scene", "tiled", "both")
 scene_detector = None
-if SCENE_MODE_ON:
+# BUG FOUND 2026-09-03 (full account/feature sweep): this loaded on
+# SCENE_MODE_ON alone -- independent of VIOLENCE_ON, so a deployment with
+# violence disabled still paid to load this model (measured live: two
+# separate X3D checkpoints loaded onto the GPU with Physical Violence
+# switched off). The only call site (frame loop, below) already checks
+# "SCENE_MODE_ON and VIOLENCE_ON" before calling scene_detector.update(), and
+# the per-camera threshold-override loop further down already treats a None
+# scene_detector as "skip" -- so this was always safe to leave unloaded when
+# VIOLENCE_ON is false, it just never actually did.
+if SCENE_MODE_ON and VIOLENCE_ON:
     if VIOLENCE_MODE == "tiled":
         # Full camera coverage via an overlapping tile grid, for wide city
         # cameras where a person is too small for a single whole-frame pass
@@ -717,6 +757,8 @@ if SCENE_MODE_ON:
     else:
         scene_detector = SceneViolenceDetector(device=TARGET_DEVICE)
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
+elif not VIOLENCE_ON:
+    pass  # already printed "🚫 Physical Violence: disabled" above -- a mode line here would contradict it
 else:
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (per-track detection)")
 
@@ -803,12 +845,13 @@ print(f"📦 [ENGINE LOADER] Using Weapon Pipeline: {weapon_file_name}")
 if pose_file_name.endswith(".pt"):
     pose_model.to(TARGET_DEVICE)
 
-if weapon_file_name.endswith(".pt"):
+if violence_model is not None and weapon_file_name.endswith(".pt"):
     violence_model.to(TARGET_DEVICE)
 
 _dummy = np.zeros((POSE_IMGSZ, POSE_IMGSZ, 3), dtype=np.uint8)
 pose_model.predict(_dummy, verbose=False, imgsz=POSE_IMGSZ, half=(USE_CUDA and pose_file_name.endswith(".pt")))
-violence_model.predict(_dummy, verbose=False, imgsz=WEAPON_IMGSZ, half=(USE_CUDA and weapon_file_name.endswith(".pt")))
+if violence_model is not None:
+    violence_model.predict(_dummy, verbose=False, imgsz=WEAPON_IMGSZ, half=(USE_CUDA and weapon_file_name.endswith(".pt")))
 print("✅ Dynamic relative weights successfully loaded and warmed up.")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1131,13 +1174,24 @@ def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_pat
             "id": str(incident_id),
             "event": event,
             "confidence": round(conf, 4),
-            "barangay_id": "cogon",
+            # BUG FOUND 2026-09-03: hardcoded to "cogon" for every camera on
+            # every AI core -- see CAMERA_BARANGAY_ID's own comment above for
+            # the full story. Every AI-triggered incident's notify_targets
+            # routing (app/notifications.py) depends on this being right: a
+            # camera in a different barangay had its detections silently
+            # notifying cogon's responders instead of its own.
+            "barangay_id": CAMERA_BARANGAY_ID,
             # Was hardcoded in backend.py to "Cogon Core Smartpole Node"
             # regardless of which camera actually saw this -- every incident
             # said the same location even with only one real camera running.
             # Sourced from config.json's camera.name so it's whatever this
             # camera is actually called instead of a placeholder.
             "location_name": CAMERA_NAME,
+            # Added 2026-09-03: the real camera row id, so the dashboard's
+            # Incident Queue can show/link the actual camera instead of the
+            # frontend guessing one from a substring match on location_name
+            # (see page.tsx's old cameraLinkId heuristic, now deleted).
+            "camera_id": _camera_id,
         }
         # screenshot_path is a URL-relative path like "/static/screenshots/snap_XXXX.jpg" --
         # the backend needs to persist this on the incident record so CrimeReportsView.tsx's
@@ -1381,6 +1435,13 @@ camera_source = _normalise_source(_configured_source)
 # for when that lookup can't happen (no camera_id configured, or the
 # backend isn't reachable yet this early in startup).
 CAMERA_NAME = sys_config["camera"].get("name", "Cogon Core Smartpole Node")
+# BUG FOUND 2026-09-03: _post_alert (below) used to hardcode barangay_id to
+# "cogon" for every AI-triggered incident, regardless of which camera/pole
+# actually saw it -- see that comment for the full story. This is that same
+# name-resolution round-trip's fallback, matching CAMERA_NAME's own pattern:
+# "cogon" only when camera_id isn't configured or the backend can't be
+# reached this early in startup, same as the name fallback above it.
+CAMERA_BARANGAY_ID = "cogon"
 _camera_id = sys_config["camera"].get("camera_id")
 # Per-camera detector overrides (docs/incident_response_plan.md-adjacent
 # feature, backend.py's camera_model_config table): a barangay can turn a
@@ -1395,21 +1456,47 @@ _camera_model_overrides = {}
 # variable that a failed/unreachable request left undefined.
 _camera_threshold_overrides = {}
 if _camera_id:
-    try:
-        _resp = requests.get(f"{sys_config['networking']['api_url'].rstrip('/')}/api/camera_name/{_camera_id}", timeout=3.0)
-        if _resp.ok:
-            _cam_data = _resp.json()
-            CAMERA_NAME = _cam_data["name"]
-            _camera_model_overrides = _cam_data.get("models") or {}
-            _camera_threshold_overrides = _cam_data.get("thresholds") or {}
-            print(f"📷 [CAMERA] Resolved live name for camera_id={_camera_id!r}: {CAMERA_NAME!r}")
-            _disabled_here = [k for k, v in _camera_model_overrides.items() if not v]
-            if _disabled_here:
-                print(f"📷 [CAMERA] Per-camera overrides for {_camera_id!r}: disabled here -> {_disabled_here}")
-        else:
-            print(f"⚠️  [CAMERA] camera_id={_camera_id!r} not found ({_resp.status_code}) -- using config.json's camera.name fallback: {CAMERA_NAME!r}")
-    except Exception as e:
-        print(f"⚠️  [CAMERA] Could not reach backend to resolve camera_id={_camera_id!r}: {e} -- using config.json's camera.name fallback: {CAMERA_NAME!r}")
+    # BUG FOUND 2026-09-03 (user report: incidents showing a "made up" name
+    # instead of the real registered camera): this was a single attempt.
+    # electron/main.js starts the backend and the AI core as separate
+    # processes with no readiness handshake between them, so a slow backend
+    # boot (loading the DB, the maintenance scheduler, the telegram poller)
+    # could still be starting up at the exact moment this ran -- and once it
+    # fell through to config.json's static fallback name/barangay, it stayed
+    # wrong for the rest of the session (this only runs once, at import
+    # time). A few retries with a short backoff covers that race without
+    # meaningfully delaying startup in the normal case where the backend is
+    # already up and the first attempt just succeeds immediately.
+    _CAMERA_RESOLVE_ATTEMPTS = 5
+    _CAMERA_RESOLVE_BACKOFF_S = 1.5
+    for _attempt in range(1, _CAMERA_RESOLVE_ATTEMPTS + 1):
+        try:
+            _resp = requests.get(f"{sys_config['networking']['api_url'].rstrip('/')}/api/camera_name/{_camera_id}", timeout=3.0)
+            if _resp.ok:
+                _cam_data = _resp.json()
+                CAMERA_NAME = _cam_data["name"]
+                CAMERA_BARANGAY_ID = _cam_data.get("barangay_id") or CAMERA_BARANGAY_ID
+                _camera_model_overrides = _cam_data.get("models") or {}
+                _camera_threshold_overrides = _cam_data.get("thresholds") or {}
+                print(f"📷 [CAMERA] Resolved live name for camera_id={_camera_id!r}: {CAMERA_NAME!r} "
+                      f"(barangay_id={CAMERA_BARANGAY_ID!r})")
+                _disabled_here = [k for k, v in _camera_model_overrides.items() if not v]
+                if _disabled_here:
+                    print(f"📷 [CAMERA] Per-camera overrides for {_camera_id!r}: disabled here -> {_disabled_here}")
+                break
+            else:
+                print(f"⚠️  [CAMERA] camera_id={_camera_id!r} not found ({_resp.status_code}) -- "
+                      f"using config.json's camera.name fallback: {CAMERA_NAME!r}")
+                break  # a real 404 won't fix itself by retrying
+        except Exception as e:
+            if _attempt < _CAMERA_RESOLVE_ATTEMPTS:
+                print(f"⏳ [CAMERA] Backend not ready yet resolving camera_id={_camera_id!r} "
+                      f"(attempt {_attempt}/{_CAMERA_RESOLVE_ATTEMPTS}): {e} -- retrying in {_CAMERA_RESOLVE_BACKOFF_S}s...")
+                time.sleep(_CAMERA_RESOLVE_BACKOFF_S)
+            else:
+                print(f"⚠️  [CAMERA] Could not reach backend to resolve camera_id={_camera_id!r} "
+                      f"after {_CAMERA_RESOLVE_ATTEMPTS} attempts: {e} -- "
+                      f"using config.json's camera.name fallback: {CAMERA_NAME!r}")
 
 # Apply the per-camera overrides fetched above. Each line ANDs the existing
 # (global-config-derived) flag with this camera's override -- a camera
@@ -1425,6 +1512,23 @@ WEAPON_DETECTION_ENABLED = WEAPON_DETECTION_ENABLED and _camera_model_overrides.
 if not _camera_model_overrides.get("vandalism_marks", True):
     vandal_mark_model = None
     print("📷 [CAMERA] vandalism_marks disabled for this camera -- marks model unloaded.")
+
+# BUG FOUND 2026-09-02 (full account/feature sweep, "make sure all my AI
+# detections can be turned off"): violence and vandalism each print their own
+# "disabled" line when the GLOBAL config says off, but that print happens
+# before camera overrides are applied above -- so a class enabled globally
+# but disabled for THIS camera gets no print either way, and robbery/weapon
+# never had a disabled-confirmation print at all (only a "model loaded" line
+# when ON, silence when off -- indistinguishable from a config-parsing bug
+# that quietly produced the same silence). Verified by actually turning all
+# four off through the real API and watching this camera's startup log: only
+# violence and vandalism said anything. One unified block, after every
+# override is applied, so operator logs can answer "is X really off on THIS
+# camera" for all four the same way, not two.
+print("🎛️  [DETECTION STATE] Final per-class status for this camera (after global config + camera overrides):")
+for _label, _on in (("Violence", VIOLENCE_ON), ("Robbery", ROBBERY_ON),
+                     ("Vandalism", VANDALISM_ON), ("Weapon", WEAPON_DETECTION_ENABLED)):
+    print(f"   {'✅ ON ' if _on else '🚫 OFF'}  {_label}")
 
 # Per-camera OPERATING-POINT overrides (backend.py's camera_threshold_config
 # table, docs/progress_report_violence_detection.md §28.1): a barangay can

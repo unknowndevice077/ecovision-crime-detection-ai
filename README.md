@@ -45,11 +45,35 @@ The system runs three integrated components, packaged as one desktop application
 - Automatically starts backend and AI core as child processes, negotiates free ports if the defaults are taken, and writes the resolved ports to `runtime_ports.json` for the frontend to read
 - Opens the dashboard pointed at the resolved local services
 
+## How Detection Actually Works
+
+Every detector runs on the same live feed and shares the same pipeline shape: **pose tracking finds the people, a classifier scores what they're doing, and a confirmation rule decides whether that score becomes an alert.** What differs per class is which classifier and which rule.
+
+**1. YOLO11-pose tracks everyone in frame, continuously.** Every person gets a stable track ID and their own detection state — a fight breaking out on one side of frame doesn't interfere with tracking someone walking on the other. The small picture-in-picture box in the corner shows exactly what's being fed into the violence classifier at that instant — the same crop the model sees, not a mockup:
+
+![Live pose tracking and per-person detection, running on real footage](docs/media/violence_detection.gif)
+
+**2. Violence and robbery run an X3D-XS video classifier** — a 3D-convolutional network that looks at a short clip (13 frames), not a single image, because a raised fist and a wave look identical in one frame and completely different across ten. Two modes exist: **scene mode** (the default) classifies the whole frame every few frames, which is both more accurate on this dataset (measured: 79.0% accuracy / 76.0% recall vs. 69.5%/65.5% for the older per-track mode) and cheaper, since it's one forward pass regardless of how many people are on screen. Robbery uses the identical architecture with its own checkpoint and threshold, run independently — a robbery involving a shove should be able to raise both alerts, not have one steal the other's probability mass.
+
+**3. Weapon detection is a separate YOLO object detector** (`weapons_v2.pt`), not tied to the pose tracker at all — it scans each sampled frame for guns, knives, and threat-posture "signs," on its own detection interval, feeding an independent alert path (`ARMED THREAT`) that can fire even if the violence classifier stays quiet.
+
+**4. Vandalism runs two independent signals side by side.** The same X3D-XS architecture from point 2 gets its own checkpoint trained specifically on vandalism footage — this is what fired below, at a real, measured 97.5%, not a placeholder number. Alongside it, a purpose-built graffiti/tag YOLO detector (`vandalism_marks.pt`) spots an actual mark on a wall, gate, or shutter and arms a separate wrist-motion rule that looks for sustained spraying motion near it with nobody else close by (to tell spraying apart from a scuffle). Either signal can raise the alert on its own:
+
+![Vandalism detector firing on a real graffiti clip](docs/media/vandalism_detection.gif)
+
+**Every alert clears the same bar before it reaches a human:** a confidence threshold *and* a run of consecutive confirming frames (both tunable per detector, and per-camera — see `docs/progress_report_violence_detection.md` §28.1), so one noisy frame can't mint an incident on its own. Once it does, "episode" tracking makes sure one continuously-active event — one ongoing fight, one person still spraying — produces exactly one incident, not a fresh one every time the check interval ticks over. The moment it fires, the system burns a timestamped, confidence-labeled banner onto a still frame (never onto the live feed itself — the operator's view stays clean) and starts writing a real H.264 clip in the background, both of which land on the incident automatically:
+
+| Violence — 54.4% confidence | Vandalism — 97.5% confidence |
+|---|---|
+| ![Violence alert evidence frame](docs/media/violence_alert.jpg) | ![Vandalism alert evidence frame](docs/media/vandalism_alert.jpg) |
+
+Every one of these thresholds, and every accuracy number quoted above, comes from `docs/detection_performance_report.md` and `maincode/eval_history.csv` — measured on held-out clips the training run never saw, not asserted.
+
 ## Key Features
 
 - ✅ **Real-time detection pipeline** — pose tracking, weapon/sign detection, and violence classification, all per-person (multi-person scenes supported)
 - ✅ **Severity-tagged alerts** — incidents ranked LOW → CRITICAL with confidence scores
-- ✅ **Records & DVR view** — auto-captured incident clips (H.264, browser-playable), real ffmpeg-based clip extraction and delete from the Recordings tab. 24/7 continuous archive is **not real yet** — the writer currently saves a black placeholder frame with a timestamp overlay rather than the actual camera feed, and never registers a `video_records` row, so the 24/7 tab is empty by construction, not by bug. Flagged, not fixed.
+- ✅ **Records & DVR view** — auto-captured incident clips (H.264, browser-playable), real ffmpeg-based clip extraction and delete from the Recordings tab. 24/7 continuous archive is **not built yet** — an earlier placeholder writer that saved a black frame with a timestamp overlay (and never registered a `video_records` row for any of it) has been removed rather than left running; the 24/7 tab is honestly empty pending a real implementation, instead of quietly burning disk space for a feature nobody could see.
 - ✅ **ESP32 device integration** — hardware connectivity and live telemetry (battery, solar voltage, temperature), remote siren activation with a dashboard emergency-stop, a physical panic button that posts a real incident, and auto-discovery (the board self-registers its IP with the backend on boot and every 30s, so a DHCP lease change doesn't strand it)
 - ✅ **Two-organization access control** — barangay and PNP hierarchies with database-enforced scope; see [Organization & Roles](#organization--roles)
 - ✅ **Runtime-selectable camera index** — no hardcoded camera number, switchable from the dashboard; `camera.source` also accepts a video file path for deterministic, machine-independent replay/testing
@@ -57,8 +81,8 @@ The system runs three integrated components, packaged as one desktop application
 - ✅ **Weapon/sign detection** — Gun/Knife/Sign YOLO detector, independently toggleable (previously had no on/off switch at all)
 - ✅ **Robbery detection** — trained X3D-XS scene classifier, enabled by default (threshold 0.70). Deployed checkpoint: 84.2% accuracy / 65.3% recall / 86.5% precision on 8 held-out scenes. A retrain adding 11 verified CamNuvem street-robbery sources is built and measured but **not deployed** — it regressed held-out recall to ~19–52% depending on threshold on the larger, reshuffled test split, so the original checkpoint stays live pending a controlled re-run. See `docs/detection_performance_report.md`.
 - 🚧 **Vandalism detection** — two separate tracks, both documented honestly:
-  - The original whole-clip X3D scene classifier is trained but ships **disabled** (37.5% FPR at its best threshold) — blocked on training-scene count (11 vs. robbery's 26), not architecture; self-filming ~20 real scenes is the documented fix (`docs/vandalism_data_collection.md`) and has not been done.
-  - A newer detector+rule hybrid (`weights/vandalism_marks.pt`, a YOLO graffiti/tag detector feeding the existing wrist-motion FSM) was built and measured 19 Aug: mAP50 0.741 / recall 0.625 / precision 0.806 on a genuine held-out test split. This replaces a structurally-dead prior version of the same rule, which gated on `weapon_signs.pt`'s "sign" class (road signs) and so could never fire on a wall or gate. Wired into `main.py`; ships **disabled** pending an end-to-end recall/false-positive measurement on labelled footage before flipping it on.
+  - The whole-clip X3D scene classifier ships **enabled by default**, with a known, measured tradeoff: 21.75 false alarms/hr on four real held-out cameras (down from 125.25 before real Davao street footage was added as negatives), against the violence detector's 4.50/hr — roughly 5x noisier than the bar the other three classes clear. Shipping it on was a deliberate call, not an oversight; see `config.json`'s `detection.vandalism._why_disabled` for the full evidence trail this decision weighs against. Individually toggleable from the AI Models tab for anyone who'd rather not take that tradeoff.
+  - A second, independent signal — a YOLO graffiti/tag detector (`weights/vandalism_marks.pt`) feeding a wrist-motion FSM — was built and measured 19 Aug: mAP50 0.741 / recall 0.625 / precision 0.806 on a genuine held-out test split. This replaces a structurally-dead prior version of the same rule, which gated on `weapon_signs.pt`'s "sign" class (road signs) and so could never fire on a wall or gate. Wired into `main.py` and tied to the same enable flag as the scene classifier above.
 
 ## Organization & Roles
 

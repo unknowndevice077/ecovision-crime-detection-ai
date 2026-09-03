@@ -143,6 +143,13 @@ CREATE TABLE IF NOT EXISTS incidents (
     barangay_id     TEXT REFERENCES barangays(id) ON DELETE RESTRICT,
     source          TEXT NOT NULL DEFAULT 'MANUAL' CHECK (source IN
                         ('MANUAL','AI_AUTOMATION','HARDWARE_PANIC')),
+    -- Which physical camera actually saw this, not just its name as free
+    -- text (location_name). ON DELETE SET NULL, not CASCADE: deleting a
+    -- camera must not delete the incidents it produced -- those are
+    -- historical record regardless of whether the camera is still
+    -- registered. See app/backend.py's _migrate_schema for the ALTER TABLE
+    -- that adds this to a database created before 2026-09-03.
+    camera_id       TEXT REFERENCES cameras(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_incidents_barangay_date ON incidents(barangay_id, occurred_date);

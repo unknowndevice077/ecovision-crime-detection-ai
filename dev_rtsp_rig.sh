@@ -43,8 +43,19 @@ stop_rig() {
   # Kill the pusher before the server: a publisher left attached to a dead
   # server keeps the path registered and the next run fails with "path
   # already in use", which looks like a port conflict and is not one.
-  pkill -f "rtsp://127.0.0.1:8554/cam1" 2>/dev/null
-  pkill -f "mediamtx" 2>/dev/null
+  #
+  # BUG FOUND 2026-09-02: this used to be `pkill -f ...`. Git Bash on Windows
+  # has no pkill (exit 127, "command not found"), and because the failure was
+  # piped to /dev/null with the exit code never checked, this always printed
+  # "rig stopped" whether or not anything died. Real, observed consequence: a
+  # rerun after this silently no-op'd left the OLD ffmpeg+mediamtx running
+  # underneath, so a "fresh" rig start was actually still serving the previous
+  # clip -- a test believing it killed the camera was instead watching a
+  # stream nothing had touched. taskkill ships with every Windows install, so
+  # use that instead; //F //IM (double-slash) stops Git Bash from rewriting
+  # them as path arguments the way it does with single-slash /F /IM.
+  taskkill //F //IM ffmpeg.exe >/dev/null 2>&1
+  taskkill //F //IM mediamtx.exe >/dev/null 2>&1
   echo "rig stopped"
 }
 

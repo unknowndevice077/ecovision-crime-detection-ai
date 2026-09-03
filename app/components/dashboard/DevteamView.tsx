@@ -384,6 +384,16 @@ export default function DevteamView() {
   };
 
   useLiveChannel("optimize_weights", fetchOptimizeStatus);
+  // BUG FOUND 2026-09-03: fetchThresholdCounts was only ever called from the
+  // "AI Models" tab's own onClick -- no live-channel subscription and not
+  // even the 60s useLiveChannel fallback poll. backend.py already broadcasts
+  // "camera_thresholds" on both set and clear (see set_camera_threshold /
+  // clear_camera_threshold), so recalibrating a camera via
+  // tools/calibrate_camera_quiet.py while an admin sits on this tab never
+  // updated the "N cameras calibrated" count until they clicked away and
+  // back. Purely informational per the comment above, but still stale for
+  // no reason once the backend was already telling anyone listening.
+  useLiveChannel("camera_thresholds", fetchThresholdCounts);
 
   // Reopens the progress window if a run is already in flight when this
   // panel first sees it -- e.g. it was started, the page got reloaded, and

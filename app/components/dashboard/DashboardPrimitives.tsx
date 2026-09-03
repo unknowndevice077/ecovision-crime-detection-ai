@@ -14,8 +14,9 @@
 // Behaviour is unchanged. This is a move, not a rewrite.
 
 import React, { useState } from 'react';
-import { MapPin } from 'lucide-react';
+import { Video, X } from 'lucide-react';
 import { SystemClockText, SystemDateText } from './SystemTime';
+import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
 export function gridColsFor(count: number) {
     if (count <= 1) return 'grid-cols-1';
@@ -172,9 +173,25 @@ export function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
 /* ── Incident row ───────────────────────────────────────────────────────
    Dense log row rather than a padded card: an operator triaging a queue
    needs to compare many incidents at once, so vertical space spent on
-   decoration is space taken from the next incident. */
-export function IncidentRow({ alert, onConfirm, onDismiss }: any) {
+   decoration is space taken from the next incident.
+
+   BUG FOUND 2026-09-03 (user report): Confirm/Dismiss sat directly on this
+   row with nothing between "incident appears" and "operator decides" --
+   no way to actually look at what the camera saw before acting on it. The
+   row now opens a Review panel instead of deciding blind; Confirm/Dismiss
+   moved there, behind an actual look at the evidence. */
+export function IncidentRow({ alert, onConfirm, onDismiss, cameras }: any) {
     const [imgBroken, setImgBroken] = useState(false);
+    const [reviewing, setReviewing] = useState(false);
+
+    // alert.cameraLinkId is now the real cameras.id (main.py sends it with
+    // every AI-triggered incident) -- resolved against the roster this
+    // dashboard already has loaded, rather than showing a raw id or
+    // falling back to the free-text location string, which is only ever a
+    // snapshot of whatever the camera was named at detection time.
+    const camera = cameras?.find((c: any) => c.id === alert.cameraLinkId);
+    const cameraName = camera?.name || alert.location || 'Unregistered camera';
+
     return (
         <article
             className="border-b relative animate-rise-in"
@@ -183,7 +200,12 @@ export function IncidentRow({ alert, onConfirm, onDismiss }: any) {
             {/* Severity spine */}
             <span className="absolute left-0 inset-y-0 w-[3px]" style={{ background: 'var(--critical)' }} aria-hidden="true" />
 
-            <div className="pl-3 pr-2.5 py-2.5 flex gap-2.5">
+            <button
+                type="button"
+                onClick={() => setReviewing(true)}
+                aria-label={`Review ${alert.type} at ${cameraName}`}
+                className="w-full text-left pl-3 pr-2.5 py-2.5 flex gap-2.5 transition-colors hover:bg-white/[0.03]"
+            >
                 {/* Thumbnail stays small on purpose -- see this component's header
             comment on density. Just hides itself on a load failure rather
             than showing a broken-image icon; the text rows carry the
@@ -208,13 +230,13 @@ export function IncidentRow({ alert, onConfirm, onDismiss }: any) {
                     </div>
 
                     <div className="flex items-center gap-1.5 mb-1">
-                        <MapPin size={10} style={{ color: 'var(--text-3)' }} className="shrink-0" aria-hidden="true" />
+                        <Video size={10} style={{ color: 'var(--text-3)' }} className="shrink-0" aria-hidden="true" />
                         <span className="text-[10px] truncate" style={{ color: 'var(--text-2)' }}>
-                            {alert.location}
+                            {cameraName}
                         </span>
                     </div>
 
-                    <div className="flex items-center gap-1.5 mb-2.5">
+                    <div className="flex items-center gap-1.5">
                         <span className="label" style={{ fontSize: '8px' }}>Confidence</span>
                         <div className="flex-1 h-[3px]" style={{ background: 'var(--bg)' }}>
                             <div
@@ -226,20 +248,98 @@ export function IncidentRow({ alert, onConfirm, onDismiss }: any) {
                             {(alert.confidence * 100).toFixed(1)}%
                         </span>
                     </div>
+                </div>
+            </button>
 
-                    <div className="grid grid-cols-2 gap-1.5">
+            {reviewing && (
+                <IncidentReviewModal
+                    alert={alert}
+                    cameraName={cameraName}
+                    onClose={() => setReviewing(false)}
+                    onConfirm={() => { onConfirm(alert.id); setReviewing(false); }}
+                    onDismiss={() => { onDismiss(alert.id); setReviewing(false); }}
+                />
+            )}
+        </article>
+    );
+}
+
+/* ── Incident review modal ──────────────────────────────────────────────
+   The actual look-before-you-decide step: the evidence frame captured at
+   the moment of detection (banner burned in, same file the case record
+   keeps), plus which camera saw it, plus a live check of that camera's
+   current feed. The live feed is the same /video_feed stream every
+   CameraTile shows -- this deployment runs one AI core against one active
+   camera at a time (see docs/scaling_plan.md), so "live" here means
+   whatever that one camera currently sees. Labelled honestly rather than
+   implied to be a dedicated per-camera stream this system doesn't have. */
+function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss }: any) {
+    const { aiUrl } = useRuntimeConfig();
+    return (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,0.75)' }}>
+            <div className="border w-full max-w-lg" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
+                <div className="h-9 flex justify-between items-center px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+                    <span className="label" style={{ color: 'var(--text)' }}>Review — {alert.type}</span>
+                    <button
+                        title="Close"
+                        aria-label="Close review"
+                        onClick={onClose}
+                        style={{ color: 'var(--text-3)' }}
+                        className="transition-colors hover:text-[var(--text)]"
+                    >
+                        <X size={15} />
+                    </button>
+                </div>
+
+                <div className="p-3 space-y-3">
+                    {/* Evidence frame: what the detector actually saw, banner and all --
+              the moment itself, not a live view of whatever's happening now. */}
+                    <div className="border overflow-hidden" style={{ borderColor: 'var(--line)', background: '#000' }}>
+                        {alert.screenshot_path ? (
+                            <img src={alert.screenshot_path} alt={`${alert.type} evidence frame`} className="w-full h-auto block" />
+                        ) : (
+                            <div className="h-40 flex items-center justify-center">
+                                <span className="label">No evidence frame captured</span>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <div className="flex items-center gap-1.5">
+                            <Video size={11} style={{ color: 'var(--text-3)' }} />
+                            <span style={{ color: 'var(--text-2)' }}>{cameraName}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 justify-end">
+                            <span className="label" style={{ fontSize: '8px' }}>Confidence</span>
+                            <span className="data" style={{ color: 'var(--text)' }}>{(alert.confidence * 100).toFixed(1)}%</span>
+                        </div>
+                    </div>
+
+                    {/* Live check -- see this component's header comment: same single
+              active-camera feed every tile on the dashboard shows, not a
+              guarantee this is footage of the pole that raised the alert. */}
+                    <details className="border" style={{ borderColor: 'var(--line)' }}>
+                        <summary className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider cursor-pointer select-none" style={{ color: 'var(--text-2)' }}>
+                            Check the live feed now
+                        </summary>
+                        <div className="p-1.5 pt-0">
+                            <img src={`${aiUrl}/video_feed`} alt="Live camera feed" className="w-full h-auto block border" style={{ borderColor: 'var(--line)' }} />
+                        </div>
+                    </details>
+
+                    <div className="grid grid-cols-2 gap-1.5 pt-1">
                         <button
-                            onClick={() => onConfirm(alert.id)}
-                            aria-label={`Confirm ${alert.type} at ${alert.location}`}
-                            className="py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97]"
+                            onClick={onConfirm}
+                            aria-label={`Confirm ${alert.type} at ${cameraName}`}
+                            className="py-2 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97]"
                             style={{ background: 'var(--critical)' }}
                         >
                             Confirm
                         </button>
                         <button
-                            onClick={() => onDismiss(alert.id)}
-                            aria-label={`Dismiss ${alert.type} at ${alert.location}`}
-                            className="py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-all hover:bg-white/5 active:scale-[0.97]"
+                            onClick={onDismiss}
+                            aria-label={`Dismiss ${alert.type} at ${cameraName}`}
+                            className="py-2 text-[10px] font-bold uppercase tracking-wider border transition-all hover:bg-white/5 active:scale-[0.97]"
                             style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
                         >
                             Dismiss
@@ -247,6 +347,6 @@ export function IncidentRow({ alert, onConfirm, onDismiss }: any) {
                     </div>
                 </div>
             </div>
-        </article>
+        </div>
     );
 }

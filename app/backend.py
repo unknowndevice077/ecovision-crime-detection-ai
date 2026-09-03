@@ -437,6 +437,14 @@ def _ensure_column(conn, cursor, table: str, column: str, coltype: str):
 def _migrate_schema(conn, cursor):
     _ensure_column(conn, cursor, "video_records", "sha256", "TEXT")
     _ensure_column(conn, cursor, "incident_visibility", "screenshot_sha256", "TEXT")
+    # BUG FOUND 2026-09-03 (user report: "we should use those [real camera]
+    # names instead of made up names" / accept-decline should say which
+    # camera detected it): incidents never stored which camera saw them --
+    # only location_name as free text. The frontend was inferring a camera
+    # id by checking whether location_name contained the word "Entrance",
+    # which only ever worked for exactly the two demo cameras. Storing the
+    # real id here so that guess can be deleted entirely.
+    _ensure_column(conn, cursor, "incidents", "camera_id", "TEXT")
 
     if not table_exists(cursor, "notify_targets"):
         cursor.execute("""
@@ -706,7 +714,26 @@ class VideoRecordingEngine:
         return f"/static/screenshots/{screenshot_filename}"
 
 recorder_engine = VideoRecordingEngine()
-recorder_engine.start_workers()
+# BUG FOUND 2026-09-02: start_workers() used to run unconditionally at import
+# time. Its two threads are: (1) _continuous_capture_worker, which doesn't
+# read any real camera -- it draws a solid black frame with a "LIVE FEED RAW"
+# timestamp burned in via cv2.putText and calls that the buffer; and
+# (2) _continuous_247_writer_worker, which writes that same fake feed to a new
+# rec_247_<timestamp>.mp4 every 2 minutes, forever, and never inserts a
+# video_records row for any of them. Measured live: 1,174 files / 1.82 GB of
+# useless black-frame video accumulated since 2026-08-19, none of it visible
+# anywhere in the app (RecordsView's "24/7" tab filters on type='FULL_24_7',
+# which nothing here ever writes) and none of it subject to the retention
+# sweep (app/maintenance.py works off video_records rows, and these have
+# none). This is disk usage with no corresponding feature -- an operator
+# gets nothing for the space it spends. save_shadow_clip() below is also
+# dead code (nothing in this file calls it) and would have suffered the same
+# fake-frame problem had anything ever wired it up; real incident evidence
+# clips come from the AI core's own capture path (main.py -> ai_register_clip)
+# and were never affected by this. Leaving the class defined (some future
+# real 24/7-recording feature may want this shape, wired to an actual frame
+# source) but no longer auto-starting workers that write files nobody reads.
+# recorder_engine.start_workers()
 
 # --- DATA SCHEMAS ---
 # All request bodies now use the same snake_case field names as the
@@ -729,12 +756,17 @@ POLICE_SIDE_ROLES = {"PNP_OFFICER", "PNP_ADMIN", "DEVTEAM"}
 # Viewing + optimizing AI models is barangay-only (not PNP_ADMIN, despite
 # both being in ADMIN_ROLES): the models run on hardware the barangay owns
 # and installed, same reasoning as manage_cameras being barangay-only.
-# Toggling a model on/off is deliberately NOT in this set -- that stays
-# DEVTEAM-only (see set_detection_model below), matching START_HERE.md's
-# "read-only visibility + request-and-approve, not a direct switch" call on
-# giving barangay users control over detection itself. Optimizing changes
-# speed only (the script refuses to install a disagreeing engine), which is
-# why it's safe to extend where toggling isn't.
+# STALE as of the 2026-08-23 fix in set_detection_model, corrected here
+# 2026-09-02: this comment used to say toggling a model on/off was
+# deliberately DEVTEAM-only, reserving MODEL_VIEW_ROLES for read-only
+# viewing + optimizing. That was reversed on 2026-08-23 -- see that
+# function's own comment -- because DEVTEAM-only toggling left the barangay
+# that owns the hardware unable to turn a detector on or off for their own
+# camera. Toggling enabled/disabled now uses this SAME MODEL_VIEW_ROLES set;
+# only the numeric threshold stays DEVTEAM-only (checked separately in
+# set_detection_model). Left uncorrected, this paragraph actively misled a
+# later full-system permission sweep into flagging BARANGAY_ADMIN's (correct)
+# ability to toggle a model as a bug.
 MODEL_VIEW_ROLES = {"DEVTEAM", "BARANGAY_ADMIN"}
 BARANGAY_SIDE_ROLES = {"BARANGAY_ADMIN", "BARANGAY_STAFF"}
 PNP_SIDE_ROLES = {"PNP_ADMIN", "PNP_OFFICER"}
@@ -803,6 +835,33 @@ def apply_scope(payload: dict, base_sql: str, params: list, column: str = "baran
     if clauses:
         base_sql += " WHERE " + " AND ".join(clauses)
     return base_sql, all_params
+
+
+def _incident_owned_by(cursor, incident_id: str, payload: dict) -> bool:
+    """BUG FOUND 2026-09-03: every incident-mutating endpoint below --
+    status update, delete, archive, confirm-and-report, and both report
+    endpoints -- checked a ROLE or a PERMISSION KEY but never whether the
+    caller actually had jurisdiction over THIS incident. GET /api/incidents
+    was correctly scoped via apply_scope() the whole time; every write path
+    on a single incident was not. Concretely: any BARANGAY_ADMIN anywhere
+    could confirm/dismiss, archive, or permanently DELETE another barangay's
+    incident (delete_incident's DELETE cascades to incident_reports too --
+    it would take a filed police report down with it), and any PNP account
+    could confirm-and-report on an incident outside their station's
+    jurisdiction. Same missing-ownership-check shape as the camera CRUD bug
+    fixed earlier today, generalized here via the same scope_clause()
+    apply_scope() already uses for the read path, so a barangay role checks
+    against its own barangay_id and a PNP role against its whole station's
+    jurisdiction, identically to what GET /api/incidents already shows them.
+    DEVTEAM: unrestricted, as everywhere else."""
+    if payload.get("role") == "DEVTEAM":
+        return True
+    frag, params = scope_clause(payload)
+    if not frag:
+        return True
+    cursor.execute(f"SELECT 1 FROM incidents WHERE id = ? AND {frag}", [incident_id] + params)
+    return cursor.fetchone() is not None
+
 
 class UserSignup(BaseModel):
     username: str
@@ -879,6 +938,11 @@ class AiTriggerSchema(BaseModel):
     # real camera at all. main.py now sends the configured camera name;
     # default here keeps old callers (or a payload that omits it) working.
     location_name: Optional[str] = "Cogon Core Smartpole Node"
+    # Added 2026-09-03 alongside camera_id on the incidents table -- see that
+    # column's comment. Optional so a caller that predates this (or a manual
+    # /api/ai_trigger test) doesn't break; the incident just has no camera
+    # link, same as before this existed.
+    camera_id: Optional[str] = None
 
 class PanicSchema(BaseModel):
     event: str
@@ -954,6 +1018,7 @@ def _row_to_incident_dict(inc_row, details_row, vis_row) -> dict:
         "arrival_reason": details.get("arrival_reason"), "additional_officers": details.get("additional_officers"),
         "status": d["status"], "confidence": d.get("confidence"), "barangay_id": d.get("barangay_id"),
         "screenshot_path": vis.get("screenshot_path"), "map_hidden": vis.get("map_hidden", 0),
+        "camera_id": d.get("camera_id"),
     }
 
 def _row_to_camera_dict(row) -> dict:
@@ -1033,7 +1098,19 @@ async def get_cameras(authorization: Optional[str] = Header(None)):
     return [_row_to_camera_dict(r) for r in rows]
 
 def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
-    if role in ADMIN_ROLES and key not in BARANGAY_ONLY_PERMISSIONS:
+    # BUG FOUND 2026-09-02 (full account/permission sweep): a barangay-only
+    # key used to fall out of the admin bypass entirely -- for BOTH admin
+    # roles, not just PNP_ADMIN (the one it was meant to stop). That silently
+    # left every BARANGAY_ADMIN unable to manage their own barangay's
+    # cameras unless something explicitly inserted a user_permissions row
+    # for them -- nothing in the UI does that for an admin account (only
+    # their sub-accounts get permission checkboxes), so this was a live dead
+    # end. Confirmed against the real 'jay' BARANGAY_ADMIN account: zero
+    # permission rows, and add_camera 403'd with "Missing permission:
+    # manage_cameras". Fixed by keying the barangay-only carve-out on which
+    # ORG SIDE the admin is (BARANGAY_SIDE_ROLES bypasses same as any other
+    # key; PNP_SIDE_ROLES does not) instead of blanket-excluding both.
+    if role in ADMIN_ROLES and (key not in BARANGAY_ONLY_PERMISSIONS or role in BARANGAY_SIDE_ROLES):
         return True
     cursor.execute("SELECT 1 FROM user_permissions WHERE user_id = ? AND permission_key = ?", (user_id, key))
     return cursor.fetchone() is not None
@@ -1041,8 +1118,8 @@ def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
 def require_permission(cursor, payload: dict, key: str):
     """Server-side gate matching the permission checkboxes in
     AdminUsersView.tsx / DevteamView.tsx. DEVTEAM always passes; admin tiers
-    pass except on barangay-only keys. Standard operator accounts must have
-    the key granted in user_permissions."""
+    pass except a PNP admin on a barangay-only key. Standard operator
+    accounts must have the key granted in user_permissions."""
     role = payload["role"]
     if role == "DEVTEAM":
         return
@@ -1050,14 +1127,17 @@ def require_permission(cursor, payload: dict, key: str):
     # Cameras belong to the barangay that installed them. PNP gets the feed,
     # not administrative control -- so no PNP role passes manage_cameras,
     # regardless of tier. This is the one place the admin bypass does not
-    # apply; previously a precinct captain could delete a barangay's cameras.
+    # apply for PNP; previously a precinct captain could delete a barangay's
+    # cameras. BARANGAY_ADMIN is NOT excluded by this -- see _has_permission's
+    # 2026-09-02 fix note for why the two admin roles can't be treated the
+    # same way on a "barangay-only" key.
     if key in BARANGAY_ONLY_PERMISSIONS and role in PNP_SIDE_ROLES:
         raise HTTPException(
             status_code=403,
             detail=f"Cameras are managed by the barangay that owns them; "
                    f"'{role}' accounts have view access only.")
 
-    if role in ADMIN_ROLES and key not in BARANGAY_ONLY_PERMISSIONS:
+    if role in ADMIN_ROLES and (key not in BARANGAY_ONLY_PERMISSIONS or role in BARANGAY_SIDE_ROLES):
         return
     if not _has_permission(cursor, payload["id"], key, role):
         raise HTTPException(status_code=403, detail=f"Missing permission: {key}")
@@ -1068,6 +1148,17 @@ async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(No
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "manage_cameras")
+    # BUG FOUND 2026-09-03: manage_cameras only gated WHETHER a caller could
+    # touch cameras at all, never WHICH barangay's cameras -- unlike every
+    # other barangay-owned resource in this file (notify_targets above,
+    # apply_scope() everywhere else). Live-tested: a fresh BARANGAY_ADMIN
+    # for a brand-new barangay successfully created a camera with
+    # barangay_id="cogon", another barangay entirely. Same missing check
+    # as notify_targets' add path -- mirrored here.
+    role = payload.get("role")
+    if role != "DEVTEAM" and cam.barangay_id.lower() != (payload.get("barangay_id") or "").lower():
+        conn.close()
+        raise HTTPException(status_code=403, detail="Can only add cameras for your own barangay")
     cam_id = str(uuid.uuid4())
     try:
         cursor.execute(
@@ -1087,6 +1178,22 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "manage_cameras")
+    # BUG FOUND 2026-09-03: no ownership check at all -- ANY caller with
+    # manage_cameras (i.e. any barangay admin/staff granted it) could delete
+    # ANY camera by id, in any barangay. Live-tested and confirmed: a fresh
+    # QA barangay admin deleted 'cogon''s real "Main Entrance Hub" camera
+    # (id="1", the one config.json's camera.camera_id default points at) on
+    # the first try. Restored that row from a live-captured copy immediately
+    # after finding this. Fixed the same way notify_targets' delete path
+    # already does it: look up the row's real owner first, compare before
+    # deleting.
+    role = payload.get("role")
+    if role != "DEVTEAM":
+        cursor.execute("SELECT barangay_id FROM cameras WHERE id = ?", (cam_id,))
+        existing = cursor.fetchone()
+        if existing and existing["barangay_id"] != payload.get("barangay_id"):
+            conn.close()
+            raise HTTPException(status_code=403, detail="Can only delete cameras for your own barangay")
     cursor.execute("DELETE FROM cameras WHERE id = ?", (cam_id,))
     conn.commit()
     conn.close()
@@ -1445,10 +1552,11 @@ async def ai_trigger(data: AiTriggerSchema):
     cursor.execute(
         """INSERT INTO incidents
            (id, case_id, type, severity, status, lat, lng, location_name,
-            occurred_date, occurred_time, confidence, officer, barangay_id, source)
-           VALUES (?, ?, ?, 'HIGH', 'Active', ?, ?, ?, ?, ?, ?, 'AI_AUTOMATION', ?, 'AI_AUTOMATION')""",
+            occurred_date, occurred_time, confidence, officer, barangay_id, source, camera_id)
+           VALUES (?, ?, ?, 'HIGH', 'Active', ?, ?, ?, ?, ?, ?, 'AI_AUTOMATION', ?, 'AI_AUTOMATION', ?)""",
         (incident_id, case_id, data.event, 11.0504, 124.6062, data.location_name,
-         now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), data.confidence, data.barangay_id.lower()),
+         now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), data.confidence, data.barangay_id.lower(),
+         data.camera_id),
     )
     cursor.execute(
         """INSERT INTO incident_details (incident_id, narrative, nature_of_call, arrival_reason, additional_officers)
@@ -1462,9 +1570,13 @@ async def ai_trigger(data: AiTriggerSchema):
     conn.commit()
     conn.close()
 
+    # BUG FOUND 2026-09-03: camera_link_id was hardcoded to "1" here always
+    # -- every AI-triggered incident's live broadcast claimed it came from
+    # camera 1 regardless of which camera actually saw it. Now the real
+    # value (may be None for an older caller that doesn't send it yet).
     await manager.broadcast({
         "channel": "incidents", "status": "CRITICAL", "id": incident_id, "type": data.event,
-        "location": data.location_name, "conf": data.confidence, "camera_link_id": "1",
+        "location": data.location_name, "conf": data.confidence, "camera_link_id": data.camera_id,
     })
     return {"status": "processed", "incident_id": incident_id}
 
@@ -1498,7 +1610,7 @@ async def camera_name(camera_id: str):
     """
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM cameras WHERE id = ?", (camera_id,))
+    cursor.execute("SELECT name, barangay_id FROM cameras WHERE id = ?", (camera_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
@@ -1506,7 +1618,16 @@ async def camera_name(camera_id: str):
     models = _camera_model_map(cursor, camera_id)
     thresholds = _camera_threshold_map(cursor, camera_id)
     conn.close()
-    return {"id": camera_id, "name": row["name"], "models": models, "thresholds": thresholds}
+    # BUG FOUND 2026-09-03: this never returned barangay_id, so main.py had
+    # nothing to resolve a real AI-triggered incident's jurisdiction from --
+    # _post_alert hardcoded "cogon" for every camera, on every AI core,
+    # regardless of which barangay actually owns the camera that saw it.
+    # A barangay with more than one camera (or a second barangay at all)
+    # would have had every detection silently misrouted to cogon's
+    # notify_targets. Returned here so main.py can resolve it once at
+    # startup alongside the name, the same round-trip it already makes.
+    return {"id": camera_id, "name": row["name"], "barangay_id": row["barangay_id"],
+            "models": models, "thresholds": thresholds}
 
 @app.post("/api/esp32/register")
 async def esp32_register(request: Request):
@@ -1603,6 +1724,12 @@ async def update_incident_status(incident_id: str, data: StatusUpdateSchema, aut
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment -- confirm_dismiss_alerts
+    # is a normal, common permission on both sides; without this, anyone who has it
+    # could confirm/dismiss another jurisdiction's incident.
+    if not _incident_owned_by(cursor, incident_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
     cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
     conn.commit()
     updated = cursor.rowcount
@@ -1618,6 +1745,13 @@ async def delete_incident(incident_id: str, authorization: Optional[str] = Heade
     require_role(payload, {"DEVTEAM"} | ADMIN_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment -- this DELETE
+    # cascades to incident_reports, so without this check any admin anywhere
+    # could destroy another jurisdiction's incident AND any filed police
+    # report against it.
+    if not _incident_owned_by(cursor, incident_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
     cursor.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
     conn.commit()
     deleted = cursor.rowcount
@@ -1628,9 +1762,13 @@ async def delete_incident(incident_id: str, authorization: Optional[str] = Heade
 
 @app.patch("/api/incidents/{incident_id}/archive")
 async def archive_incident(incident_id: str, authorization: Optional[str] = Header(None)):
-    require_auth(authorization)
+    payload = require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment.
+    if not _incident_owned_by(cursor, incident_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
     cursor.execute("UPDATE incident_visibility SET map_hidden = 1 WHERE incident_id = ?", (incident_id,))
     conn.commit()
     updated = cursor.rowcount
@@ -1646,6 +1784,12 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment -- POLICE_SIDE_ROLES
+    # only ruled out barangay accounts, not a PNP account from a DIFFERENT
+    # station's jurisdiction.
+    if not _incident_owned_by(cursor, incident_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
     officer = (data.report_details or {}).get("reporting_officer")
     if officer:
         cursor.execute("UPDATE incidents SET status = ?, officer = ? WHERE id = ?", (data.status, officer, incident_id))
@@ -1693,6 +1837,10 @@ async def list_incident_reports(incident_id: str, authorization: Optional[str] =
     require_role(payload, POLICE_SIDE_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment.
+    if not _incident_owned_by(cursor, incident_id, payload):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
     cursor.execute(
         """SELECT r.*, u.username AS reported_by_username
            FROM incident_reports r JOIN users u ON u.id = r.reported_by
@@ -1709,10 +1857,10 @@ async def add_incident_report(incident_id: str, data: IncidentReportSchema, auth
     require_role(payload, POLICE_SIDE_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM incidents WHERE id = ?", (incident_id,))
-    if not cursor.fetchone():
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment.
+    if not _incident_owned_by(cursor, incident_id, payload):
         conn.close()
-        raise HTTPException(status_code=404, detail="Incident not found")
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
     report_id = str(uuid.uuid4())
     cursor.execute(
         """INSERT INTO incident_reports
@@ -2057,9 +2205,22 @@ async def ai_register_clip(data: ManualClipSchema):
 
 @app.patch("/api/records/{record_id}/notes")
 async def update_record_notes(record_id: str, data: RecordNotesSchema, authorization: Optional[str] = Header(None)):
-    require_auth(authorization)
+    payload = require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
+    # BUG FOUND 2026-09-03: this checked only that SOME user was logged in --
+    # no role, no permission, and (same shape as the incident-endpoint bugs
+    # fixed above and the camera CRUD bug fixed earlier today) no ownership
+    # check at all. Any authenticated account, of any role in any barangay or
+    # station, could rewrite the evidence notes on any recording anywhere in
+    # the system. Scoped the same way GET /api/records and the extract
+    # endpoint already are, via apply_scope().
+    sql, params = apply_scope(payload, "SELECT id FROM video_records", [],
+                              extra_where="id = ?", extra_params=[record_id])
+    cursor.execute(sql, tuple(params))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
     cursor.execute("UPDATE video_records SET notes = ? WHERE id = ?", (data.notes, record_id))
     conn.commit()
     updated = cursor.rowcount
@@ -2515,11 +2676,29 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         else:
             station_id = ""
             cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
-            if not cursor.fetchone():
+            existing_barangay = cursor.fetchone()
+            if not existing_barangay:
                 cursor.execute(
                     "INSERT INTO barangays (id, name, status, approved_by, approved_at) "
                     "VALUES (?, ?, 'approved', ?, NOW())",
                     (barangay_id, barangay_id.title(), payload["id"]),
+                )
+            elif existing_barangay["status"] != "approved":
+                # BUG FOUND 2026-09-02 (full account sweep): only the brand-new
+                # case was ever promoted to 'approved' -- a barangay_id that
+                # already existed as 'pending' or 'rejected' (an old self-signup
+                # nobody acted on, or one DevTeam explicitly rejected earlier)
+                # kept that status untouched, silently, even though DevTeam
+                # creating an admin account for it here IS the vetting
+                # decision. Login then 403'd with "still pending DevTeam
+                # approval" forever, on a freshly-created account with no error
+                # anywhere pointing at why. Reproduced directly: create a
+                # BARANGAY_ADMIN for a barangay, reject that barangay, create a
+                # second admin for the SAME barangay_id -- login blocked with
+                # no indication the barangay (not the account) was the problem.
+                cursor.execute(
+                    "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
+                    (payload["id"], barangay_id),
                 )
 
         parent_id = new_user.parent_admin_id

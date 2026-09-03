@@ -21,6 +21,28 @@ function authHeaders() {
   return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
+// BUG FOUND 2026-09-02 (full account/feature sweep): both write paths below
+// (manual incident filing, manual camera registration) sent a literal
+// barangay_id: "cogon" -- not a fallback, unconditional -- so a real admin
+// from any OTHER barangay filing a report or registering a camera here had
+// it silently saved under Cogon's jurisdiction instead of their own. Their
+// own barangay's incident/camera views would never show it; Cogon's would,
+// wrongly. Distinct from the SMARTPOLE_LOCATIONS/map-marker limitation
+// documented a few lines below (an openly-acknowledged fixed demo set) --
+// this is the actual database row's owner, which has real scoping
+// consequences via apply_scope()/scope_clause(), not just what pin renders
+// on a map. Matches the same "fell back to cogon for every account" bug
+// class already fixed in page.tsx's fetchCameras/fetchStats.
+function currentUserBarangayId(): string {
+  if (typeof window === "undefined") return "cogon";
+  try {
+    const u = JSON.parse(localStorage.getItem("ecoUser") || "{}");
+    return u.barangay_id && u.barangay_id !== "undefined" ? u.barangay_id : "cogon";
+  } catch {
+    return "cogon";
+  }
+}
+
 type SmartpoleNode = {
   id: string; name: string; street: string; lat: number; lng: number;
 };
@@ -373,7 +395,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       arrival_reason: "Field Request",
       additional_officers: "None",
       status: "Active",
-      barangay_id: "cogon"
+      barangay_id: currentUserBarangayId()
     };
     const res = await fetch(`${API_URL}/api/incidents`, {
       method: "POST",
@@ -509,7 +531,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                 const res = await fetch(`${API_URL}/api/cameras`, {
                   method: "POST",
                   headers: authHeaders(),
-                  body: JSON.stringify({ name, url: path, barangay_id: "cogon" }),
+                  body: JSON.stringify({ name, url: path, barangay_id: currentUserBarangayId() }),
                 });
                 if (res.ok) {
                   onUpdate();
