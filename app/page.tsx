@@ -328,10 +328,16 @@ const fetchCameras = async (userObj: any) => {
   // one shared socket, refetch only when the backend actually broadcasts
   // something (plus the existing 60s fallback poll inside useLiveChannel
   // itself as a safety net).
+  // `!!currentUser` as the ready flag: see the BUG FOUND 2026-09-03 comment
+  // on useLiveChannel itself -- without this, the hook's one guaranteed
+  // initial call fires while currentUser is still null (this effect runs at
+  // mount, before the hydrate-from-localStorage effect above has
+  // committed), fetchStats/fetchActiveAlertCache's own `if (!currentUser)
+  // return` skips quietly, and nothing calls them again for up to 60s.
   useLiveChannel("incidents", () => {
     fetchStats();
     fetchActiveAlertCache();
-  });
+  }, !!currentUser);
 
   // Announce new incidents audibly, in the window title, and on the desktop.
   // Before this, an incoming alert only re-rendered the list -- an operator

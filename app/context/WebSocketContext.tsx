@@ -110,6 +110,35 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     };
   }, [connect]);
 
+  // BUG FOUND 2026-09-03 (found via manual multi-tab testing): 'ecoToken'/
+  // 'ecoUser' live in plain localStorage, which every tab on this origin
+  // shares, and every fetch across the app independently re-reads the token
+  // at call time rather than binding to whichever session first rendered
+  // the page. Log in as a second account in another tab and the FIRST tab
+  // keeps its own UI chrome (header still says the original user/role) but
+  // every subsequent request it makes now carries the second account's
+  // token -- observed concretely as a Barangay Admin's own "Personnel" list
+  // silently turning into every account in the system (DevTeam's view)
+  // because DevTeam happened to log in elsewhere. Nothing here stops two
+  // logins sharing one browser profile (that's a deliberate, documented
+  // choice elsewhere -- shared front-desk PCs are a real deployment shape
+  // for this app), but a tab silently acting under an identity its own
+  // header never updated to show is a genuine confused-deputy risk, not
+  // just a stale-UI cosmetic issue. The 'storage' event only fires in
+  // tabs OTHER than the one that made the write, so this can't loop on the
+  // tab's own login/logout -- reloading is the simplest way to make every
+  // open tab immediately and visibly consistent with whichever session is
+  // actually live in this browser, rather than silently drifting.
+  useEffect(() => {
+    function handleStorage(e: StorageEvent) {
+      if (e.key === 'ecoToken' && e.newValue !== e.oldValue) {
+        window.location.reload();
+      }
+    }
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
   const subscribe = useCallback((channel: string, fn: Listener) => {
     if (!listenersRef.current.has(channel)) listenersRef.current.set(channel, new Set());
     listenersRef.current.get(channel)!.add(fn);
@@ -143,7 +172,7 @@ export function useWebSocketContext() {
  * After:
  *   useLiveChannel("incidents", fetchStuff);
  */
-export function useLiveChannel(channel: string, onEvent: () => void) {
+export function useLiveChannel(channel: string, onEvent: () => void, ready: boolean = true) {
   const { subscribe } = useWebSocketContext();
 
   // BUG FOUND 2026-08-19: `onEvent` was called directly inside this effect,
@@ -168,7 +197,24 @@ export function useLiveChannel(channel: string, onEvent: () => void) {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
 
+  // BUG FOUND 2026-09-03: the ref above fixed the *closure* staleness, but
+  // not a second problem sitting right next to it -- this effect's single
+  // guaranteed initial call still fires at mount, which for page.tsx is
+  // BEFORE its own hydrate-currentUser-from-localStorage effect has
+  // committed. fetchStats/fetchActiveAlertCache's `if (!currentUser) return`
+  // guard was correctly reading null at that instant and skipping -- but
+  // nothing re-ran them once currentUser actually landed a render later.
+  // Confirmed live: the Incident Queue sat on its loading skeleton for the
+  // full 60s fallback period after every fresh login, not populating until
+  // that fallback tick finally fired. `ready` lets a caller hold this
+  // effect off (and everything it does -- initial call, subscribe, fallback
+  // poll) until the value its callback actually needs exists; flipping
+  // false -> true re-runs the effect exactly once, at which point the
+  // initial call finally sees a real currentUser. Defaults to true so every
+  // other call site (mounted only after currentUser already exists, inside
+  // the dashboard's own `if (!currentUser) return` guard) is unaffected.
   useEffect(() => {
+    if (!ready) return;
     onEventRef.current(); // initial load
     const unsubscribe = subscribe(channel, () => onEventRef.current());
     // Belt-and-suspenders: still poll, but slowly (60s) as a fallback in
@@ -179,5 +225,5 @@ export function useLiveChannel(channel: string, onEvent: () => void) {
       unsubscribe();
       clearInterval(fallback);
     };
-  }, [channel, subscribe]);
+  }, [channel, subscribe, ready]);
 }
