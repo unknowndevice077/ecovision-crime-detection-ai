@@ -500,7 +500,18 @@ def _start_stream_server():
     # though it was running fine) and aborted the launch every time.
     write_runtime_port("ai_core", actual_port)
     print(f"📡 Dynamic Stream server live → http://localhost:{actual_port}/video_feed")
-    uvicorn.run(stream_app, host=sys_config["backend"]["host"], port=actual_port, log_level="error")
+    # BUG FOUND 2026-09-03: this used to bind to sys_config["backend"]["host"]
+    # -- 0.0.0.0, copied from backend.py's own bind, which genuinely does need
+    # LAN reachability for a future multi-machine deployment. /video_feed has
+    # no such need and no auth check to protect it if it did: CORS above only
+    # covers fetch()-based endpoints, NOT a plain <img src="...">/GET request
+    # like a browser (or curl, or VLC) makes against a stream -- that request
+    # never carries an Origin header for CORS to check in the first place, so
+    # the "local single-user desktop app" reasoning in this file's own CORS
+    # comment above was already the intent; the bind just didn't match it.
+    # Confirmed nothing relies on reaching this from another machine, so this
+    # is hardcoded to loopback rather than inheriting backend.host.
+    uvicorn.run(stream_app, host="127.0.0.1", port=actual_port, log_level="error")
 
 threading.Thread(target=_start_stream_server, daemon=True).start()
 
@@ -1338,18 +1349,35 @@ def _draw_alert_banner(frame, event: str, conf: float):
     Drawn on a COPY of the frame at snapshot time, never the live frame --
     stamping the real frame would flash a red border through the operator's
     video feed and into the event clip for one frame.
+
+    BUG FOUND 2026-09-03 (user report, looking at real evidence frames): the
+    label used to be a FILLED rectangle painted directly over the top-left of
+    the actual scene -- on the real robbery evidence frame this is drawn
+    from, that's exactly where the subject was standing, so the one piece of
+    evidence meant to show what happened was covering it up. Fixed by adding
+    a solid strip BELOW the frame for the label and border, so every pixel
+    the camera actually captured stays visible -- the alert text now sits
+    outside the scene, not on top of it. Returns a NEW (taller) array rather
+    than mutating in place, since the output is no longer the same shape as
+    the input; the one caller (the evidence-snapshot flush) already treats
+    the return value as the image to write, not `frame` itself.
     """
     color = _ALERT_BANNER_COLOR.get(event, (0, 0, 255))
     h, w = frame.shape[:2]
-    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, 6)
     label = f"{event}  {conf * 100:.1f}%"
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
-    # Offset below the FPS/tracks HUD, which is already drawn at the very
-    # top-left by the time a snapshot is taken.
-    y0 = 30
-    cv2.rectangle(frame, (0, y0), (tw + 24, y0 + th + 18), color, -1)
-    cv2.putText(frame, label, (12, y0 + th + 6),
+    strip_h = th + 24
+
+    canvas = np.zeros((h + strip_h, w, 3), dtype=frame.dtype)
+    canvas[:h] = frame
+    canvas[h:] = color
+    cv2.putText(canvas, label, (12, h + strip_h - 12),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+    # A thin accent border around the whole thing (scene + strip) so a
+    # flagged frame is still visually distinct at a glance -- only the
+    # outermost few pixels, never anything the camera actually saw.
+    cv2.rectangle(canvas, (0, 0), (w - 1, h + strip_h - 1), color, 3)
+    return canvas
 
 def _draw_x3d_crop_box(frame, crop_box, is_violent: bool, conf: float):
     if crop_box is None:
@@ -2371,19 +2399,45 @@ while _running:
 
             prev_joints[tid] = joints[[9, 10]].copy()
 
-            # In scene mode the frame-level verdict IS the detection; pose is
-            # kept only to attribute it to a person (which box to draw, which
-            # track to name in the alert) and to drive the weapon/robbery/
-            # vandalism rules, which are unaffected. "both" still runs the
-            # per-track model so its overlay stays available for comparison,
-            # but the scene verdict is what decides.
+            # BUG FOUND 2026-09-03 (user report, real evidence frame): scene
+            # mode used to hand EVERY visible track the exact same
+            # scene_violent verdict, with no per-person signal behind it at
+            # all -- "pose is kept only to attribute it to a person" below was
+            # aspirational, not actually true. Each track's box-coloring
+            # confirmation counter (ts.update further down) runs
+            # independently, so whichever track's OWN counter happened to hit
+            # ASSAULT_CONFIRM_FRAMES first won the red box: a race with no
+            # relationship to who was actually involved. A bystander winning
+            # that race in a crowded scene was not a fluke, it was this code
+            # working as written.
+            #
+            # Real fix: always run the per-track model too -- previously
+            # reserved for VIOLENCE_MODE == "both"'s side-by-side overlay --
+            # and use ITS score for attribution, exactly the same call and
+            # the same EMA/consecutive-confirm smoothing the pure "track"
+            # mode below already trusted on its own. This is why the old
+            # scene/track branches collapse into one: attribution should work
+            # identically either way, only WHETHER an alert exists should
+            # differ between modes.
+            #
+            # scene_violent still independently guarantees the alert fires
+            # even when no single track's crop clears its own bar -- the
+            # scene-fallback path further below reads scene_violent directly,
+            # never this track's is_violent_x3d. So this only changes WHO
+            # gets boxed once an alert is already going to fire, never
+            # WHETHER one fires: a scene-confirmed frame where no individual
+            # crop agrees now shows the (already-fixed) frame-level banner
+            # with no specific person highlighted, rather than confidently
+            # pointing at the wrong one.
+            #
+            # Cost: one extra X3D forward per tracked person per
+            # check_interval, whenever violence detection runs at all --
+            # scaling with crowd size the way pure scene mode's steady-state
+            # deliberately didn't. Same per-track cost "both" mode already
+            # pays and has shipped with; see README's Violence detection
+            # entry for the updated cost note.
             is_violent_x3d, x3d_conf = (False, 0.0)
-            if VIOLENCE_ON and SCENE_MODE_ON:
-                if VIOLENCE_MODE == "both":
-                    x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
-                    _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
-                is_violent_x3d, x3d_conf = scene_violent, scene_conf
-            elif VIOLENCE_ON:
+            if VIOLENCE_ON:
                 is_violent_x3d, x3d_conf = x3d_detector.update(tid, frame, p_box, frame_count, all_boxes=boxes)
                 _draw_x3d_confidence(frame, p_box, x3d_detector.get_debug_info(tid))
                 _draw_x3d_crop_box(frame, x3d_detector.get_crop_box(tid), is_violent_x3d, x3d_conf)
@@ -2403,10 +2457,11 @@ while _running:
             state = ts.update(is_assault, has_weapon, frame_count, override_assault_confirm=override_confirm)
 
             if active_pip_crop is None or state in ["ASSAULT", "ARMED"]:
-                # Scene mode never fills the per-track crop cache, so fall back
-                # to a plain padded crop of this person's box -- the PIP is an
-                # operator aid ("who is this alert about"), and it would
-                # otherwise go blank for every scene-mode alert.
+                # x3d_detector.update() above now runs (and fills this track's
+                # crop cache) in scene mode too, not just "track"/"both" -- see
+                # the 2026-09-03 attribution fix above -- so this fallback now
+                # mainly covers the first frame or two before any track has
+                # been through update() yet, rather than all of scene mode.
                 live_crop_patch = x3d_detector.get_latest_live_crop(tid)
                 if live_crop_patch is None and SCENE_MODE_ON:
                     live_crop_patch = _pip_crop_from_box(frame, p_box)
@@ -2598,8 +2653,7 @@ while _running:
         snap_path = os.path.join(SCREENSHOTS_DIR, snap_filename)
         # Copy first: the banner must land ONLY in the evidence image, not in
         # the live stream or the event clip (both consume `frame` below).
-        snap_frame = frame.copy()
-        _draw_alert_banner(snap_frame, alert["event"], alert["conf"])
+        snap_frame = _draw_alert_banner(frame.copy(), alert["event"], alert["conf"])
         cv2.imwrite(snap_path, snap_frame)
         screenshot_url_path = f"/static/screenshots/{snap_filename}"
         _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path)

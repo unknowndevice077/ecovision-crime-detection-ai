@@ -313,6 +313,34 @@ SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
+# BUG FOUND 2026-09-03 (full-system audit): register_clip and ai_register_clip
+# below both did os.path.join(RECORDINGS_DIR, data.filename) and trusted the
+# result -- but os.path.join DISCARDS its first argument entirely when the
+# second is an absolute path (confirmed: os.path.join(RECORDINGS_DIR,
+# r"C:\Users\User\.env") returns exactly "C:\Users\User\.env"), and a
+# "../../.." relative filename walks back out at the OS level when the path
+# is actually opened, even though the string itself still starts with
+# RECORDINGS_DIR. Either one lets a caller register a video_records row whose
+# file_path points ANYWHERE on disk. DELETE /api/records/{id} later calls
+# os.remove(row["file_path"]) unconditionally on that value -- so a single
+# malicious clip registration, combined with nothing more than an admin's
+# routine "delete this broken-looking recording" click, deletes an arbitrary
+# file the attacker chose, not the recording. ai_register_clip has NO
+# authentication at all (same "local AI pipeline caller" reasoning as
+# ai_trigger) and backend.py binds 0.0.0.0, so this is reachable by anything
+# on the same network, no login required. register_clip requires a session
+# but not any specific permission, so any authenticated role (even the
+# lowest-privileged operator) could plant the same trap for an admin to
+# trigger. Resolving both the target and RECORDINGS_DIR to their real,
+# symlink-free absolute form and checking containment closes both the
+# absolute-path and the "../" cases the same way.
+def _safe_recordings_path(filename: str) -> str:
+    real_dir = os.path.realpath(RECORDINGS_DIR)
+    candidate = os.path.realpath(os.path.join(real_dir, filename))
+    if os.path.commonpath([real_dir, candidate]) != real_dir:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    return candidate
+
 def _ai_core_capture_url() -> str:
     # AI core (maincode/main.py) may have landed on a fallback port if 8001
     # was taken -- read its actual bound port from runtime_ports.json
@@ -541,41 +569,71 @@ def init_db():
             cursor.execute("UPDATE users SET password = ? WHERE id = ?", (hash_password(pw), row_id))
     conn.commit()
 
-    cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'DEVTEAM'")
-    if cursor.fetchone()[0] == 0:
-        # Static if DEVTEAM_BOOTSTRAP_USERNAME/PASSWORD are set in the
-        # environment (.env, not committed, not in .env.example -- each
-        # deployer sets their own) -- a fixed team login instead of a fresh
-        # random one every time the DB is recreated. Falls back to the old
-        # random-per-boot behavior when they're unset, so a checkout with no
-        # .env configured still boots into a usable, safe default.
-        bootstrap_username = os.environ.get("DEVTEAM_BOOTSTRAP_USERNAME")
-        bootstrap_password = os.environ.get("DEVTEAM_BOOTSTRAP_PASSWORD")
-        static = bool(bootstrap_username and bootstrap_password)
-        if not static:
+    # Static if DEVTEAM_BOOTSTRAP_USERNAME/PASSWORD are set in the
+    # environment (.env, not committed, not in .env.example -- each deployer
+    # sets their own) -- a fixed team login instead of a fresh random one
+    # every time the DB is recreated. Falls back to the old random-per-boot
+    # behavior when they're unset, so a checkout with no .env configured
+    # still boots into a usable, safe default.
+    bootstrap_username = os.environ.get("DEVTEAM_BOOTSTRAP_USERNAME")
+    bootstrap_password = os.environ.get("DEVTEAM_BOOTSTRAP_PASSWORD")
+    static = bool(bootstrap_username and bootstrap_password)
+
+    if static:
+        # BUG FOUND 2026-09-03 (user report: the installer's fixed testing
+        # login doesn't work). This used to live entirely inside the
+        # `COUNT(*) == 0` branch below, i.e. it only ever ran on a genuinely
+        # empty database. electron/main.js's TESTING_PHASE_FIXED_CREDENTIALS
+        # shows this exact username/password in a dialog on EVERY launch, not
+        # just the first, promising "the same login every time" -- but any
+        # machine that had EVER run an earlier build (a different static
+        # password, or before this env var existed at all, or the old random
+        # bootstrap path) already had a DEVTEAM row, so this whole block was
+        # skipped and that machine kept whatever password was baked in back
+        # then, forever, with no way to tell it had drifted from what the
+        # dialog now claims. Syncing the password on every boot whenever
+        # static credentials are configured is what actually makes that
+        # promise true, instead of only being true on a machine's very first
+        # boot ever.
+        cursor.execute("SELECT id FROM users WHERE username = ? AND role = 'DEVTEAM'", (bootstrap_username,))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute("UPDATE users SET password = ? WHERE id = ?", (hash_password(bootstrap_password), existing[0]))
+            conn.commit()
+        else:
+            cursor.execute(
+                "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id) "
+                "VALUES (?, ?, 'DEVTEAM', NULL, 'DevTeam HQ', NULL)",
+                (bootstrap_username, hash_password(bootstrap_password)),
+            )
+            conn.commit()
+            print("=" * 60)
+            print("🔑 [BOOTSTRAP] First-run DEVTEAM account created (static, from .env):")
+            print(f"    username: {bootstrap_username}")
+            print("=" * 60)
+    else:
+        cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'DEVTEAM'")
+        if cursor.fetchone()[0] == 0:
             bootstrap_username = "devteam"
             bootstrap_password = secrets.token_urlsafe(12)
-        cursor.execute(
-            "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id) "
-            "VALUES (?, ?, 'DEVTEAM', NULL, 'DevTeam HQ', NULL)",
-            (bootstrap_username, hash_password(bootstrap_password)),
-        )
-        conn.commit()
-        print("=" * 60)
-        print(f"🔑 [BOOTSTRAP] First-run DEVTEAM account created ({'static, from .env' if static else 'random'}):")
-        print(f"    username: {bootstrap_username}")
-        if not static:
+            cursor.execute(
+                "INSERT INTO users (username, password, role, barangay_id, assignment, parent_admin_id) "
+                "VALUES (?, ?, 'DEVTEAM', NULL, 'DevTeam HQ', NULL)",
+                (bootstrap_username, hash_password(bootstrap_password)),
+            )
+            conn.commit()
+            print("=" * 60)
+            print("🔑 [BOOTSTRAP] First-run DEVTEAM account created (random):")
+            print(f"    username: {bootstrap_username}")
             print(f"    password: {bootstrap_password}")
             print("    Save this now -- it will not be shown again.")
-        print("=" * 60)
-        # Only write the plaintext password to disk for the random case --
-        # a static password already lives in the deployer's own .env, so a
-        # second plaintext copy on disk would just be one more place it can
-        # leak from.
-        if not static:
+            print("=" * 60)
             # Also write to a file next to the writable data dir, since a
             # packaged installer build has no visible console for the person
             # to read this from (see Phase 3: first-run credential surfacing).
+            # Only done for the random case -- a static password already
+            # lives in the deployer's own .env, so a second plaintext copy on
+            # disk would just be one more place it can leak from.
             try:
                 cred_path = os.path.join(WRITABLE_DIR, "devteam_credentials.txt")
                 with open(cred_path, "w") as f:
@@ -2117,7 +2175,7 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
     cursor = conn.cursor()
     rid = str(uuid.uuid4())
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fpath = os.path.join(RECORDINGS_DIR, data.filename)
+    fpath = _safe_recordings_path(data.filename)
     # BUG FOUND 2026-08-19: same missing barangay_id as /api/ai_register_clip
     # below -- see that endpoint's comment. An operator manually extracting a
     # segment is scoped to their own barangay; a PNP account's token carries
@@ -2165,7 +2223,7 @@ async def ai_register_clip(data: ManualClipSchema):
     cursor = conn.cursor()
     rid = str(uuid.uuid4())
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fpath = os.path.join(RECORDINGS_DIR, data.filename)
+    fpath = _safe_recordings_path(data.filename)
     # BUG FOUND 2026-08-19: this never set barangay_id, so every AI-triggered
     # clip landed with it NULL. apply_scope() (used by GET /api/records)
     # restricts every non-DEVTEAM role to "LOWER(barangay_id) = ?" -- NULL

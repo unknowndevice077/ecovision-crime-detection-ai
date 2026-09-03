@@ -9,7 +9,8 @@
     "host": "0.0.0.0",
     "port": 8000,
     "workers": 1,
-    "reload": true,
+    "_reload_note": "BUG FOUND 2026-09-03 (user report: fixed testing devteam login doesn't work on the installer). This base file is what the PACKAGED DESKTOP APP actually reads -- electron/main.js deliberately sets APP_ENV=desktop, which matches neither config.development.json nor config.production.json, so it falls through to plain config.json (same reason APP_ENV=desktop exists at all; see that file's own comment). reload=true belongs ONLY in config.development.json (which already has its own correct copy of this key and overrides this one for local dev, where APP_ENV defaults to 'development'). It makes uvicorn run a supervisor + a SEPARATE multiprocessing worker process; Electron's killAll() only tracks the supervisor it spawned, not that worker, so any relaunch, crash-recovery, or reinstall on a machine that ran an earlier build could leave an orphaned worker still bound to port 8000 -- silently serving stale data (a different DB connection, a devteam account from whatever session created it) while the dashboard happily talks to it, mistaking it for the current app. Reproduced firsthand: identical orphaned-worker chatter happened repeatedly while testing this exact fix.",
+    "reload": false,
     "log_level": "debug"
   },
   "frontend": {
