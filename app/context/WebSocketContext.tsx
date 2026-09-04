@@ -90,6 +90,30 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     };
 
     ws.onclose = () => {
+      // BUG FOUND 2026-09-04 (user report: "WebSocket is closed before the
+      // connection is established" in the console -- that specific message
+      // is harmless, it's the expected one-time reconnect this effect does
+      // once useRuntimeConfig resolves the real backend address, see the
+      // comment above. But tracing it found a real bug sitting right next
+      // to it: this handler is a closure over the apiUrl THIS SPECIFIC
+      // connect() call was made with. The effect below closes the old
+      // socket without ever detaching its handlers first -- so when that
+      // reconnect happens, the OLD (placeholder-address) socket's onclose
+      // still fires a few milliseconds later, and it still schedules
+      // setTimeout(connect, ...) using ITS OWN stale closure, bound to the
+      // OLD address, not whatever connect() is current now. ~3s later that
+      // fires, opens a THIRD socket back to the wrong address, and
+      // overwrites wsRef.current with it -- silently orphaning the good
+      // connection to the real address (which stays open and keeps
+      // dispatching messages, so nothing looks broken immediately) while the
+      // tracked connection quietly starts retrying a dead endpoint forever.
+      // This is exactly the kind of thing that would make live updates stop
+      // -- with no visible error -- until a manual refresh, which is the one
+      // failure mode this reconnect logic was built to avoid in the first
+      // place. Guard: a socket whose onclose fires after it's no longer the
+      // one this component is tracking (wsRef.current has moved on) reports
+      // itself closed but does not get to schedule anything.
+      if (wsRef.current !== ws) return;
       setConnected(false);
       // Exponential backoff reconnect -- a dropped wifi link on a smartpole
       // shouldn't require a manual page refresh to recover live updates, but

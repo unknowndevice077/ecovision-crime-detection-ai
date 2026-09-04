@@ -98,6 +98,26 @@ export default function EcoVisionSentinel() {
   const [applyState, setApplyState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const router = useRouter();
 
+  // BUG FOUND 2026-09-04: fetchCameras/fetchStats/fetchActiveAlertCache below
+  // -- this dashboard's own core polling, running on literally every page
+  // load for every role -- treated a 401 exactly like any other failed
+  // fetch: silently do nothing and let the next poll try again. That retry
+  // never helps, because a 401 here means the token itself is invalid (now
+  // also raised the moment a DevTeam admin deletes the account or changes
+  // its role/barangay/station -- see require_auth's own fix in backend.py --
+  // not just the old "wait up to 7 days for it to expire" case), so every
+  // subsequent poll 401s forever and the dashboard just sits there frozen on
+  // whatever data it last had, looking normal, with no way back to login
+  // short of manually clearing storage. DevteamView.tsx already carries this
+  // exact fix (see its own 2026-08-19 comment) for its own fetches; this
+  // dashboard -- the one every single role actually lands on -- never got
+  // it.
+  const forceLogoutStaleSession = () => {
+    localStorage.removeItem('ecoUser');
+    localStorage.removeItem('ecoToken');
+    router.push('/loginpage/login');
+  };
+
   // Auth gate only. The camera fetch used to live here too, but this effect
   // runs on mount -- before useRuntimeConfig() has resolved the real apiUrl --
   // so in a packaged build with dynamic ports it hit the default :8000 once,
@@ -224,6 +244,7 @@ const fetchCameras = async (userObj: any) => {
       const res = await fetch(`${apiUrl}/api/cameras?barangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(userObj.role)}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (res.status === 401) { forceLogoutStaleSession(); return; }
       if (res.ok) {
         const data = await res.json();
         setCameras(data);
@@ -251,6 +272,7 @@ const fetchCameras = async (userObj: any) => {
       const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (res.status === 401) { forceLogoutStaleSession(); return; }
       if (!res.ok) return;
       const data = await res.json();
       setSqlReportCount(data.length);
@@ -274,6 +296,7 @@ const fetchCameras = async (userObj: any) => {
       const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (res.status === 401) { forceLogoutStaleSession(); return; }
       if (res.ok) {
         const data = await res.json();
         const activeDetections = data.filter((inc: any) => inc.status === 'Active');
@@ -593,6 +616,34 @@ const fetchCameras = async (userObj: any) => {
               <>
                 <NavSectionLabel>Operations</NavSectionLabel>
                 <NavItem label="Live Monitor" icon={<Activity size={16} />} active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
+                {/* BUG FOUND 2026-09-04: this branch never had a view_map/
+                    view_records/view_history gate at all -- the isPolice
+                    branch right above gets Incident Map/Recordings/Incident
+                    Log exactly when can() says so, but a barangay account
+                    got NONE of the three regardless of permissions. Create
+                    User's own form labels view_map/view_records/view_history
+                    "AUTOMATIC" for a BARANGAY_ADMIN same as it does for a
+                    PNP_ADMIN, and usePermissions() already computes all
+                    three as true for BARANGAY_ADMIN (and honors whatever a
+                    BARANGAY_STAFF was explicitly granted) -- the permission
+                    was real and backend-enforced on every relevant endpoint,
+                    there was simply no button anywhere in this branch that
+                    could ever reach it. A barangay admin/staff member
+                    granted view_map could not open the crime map; granted
+                    view_history, could not open the incident log -- not a
+                    403, just nothing to click. Mirrors the isPolice branch's
+                    gating exactly; Cameras/Hardware stay barangay-exclusive
+                    (that's real infrastructure ownership, not a view
+                    permission, so no PNP equivalent exists there). */}
+                {can('view_map') && (
+                  <NavItem label="Incident Map" icon={<MapPin size={16} />} active={activeTab === 'crime-reports'} onClick={() => setActiveTab('crime-reports')} badge={sqlReportCount} badgeTone="neutral" />
+                )}
+                {can('view_records') && (
+                  <NavItem label="Recordings" icon={<Film size={16} />} active={activeTab === 'records'} onClick={() => { setActiveTab('records'); setVideoRecordSearchQuery(""); }} />
+                )}
+                {can('view_history') && (
+                  <NavItem label="Incident Log" icon={<AlertOctagon size={16} />} active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} badge={pendingAlerts.length} badgeTone="critical" />
+                )}
                 <NavItem label="Cameras" icon={<Video size={16} />} active={activeTab === 'cameras'} onClick={() => setActiveTab('cameras')} badge={cameras.length} badgeTone="neutral" />
                 <NavItem label="Hardware" icon={<Zap size={16} />} active={activeTab === 'health'} onClick={() => setActiveTab('health')} />
               </>
@@ -650,7 +701,21 @@ const fetchCameras = async (userObj: any) => {
           <div className="px-3 py-2.5 border-t" style={{ borderColor: 'var(--line)' }}>
             <div className="label mb-1">{isPolice ? 'Station' : 'Barangay'}</div>
             <div className="data text-[11px] truncate" style={{ color: 'var(--text-2)' }}>
-              {((isPolice ? currentUser.station_id : currentUser.barangay_id) || 'UNASSIGNED').toString().toUpperCase()}
+              {/* BUG FOUND 2026-09-04 (caught live: a PNP admin's own sidebar
+                  read "STATION-0724F2A3" -- the raw internal station id,
+                  never something a human typed or should see). barangay_id
+                  happened to read fine because DevTeam types barangay ids by
+                  hand as lowercase names ("cogon"), but a station's id is
+                  always a generated "station-<uuid8>" -- this was never
+                  going to show anything real for any PNP account, ever.
+                  location_name is the backend's resolved barangays.name /
+                  police_stations.name (see backend.py's _location_name);
+                  falling back to the raw id keeps a session logged in
+                  before this fix (whose cached ecoUser has no
+                  location_name yet) showing SOMETHING rather than blank. */}
+              {(currentUser.location_name
+                || (isPolice ? currentUser.station_id : currentUser.barangay_id)
+                || 'UNASSIGNED').toString().toUpperCase()}
             </div>
           </div>
         </nav>

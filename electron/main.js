@@ -280,13 +280,82 @@ function getAppRoot() {
   return appPath;
 }
 
+// BUG FOUND 2026-09-05 (user report: launched the app, it said the launch
+// was fine, then the window showed their OWN unrelated portfolio project,
+// which happened to have `next dev` already running on port 3000). This
+// used to ONLY try to bind a throwaway server to the port and call it
+// "free" if that bind succeeded. On Windows, two unrelated processes can
+// often both bind() the very same port without either one erroring --
+// Windows's default socket-reuse behavior is far more permissive here than
+// Linux/macOS, and Node's net.Server never opts into the Windows-specific
+// exclusive-owner flag (SO_EXCLUSIVEADDRUSE) that would prevent it. So the
+// bind-based probe could report port 3000 "free" while the user's own dev
+// server was sitting right there, fully alive and answering real HTTP
+// requests -- findFreePortForFrontend then handed that same "free" port
+// back to spawnNextServer, and waitForPort (which only checks "did ANY
+// HTTP response come back") saw the OTHER app answering and called it a
+// successful launch. createWindow loaded exactly what was actually
+// listening there: their portfolio, not this app.
+// A real TCP client CONNECT is the actual question that matters -- "if I
+// dial this port right now, does anything pick up?" -- and that answer
+// isn't subject to the same bind-sharing ambiguity, because it asks the
+// OS's connection-routing path directly instead of the bind-ownership
+// path. Falls back to the original bind test only when the connect itself
+// errors out for an unrelated reason (most commonly ECONNREFUSED, i.e.
+// genuinely nothing there), preserving the original "port is free" answer
+// for the actually-free case.
 function isPortFree(port, host = HOST) {
   return new Promise((resolve) => {
-    const tester = require("net")
-      .createServer()
-      .once("error", () => resolve(false))
-      .once("listening", () => tester.close(() => resolve(true)))
-      .listen(port, host);
+    const net = require("net");
+    const client = net.connect({ port, host });
+    const declareOccupied = () => { client.destroy(); resolve(false); };
+    client.once("connect", declareOccupied);
+    client.once("error", () => {
+      client.destroy();
+      const tester = net
+        .createServer()
+        .once("error", () => resolve(false))
+        .once("listening", () => tester.close(() => resolve(true)))
+        .listen(port, host);
+    });
+  });
+}
+
+// Second layer, specific to the frontend port: even with isPortFree fixed
+// above, nothing stops SOME OTHER free port also happening to already run
+// a real HTTP server by the time this app claims it (a race between the
+// check and spawnNextServer actually binding, or simply a different
+// unrelated app on the very next candidate port). waitForPort only proves
+// "something answered" -- it can't tell whose server that was. This asks
+// the one question that actually distinguishes EcoVision's own frontend
+// from anyone else's: does /runtime-config.json exist and match the
+// apiUrl/aiUrl THIS launch just wrote to it via
+// writeRuntimeConfigForFrontend? A stranger's dev server won't have that
+// file at all (404) or won't have this exact content: near-certain either
+// way, and unlike waitForPort's plain "did anything respond" check, this
+// fails loudly and specifically instead of silently opening someone else's
+// app in the window.
+function verifyOwnFrontend(port, expectedApiUrl, host = HOST) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host, port, path: "/runtime-config.json", timeout: 5000 }, (res) => {
+      let body = "";
+      res.on("data", (d) => { body += d; });
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.apiUrl === expectedApiUrl) return resolve();
+        } catch {
+          // fall through to the rejection below
+        }
+        reject(new Error(
+          `Port ${port} answered, but not with EcoVision Sentinel's own dashboard -- ` +
+          `another application (e.g. a dev server for a different project) appears to ` +
+          `already be using this port. Close whatever is running on port ${port} and relaunch.`
+        ));
+      });
+    });
+    req.on("timeout", () => { req.destroy(); reject(new Error(`Timed out verifying the dashboard on port ${port}.`)); });
+    req.on("error", (e) => reject(e));
   });
 }
 
@@ -1163,6 +1232,12 @@ async function launchMainApp() {
 
     try {
       await waitForPort(frontendPort, HOST, 60000);
+      // waitForPort only proves something answered on this port -- not that
+      // it's actually OUR frontend and not some other app already sitting
+      // there (see isPortFree's 2026-09-05 fix note above for the real
+      // report this came from). This is the loud, specific check instead of
+      // silently opening whatever answered.
+      await verifyOwnFrontend(frontendPort, `http://${HOST}:${backendPort}`, HOST);
       sendLaunchStep("next", "done");
       sendLaunchProgress(100, "Ready.");
     } catch (portErr) {

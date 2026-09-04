@@ -225,7 +225,42 @@ def verify_token(token: str) -> dict:
 def require_auth(authorization: Optional[str] = Header(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing session token")
-    return verify_token(authorization.removeprefix("Bearer "))
+    payload = verify_token(authorization.removeprefix("Bearer "))
+    # BUG FOUND 2026-09-04 (caught live: a token for a user id that had been
+    # deleted from `users` entirely still worked -- every /api/* call it made
+    # kept returning 200). verify_token() only checks the HMAC signature and
+    # the 7-day exp claim; it was never cross-checked against the DB, so
+    # role/barangay_id/station_id/permissions were whatever they were AT
+    # LOGIN TIME for the token's full TOKEN_TTL_SECONDS (7 days) lifetime --
+    # deleting an account, demoting a role, or moving someone to a different
+    # barangay/station did nothing to any session they already held open.
+    # For a system whose whole job is gating who can see/confirm/dismiss
+    # incident data, a revoked account keeping full access for up to a week
+    # is a real confused-deputy risk, not just a staleness cosmetic issue
+    # (same family of bug as WebSocketContext.tsx's cross-tab token bleed
+    # fix above it -- trusting a credential's PAST validity instead of its
+    # CURRENT one). One cheap by-primary-key lookup per request re-verifies
+    # the account still exists and overlays its live role/barangay_id/
+    # station_id onto the payload, so a delete or a role/scope change takes
+    # effect on the very next request instead of waiting out the token.
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT role, barangay_id, station_id, custom_permissions FROM users WHERE id = ?",
+            (payload.get("id"),),
+        )
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Account no longer exists -- please log in again.")
+    row = dict(row)
+    payload["role"] = row["role"]
+    payload["barangay_id"] = row["barangay_id"]
+    payload["station_id"] = row["station_id"]
+    payload["custom_permissions"] = bool(row["custom_permissions"])
+    return payload
 
 def require_role(payload: dict, allowed_roles: set):
     if payload["role"] not in allowed_roles:
@@ -473,6 +508,26 @@ def _migrate_schema(conn, cursor):
     # which only ever worked for exactly the two demo cameras. Storing the
     # real id here so that guess can be deleted entirely.
     _ensure_column(conn, cursor, "incidents", "camera_id", "TEXT")
+
+    # Added 2026-09-04 alongside the DevTeam Users list (user request: "add
+    # a users list... which are active"): there was no way to answer that at
+    # all -- no login was ever recorded anywhere. Stamped on every successful
+    # login (see /api/login); NULL means "never logged in since this column
+    # existed," not "inactive," for every account that predates it.
+    _ensure_column(conn, cursor, "users", "last_login", "TEXT")
+
+    # Added 2026-09-04 (user request: DevTeam wants a password-gated way to
+    # override an admin-tier account's normally-automatic permissions).
+    # require_permission()'s ADMIN_ROLES branch grants BARANGAY_ADMIN/
+    # PNP_ADMIN every view/alert permission unconditionally -- their rows in
+    # user_permissions were never even consulted, so there was previously no
+    # point exposing an edit UI for them at all. This flag is the on/off
+    # switch: 0 (default, every existing and newly-created admin) keeps that
+    # original always-on behavior untouched; DevTeam setting it to 1 via the
+    # new override endpoint below makes require_permission() defer to this
+    # admin's explicit user_permissions rows instead, exactly like a
+    # standard operator account.
+    _ensure_column(conn, cursor, "users", "custom_permissions", "INTEGER NOT NULL DEFAULT 0")
 
     if not table_exists(cursor, "notify_targets"):
         cursor.execute("""
@@ -947,6 +1002,22 @@ class AdminCreateUser(BaseModel):
 class PermissionsUpdate(BaseModel):
     permissions: dict
 
+class AdminPermissionOverride(BaseModel):
+    # Re-authentication, not a new/separate secret: verified against the
+    # CALLING DevTeam account's own real password (whatever that install's
+    # DevTeam actually logs in with), the same way any step-up confirmation
+    # works elsewhere. Deliberately not a fixed/hardcoded bypass code -- that
+    # would be one shared, unchangeable-without-a-code-release secret baked
+    # into every install of this app rather than each deployment's own real
+    # credential, and would sit there in plaintext in whatever ships this
+    # source (repo history, this Electron app's own bundle).
+    confirm_password: str
+    # None (omitted) means "reset to automatic" -- clears custom_permissions
+    # back to 0 and this admin's explicit rows, returning them to the
+    # original unconditional-pass behavior. A dict means "go custom": set
+    # custom_permissions = 1 and replace their rows with exactly this set.
+    permissions: Optional[dict] = None
+
 class IncidentSchema(BaseModel):
     id: str
     case_id: str
@@ -1121,20 +1192,62 @@ def _row_to_user_dict_base(row) -> dict:
         "assignment": d.get("assignment"),
         "parent_admin_id": d.get("parent_admin_id"), "display_title": d.get("display_title"),
         "is_sub_admin": bool(d.get("is_sub_admin")),
+        "last_login": d.get("last_login"),
+        "custom_permissions": bool(d.get("custom_permissions")),
     }
+
+def _location_name(cursor, barangay_id, station_id) -> Optional[str]:
+    """Resolves a user's barangay/station id to its human-readable name.
+    BUG FOUND 2026-09-04 (caught live: a fresh PNP admin's sidebar footer
+    read "STATION-0724F2A3" instead of the station's actual name). Every
+    user dict the backend ever returned carried barangay_id/station_id --
+    the raw slug/generated-uuid primary key -- and nothing else; the
+    frontend had no name to show even if it wanted to. A barangay id
+    happens to often BE its own display-ish name (DevTeam types the id by
+    hand, e.g. "cogon" for "Cogon"), which made this invisible there, but a
+    station's id is always a generated "station-<uuid8>" (see the Stations
+    tab's own create handler) -- never something a human should see."""
+    if station_id:
+        cursor.execute("SELECT name FROM police_stations WHERE id = ?", (station_id,))
+        row = cursor.fetchone()
+        return row["name"] if row else None
+    if barangay_id:
+        cursor.execute("SELECT name FROM barangays WHERE id = ?", (barangay_id,))
+        row = cursor.fetchone()
+        return row["name"] if row else None
+    return None
 
 def _row_to_user_dict(cursor, row) -> dict:
     u = _row_to_user_dict_base(row)
     u["permissions"] = _user_permissions_json(cursor, u["id"])
+    u["location_name"] = _location_name(cursor, u["barangay_id"], u["station_id"])
     return u
 
 def _rows_to_user_dicts_batch(cursor, rows) -> list:
     """Batched equivalent of [_row_to_user_dict(cursor, r) for r in rows] --
-    one permissions query total instead of one per row."""
+    one permissions query total instead of one per row, same idea extended
+    to location_name (one query per distinct barangay/station instead of
+    one per user)."""
     users = [_row_to_user_dict_base(r) for r in rows]
     perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])
+    barangay_ids = {u["barangay_id"] for u in users if u["barangay_id"]}
+    station_ids = {u["station_id"] for u in users if u["station_id"]}
+    names_by_barangay = {}
+    if barangay_ids:
+        placeholders = ",".join("?" for _ in barangay_ids)
+        cursor.execute(f"SELECT id, name FROM barangays WHERE id IN ({placeholders})", tuple(barangay_ids))
+        names_by_barangay = {r["id"]: r["name"] for r in cursor.fetchall()}
+    names_by_station = {}
+    if station_ids:
+        placeholders = ",".join("?" for _ in station_ids)
+        cursor.execute(f"SELECT id, name FROM police_stations WHERE id IN ({placeholders})", tuple(station_ids))
+        names_by_station = {r["id"]: r["name"] for r in cursor.fetchall()}
     for u in users:
         u["permissions"] = perms_by_id.get(u["id"], "{}")
+        u["location_name"] = (
+            names_by_station.get(u["station_id"]) if u["station_id"]
+            else names_by_barangay.get(u["barangay_id"])
+        )
     return users
 
 
@@ -1156,20 +1269,21 @@ async def get_cameras(authorization: Optional[str] = Header(None)):
     return [_row_to_camera_dict(r) for r in rows]
 
 def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
-    # BUG FOUND 2026-09-02 (full account/permission sweep): a barangay-only
-    # key used to fall out of the admin bypass entirely -- for BOTH admin
-    # roles, not just PNP_ADMIN (the one it was meant to stop). That silently
-    # left every BARANGAY_ADMIN unable to manage their own barangay's
-    # cameras unless something explicitly inserted a user_permissions row
-    # for them -- nothing in the UI does that for an admin account (only
-    # their sub-accounts get permission checkboxes), so this was a live dead
-    # end. Confirmed against the real 'jay' BARANGAY_ADMIN account: zero
-    # permission rows, and add_camera 403'd with "Missing permission:
-    # manage_cameras". Fixed by keying the barangay-only carve-out on which
-    # ORG SIDE the admin is (BARANGAY_SIDE_ROLES bypasses same as any other
-    # key; PNP_SIDE_ROLES does not) instead of blanket-excluding both.
-    if role in ADMIN_ROLES and (key not in BARANGAY_ONLY_PERMISSIONS or role in BARANGAY_SIDE_ROLES):
-        return True
+    # BUG FOUND 2026-09-02 (full account/permission sweep, since superseded):
+    # this used to carry its own admin-bypass branch here (a barangay-only
+    # key falling out of it for BOTH admin roles instead of just PNP_ADMIN --
+    # see git history for that fix's original notes). That bypass is gone
+    # now, not just fixed: require_permission() is this function's ONLY
+    # caller, and by the time it reaches here it has already granted every
+    # admin WITHOUT a custom_permissions override (i.e. every admin exactly
+    # as before this file's 2026-09-04 override feature) its automatic pass
+    # -- so an admin only ever reaches this real DB check now because
+    # DevTeam explicitly, password-confirmed, opted them OUT of that
+    # automatic access via the new override endpoint. A second admin bypass
+    # sitting here would silently re-grant everything that override was
+    # just used to revoke, on every single request, forever. A standard
+    # operator role (BARANGAY_STAFF/PNP_OFFICER) was never in ADMIN_ROLES to
+    # begin with, so removing this changes nothing for them.
     cursor.execute("SELECT 1 FROM user_permissions WHERE user_id = ? AND permission_key = ?", (user_id, key))
     return cursor.fetchone() is not None
 
@@ -1195,8 +1309,19 @@ def require_permission(cursor, payload: dict, key: str):
             detail=f"Cameras are managed by the barangay that owns them; "
                    f"'{role}' accounts have view access only.")
 
-    if role in ADMIN_ROLES and (key not in BARANGAY_ONLY_PERMISSIONS or role in BARANGAY_SIDE_ROLES):
-        return
+    # Added 2026-09-04 (user request: a password-gated way for DevTeam to
+    # override an admin's normally-automatic permissions). Every admin used
+    # to hit this branch unconditionally -- user_permissions was never even
+    # consulted for PNP_ADMIN/BARANGAY_ADMIN, so there was nothing an
+    # override endpoint could actually change. custom_permissions (set only
+    # by that new DevTeam-only, password-confirmed endpoint; 0 for every
+    # existing and newly-created admin) skips this automatic pass and falls
+    # through to the exact same _has_permission check a standard operator
+    # account gets, so a DevTeam-applied override actually takes effect
+    # instead of being silently ignored.
+    if role in ADMIN_ROLES and not payload.get("custom_permissions"):
+        if key not in BARANGAY_ONLY_PERMISSIONS or role in BARANGAY_SIDE_ROLES:
+            return
     if not _has_permission(cursor, payload["id"], key, role):
         raise HTTPException(status_code=403, detail=f"Missing permission: {key}")
 
@@ -1489,7 +1614,16 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     cursor = conn.cursor()
 
     role = payload["role"]
-    if role != "DEVTEAM" and role not in ADMIN_ROLES:
+    # BUG FOUND 2026-09-04 (caught live testing the same day's admin
+    # permission override feature): this hand-rolled its own "is this an
+    # admin" bypass instead of calling require_permission(), so it never
+    # knew about custom_permissions at all -- DevTeam could password-confirm
+    # revoking an admin's view_map/view_history, require_permission() (used
+    # by every OTHER endpoint) would correctly start 403ing them, and this
+    # one endpoint would keep returning 200 with full incident data anyway.
+    # Skip the bypass for exactly the admins the override applies to, same
+    # condition require_permission() itself uses.
+    if role != "DEVTEAM" and not (role in ADMIN_ROLES and not payload.get("custom_permissions")):
         cursor.execute(
             "SELECT 1 FROM user_permissions WHERE user_id = ? AND permission_key IN ('view_map','view_history')",
             (payload["id"],),
@@ -2414,6 +2548,13 @@ async def login(request: Request, creds: UserLogin):
                 detail="Your location is still pending DevTeam approval. Please check back later.",
             )
 
+    # Stamped here, not on every authenticated request -- last_login answers
+    # "when did this account last sign in", not "is a request in flight
+    # right now" (there's no session/heartbeat concept in this app to answer
+    # that second question honestly, so the Users list doesn't claim to).
+    cursor.execute("UPDATE users SET last_login = NOW() WHERE id = ?", (user_dict["id"],))
+    conn.commit()
+
     token = issue_token(user_dict)
     response_user = _row_to_user_dict(cursor, row)
     conn.close()
@@ -2772,6 +2913,37 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             existing_admin = cursor.fetchone()
             parent_id = existing_admin["id"] if existing_admin else None
 
+        # BUG FOUND 2026-09-04 (user report: created an account for a
+        # barangay, it never showed up anywhere). Root cause: this endpoint
+        # had no explicit duplicate checks of its own -- it just attempted
+        # the INSERT and let SQLite's own unique constraints reject it,
+        # caught below as a bare IntegrityError with a message that GUESSES
+        # between two entirely different real causes ("that username is
+        # taken, OR this location already has that captain role filled").
+        # Whichever one actually happened, the DevTeam operator creating the
+        # account only sees a maybe -- easy to misread as "probably just a
+        # naming collision, I'll retry with a different username" when the
+        # real problem was the admin slot, or vice versa, and easy to not
+        # register as a failure at all if skimmed quickly. signup() already
+        # does this properly with a dedicated pre-check; this endpoint never
+        # got the same treatment. Two separate, specific checks instead, so
+        # the account either gets created or the operator is told exactly
+        # why it didn't.
+        cursor.execute("SELECT 1 FROM users WHERE username = ?", (new_user.username,))
+        if cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Username '{new_user.username}' is already taken.")
+        if role in ADMIN_ROLES:
+            if is_pnp:
+                cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = 'PNP_ADMIN'", (station_id,))
+                dup_detail = "This station already has a PNP Admin account."
+            else:
+                cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN'", (barangay_id,))
+                dup_detail = "This barangay already has a Barangay Admin account."
+            if cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=400, detail=dup_detail)
+
         cursor.returning_execute(
             "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2967,6 +3139,66 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
     await manager.broadcast({"channel": "users", "event": "user_edited", "id": user_id})
     return {"status": "updated", "user": result}
 
+@app.post("/api/devteam/users/{user_id}/override_permissions")
+async def devteam_override_admin_permissions(
+    user_id: int, data: AdminPermissionOverride, authorization: Optional[str] = Header(None)
+):
+    """User request 2026-09-04: BARANGAY_ADMIN/PNP_ADMIN permissions are
+    normally automatic (require_permission()'s ADMIN_ROLES bypass) and were
+    never editable through any UI, because editing user_permissions rows
+    for an admin used to do nothing -- the bypass ignored them entirely.
+    This is DevTeam-only, and re-checks the CALLING DevTeam's own password
+    before touching anything, exactly like any other step-up-confirmed
+    sensitive action -- not a new shared secret, and not usable by anyone
+    who only has a session token (a stolen/leaked token alone can't call
+    this without also knowing that DevTeam's real password).
+    """
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT password FROM users WHERE id = ?", (payload["id"],))
+        caller = cursor.fetchone()
+        if not caller or not verify_password(data.confirm_password, caller["password"]):
+            raise HTTPException(status_code=403, detail="Incorrect DevTeam password.")
+
+        cursor.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if target["role"] not in ADMIN_ROLES:
+            # Staff/officer permissions were never automatic in the first
+            # place -- PATCH /api/admin/users/{id}/permissions already edits
+            # those directly, no override/re-auth dance needed there.
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{target['role']}' permissions are already directly editable -- "
+                       f"this endpoint is only for overriding an admin's automatic access.",
+            )
+
+        if data.permissions is None:
+            cursor.execute("UPDATE users SET custom_permissions = 0 WHERE id = ?", (user_id,))
+            cursor.execute("DELETE FROM user_permissions WHERE user_id = ?", (user_id,))
+            conn.commit()
+            await manager.broadcast({"channel": "users", "event": "permissions_reset", "id": user_id})
+            return {"status": "reset_to_automatic", "id": user_id}
+
+        cursor.execute("UPDATE users SET custom_permissions = 1 WHERE id = ?", (user_id,))
+        cursor.execute("DELETE FROM user_permissions WHERE user_id = ?", (user_id,))
+        for key, granted in data.permissions.items():
+            if granted and key in VALID_PERMISSION_KEYS:
+                cursor.execute(
+                    "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?)",
+                    (user_id, key, payload["id"]),
+                )
+        conn.commit()
+        await manager.broadcast({"channel": "users", "event": "permissions_overridden", "id": user_id})
+        return {"status": "overridden", "id": user_id, "permissions": data.permissions}
+    finally:
+        conn.close()
+
 @app.delete("/api/devteam/users/{user_id}")
 async def devteam_delete_user(user_id: int, authorization: Optional[str] = Header(None)):
     """Full-power delete -- devteam can remove a captain (and, via ON DELETE
@@ -3002,12 +3234,28 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     conn = get_conn()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, username, role, barangay_id, assignment, parent_admin_id, display_title, is_sub_admin FROM users")
+    # BUG FOUND 2026-09-04 (user report: a PNP Admin account exists but its
+    # station shows "no PNP admin created" / "PD vacant", and the new Users
+    # tab shows its organization as blank and "Never logged in" regardless
+    # of reality). Root cause: this SELECT never listed station_id or
+    # last_login, so every user object this endpoint returns is silently
+    # missing both fields even when the database row has real values (Jae's
+    # station_id is genuinely set to PNP 1's id) -- every screen fed by
+    # data.users has nothing to match a PNP account to its station with, so
+    # coverage always reads as vacant, and last_login always reads as never
+    # logged in. Same list _row_to_user_dict_base already uses elsewhere,
+    # kept in sync rather than duplicated ad hoc a second time.
+    # custom_permissions added 2026-09-04 alongside the admin permission
+    # override feature -- DevteamView needs it to know whether an admin row
+    # is still on the automatic default or has been explicitly overridden,
+    # so it can show the right control (and the right current checkboxes).
+    cursor.execute("SELECT id, username, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, last_login, custom_permissions FROM users")
     user_rows = cursor.fetchall()
     users = [dict(r) for r in user_rows]
     perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])
     for u in users:
         u["permissions"] = perms_by_id.get(u["id"], "{}")
+        u["custom_permissions"] = bool(u["custom_permissions"])
 
     cursor.execute("SELECT COUNT(*) AS c FROM incidents")
     incident_count = cursor.fetchone()["c"]

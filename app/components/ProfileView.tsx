@@ -10,6 +10,8 @@ interface ProfileViewProps {
     username: string;
     role: string;
     barangay_id: string;
+    station_id?: string;
+    location_name?: string;
     assignment: string;
     display_title?: string;
     is_sub_admin?: boolean;
@@ -89,7 +91,17 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
             <div className="flex items-center gap-1.5">
               <MapPin size={13} style={{ color: 'var(--text-3)' }} />
               <span className="text-[12px] font-bold uppercase tracking-wide" style={{ color: 'var(--text)' }}>
-                {currentUser.barangay_id?.toUpperCase() || 'GLOBAL'}
+                {/* BUG FOUND 2026-09-04: only ever read barangay_id, which
+                    is always null for every PNP account (they carry
+                    station_id instead) -- every single PNP_ADMIN/PNP_OFFICER
+                    profile page has always shown "GLOBAL" here, implying
+                    system-wide access no PNP account actually has. Same
+                    barangay_id-only blind spot as page.tsx's sidebar footer
+                    (see its matching 2026-09-04 fix) -- station_id/
+                    location_name were simply never considered as the
+                    alternative. Real GLOBAL scope (DEVTEAM) has neither id
+                    set, so it still correctly falls through to that label. */}
+                {(currentUser.location_name || currentUser.station_id || currentUser.barangay_id || 'GLOBAL').toUpperCase()}
               </span>
             </div>
           </Field>

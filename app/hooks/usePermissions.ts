@@ -24,6 +24,7 @@ export type PermissionKey =
 type StoredUser = {
   role: string;
   permissions?: string | Record<string, boolean>; // backend sends JSON string
+  custom_permissions?: boolean;
 };
 
 function readStoredUser(): StoredUser | null {
@@ -55,16 +56,25 @@ export function usePermissions() {
     // consumes the feed. Mirrors BARANGAY_ONLY_PERMISSIONS in backend.py --
     // the server enforces this regardless; this just stops rendering a
     // Delete button a PNP admin would only get a 403 from.
-    if (user.role === 'PNP_ADMIN') {
+    //
+    // BUG FOUND 2026-09-04 (caught live testing the day's own override
+    // feature): this returned the SAME hardcoded full-access object for
+    // every PNP_ADMIN/BARANGAY_ADMIN unconditionally -- DevTeam could
+    // password-confirm an override that revoked, say, view_map on the
+    // backend (require_permission() correctly started 403ing that admin's
+    // /api/incidents calls), and the sidebar still showed "Incident Map"
+    // and let them click into a view that would just fail to load, because
+    // this hook never even looked at custom_permissions or the real
+    // permissions blob for an admin -- only for non-admin roles below. A
+    // custom_permissions admin now reads their actual stored grants, same
+    // as a standard operator account; an admin still on the automatic
+    // default (the overwhelming majority, and every admin before this
+    // feature existed) is completely unaffected by this branch.
+    if ((user.role === 'PNP_ADMIN' || user.role === 'BARANGAY_ADMIN') && !user.custom_permissions) {
       return {
         view_map: true, view_records: true, view_history: true,
-        manage_cameras: false, confirm_dismiss_alerts: true,
-      };
-    }
-    if (user.role === 'BARANGAY_ADMIN') {
-      return {
-        view_map: true, view_records: true, view_history: true,
-        manage_cameras: true, confirm_dismiss_alerts: true,
+        manage_cameras: user.role === 'BARANGAY_ADMIN',
+        confirm_dismiss_alerts: true,
       };
     }
 

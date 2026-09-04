@@ -32,12 +32,14 @@ out/
 # dist/ holds the 1.63 GB portable .exe. Ship it as a GitHub Release asset,
 # never as a tracked file -- GitHub rejects blobs over 100 MB.
 dist/
-# dist_installer/ is the Inno Setup output (the real installer, ~3 GB single
-# .exe, since the MSI/NSIS pivot) -- same reasoning as dist/ above. This got
-# missed once already: a build was committed here before this line existed
-# and had to be stripped back out of history. Ship it as a GitHub Release
-# asset, never as a tracked file.
-dist_installer/
+# dist_installer/ was the old separate Inno Setup output folder (retired
+# once the installer's OutputDir moved to build alongside dist/'s own
+# win-unpacked instead). This got missed once already: a build was
+# committed here before this line existed and had to be stripped back out
+# of history -- kept as dist_* below so any similarly-named build-output
+# folder (dist_v2/, used to test a new installer without touching dist/'s
+# current one, included) can never repeat that mistake.
+dist_*/
 *.egg-info/
 pip-wheel-metadata/
 tsconfig.tsbuildinfo

@@ -28,7 +28,22 @@ const ROLE_STYLES: Record<string, { code: string; text: string; border: string; 
   BARANGAY_ADMIN: { code: 'BG', text: 'text-[var(--ok)]', border: 'border-[var(--ok)]/25', bg: 'bg-[var(--ok)]/[0.07]', barText: 'text-[var(--ok)]' },
   PNP_OFFICER: { code: 'PD', text: 'text-[var(--accent)]/70', border: 'border-[var(--accent)]/15', bg: 'bg-[var(--accent)]/[0.04]', barText: 'text-[var(--accent)]/70' },
   BARANGAY_STAFF: { code: 'BG', text: 'text-[var(--ok)]/70', border: 'border-[var(--ok)]/15', bg: 'bg-[var(--ok)]/[0.04]', barText: 'text-[var(--ok)]/70' },
+  // DEVTEAM accounts are real rows in data.users (the Users tab lists every
+  // account, itself included) but have no "branch" -- neutral styling.
+  DEVTEAM: { code: 'DT', text: 'text-[var(--text)]', border: 'border-[var(--line-2)]', bg: 'bg-[var(--panel-2)]', barText: 'text-[var(--text)]' },
 };
+
+// BUG FOUND 2026-09-04: every ROLE_STYLES[role]-with-fallback call site in
+// this file used `|| ROLE_STYLES.POLICE` as the "unknown role" fallback --
+// but ROLE_STYLES has never had a POLICE key (see above: PNP_ADMIN,
+// PNP_OFFICER, BARANGAY_ADMIN, BARANGAY_STAFF, DEVTEAM). That fallback was
+// itself undefined, so any row whose role didn't hit the map directly
+// still crashed on `.border` a line later -- the "safety net" caught
+// nothing. Harmless as long as every role rendered this way happened to
+// already be a real key (true everywhere ROLE_STYLES had been reached
+// before), until the new Users tab below rendered DEVTEAM rows, which
+// hadn't been added to the map yet, and the crash finally fired for real.
+const DEFAULT_ROLE_STYLE = { code: '??', text: 'text-[var(--text-2)]', border: 'border-[var(--line-2)]', bg: 'bg-[var(--panel-2)]', barText: 'text-[var(--text-2)]' };
 
 function authHeaders() {
   const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
@@ -48,6 +63,8 @@ type ManagedUser = {
   assignment: string;
   parent_admin_id: number | null;
   permissions: string;
+  last_login: string | null;
+  custom_permissions: boolean;
 };
 
 type PendingLocation = {
@@ -60,7 +77,7 @@ type PendingLocation = {
   created_at: string;
 };
 
-type Tab = 'directory' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models';
+type Tab = 'directory' | 'users' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models';
 
 type ModelStat = {
   label: string; value: number; unit: string; note?: string; good?: boolean;
@@ -138,6 +155,10 @@ export default function DevteamView() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
   const [tab, setTab] = useState<Tab>('directory');
+  // Separate from `search` (Directory tab's own callsign/location filter) --
+  // sharing one box across tabs meant switching tabs silently carried a
+  // stale filter over, or typing in one unexpectedly filtered the other.
+  const [userSearch, setUserSearch] = useState('');
   // Keys into locationDirectory below: a barangay's own id for a normal
   // location row, or `station:<id>` for a station that has no barangay
   // jurisdiction assigned yet (see locationDirectory's unassignedStations --
@@ -150,6 +171,18 @@ export default function DevteamView() {
   const [editDraft, setEditDraft] = useState({ username: '', assignment: '', password: '', barangay_id: '', station_id: '' });
   const [showEditPassword, setShowEditPassword] = useState(false);
   const [permsDraft, setPermsDraft] = useState<Record<string, boolean>>({});
+  // Admin permission override (2026-09-04): PNP_ADMIN/BARANGAY_ADMIN
+  // permissions are normally automatic and shown locked -- overrideMode is
+  // whether THIS edit session has that admin's permissions unlocked into
+  // real, editable checkboxes (seeded from whether they're already
+  // customized when the modal opens; toggling it is what turns the "always"
+  // rows in permissionRowsFor() into "editable" ones). overridePassword is
+  // the DevTeam re-auth required to actually apply that -- see
+  // backend.py's AdminPermissionOverride for why it's the caller's own real
+  // password rather than a fixed code.
+  const [overrideMode, setOverrideMode] = useState(false);
+  const [overridePassword, setOverridePassword] = useState('');
+  const [showOverridePassword, setShowOverridePassword] = useState(false);
   const [pendingActionIds, setPendingActionIds] = useState<Set<string | number>>(new Set());
   const [toast, setToast] = useState('');
   const { connected } = useWebSocketContext();
@@ -486,6 +519,12 @@ export default function DevteamView() {
       barangay_id: u.barangay_id || '', station_id: u.station_id || '',
     });
     try { setPermsDraft(JSON.parse(u.permissions || "{}")); } catch { setPermsDraft({}); }
+    // Seeded from this admin's actual current state, not always false --
+    // opening the editor on an already-overridden admin should show their
+    // real checkboxes immediately, not the locked "automatic" view.
+    setOverrideMode(!!u.custom_permissions);
+    setOverridePassword('');
+    setShowOverridePassword(false);
   };
 
   const saveEdit = async () => {
@@ -502,14 +541,40 @@ export default function DevteamView() {
     } else {
       if (editDraft.barangay_id.trim()) body.barangay_id = editDraft.barangay_id.trim();
     }
+    // True whenever this save would actually change the override state --
+    // going custom (overrideMode on), staying custom (still on), or coming
+    // back off from an already-customized admin (resetting). Only in those
+    // cases does the password-gated endpoint get called at all; an admin
+    // that was never touched keeps going through the ordinary permissions
+    // PATCH exactly as before (which is always a no-op for them, same as
+    // pre-2026-09-04, since every one of their keys was "always"/"banned").
+    const isAdminTier = editingUser.role === 'PNP_ADMIN' || editingUser.role === 'BARANGAY_ADMIN';
+    const changingOverride = isAdminTier && (overrideMode || editingUser.custom_permissions);
     setEditingUser(null);
     try {
-      const [editRes, permsRes] = await Promise.all([
+      const calls = [
         fetch(`${API_URL}/api/devteam/users/${id}`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify(body) }),
-        fetch(`${API_URL}/api/admin/users/${id}/permissions`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ permissions: onlyEditablePermissions(editingUser.role, permsDraft) }) }),
-      ]);
+        changingOverride
+          ? fetch(`${API_URL}/api/devteam/users/${id}/override_permissions`, {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({
+                confirm_password: overridePassword,
+                permissions: overrideMode ? onlyEditablePermissions(editingUser.role, permsDraft, true) : null,
+              }),
+            })
+          : fetch(`${API_URL}/api/admin/users/${id}/permissions`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ permissions: onlyEditablePermissions(editingUser.role, permsDraft) }) }),
+      ];
+      const [editRes, permsRes] = await Promise.all(calls);
       if (editRes.ok && permsRes.ok) { fetchOverview(); flash('Account updated.'); }
-      else { flash('Some changes failed to save.'); }
+      else {
+        // The override endpoint's own error (wrong password, wrong target
+        // role) is specific and worth showing verbatim rather than the
+        // generic fallback -- "Incorrect DevTeam password." tells DevTeam
+        // exactly what to fix; "Some changes failed to save" doesn't.
+        const failed = !editRes.ok ? editRes : permsRes;
+        const detail = await failed.json().catch(() => ({} as any));
+        flash(detail.detail || 'Some changes failed to save.');
+      }
     } catch {
       flash('Backend connection failure.');
     }
@@ -682,6 +747,14 @@ export default function DevteamView() {
                     <p className="text-[11px] text-[var(--text)] truncate">
                       {u.username}
                       {isAdmin && <span className="ml-2 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--text-3)' }}>admin</span>}
+                      {/* Visible without opening the edit modal -- DevTeam
+                          scanning this list should see at a glance which
+                          admins are on the automatic default and which have
+                          had that overridden (see backend.py's
+                          custom_permissions / 2026-09-04 override feature). */}
+                      {isAdmin && u.custom_permissions && (
+                        <span className="ml-1.5 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--accent)' }}>· custom perms</span>
+                      )}
                     </p>
                     <p className="text-[9px] text-[var(--text-2)] truncate">{u.assignment}</p>
                   </div>
@@ -834,6 +907,7 @@ export default function DevteamView() {
       {/* TABS */}
       <div className="shrink-0 flex items-center gap-1 px-7 border-b border-[var(--line)]">
         <TabButton icon={<LayoutGrid size={12} />} label="Directory" active={tab === 'directory'} onClick={() => setTab('directory')} />
+        <TabButton icon={<Users2 size={12} />} label="Users" active={tab === 'users'} onClick={() => setTab('users')} badge={data.users.length} />
         <TabButton
           icon={<ClipboardList size={12} />}
           label="Approvals"
@@ -968,6 +1042,83 @@ export default function DevteamView() {
         </div>
       )}
 
+      {/* ================= USERS TAB ================= */}
+      {/* Added 2026-09-04 (user request: "add a users list, just to see
+          which users, how many there are, and which are active"). The
+          Directory tab already shows every account, but only grouped under
+          its own barangay/station -- an account created for a jurisdiction
+          that isn't rendering right, or one nobody remembered to check, is
+          invisible there in practice even though it exists. This is the
+          same data (data.users), flat, with nothing to navigate into. */}
+      {tab === 'users' && (
+        <div className="flex-1 min-h-0 flex flex-col px-7 pb-7 pt-4">
+          <div className="shrink-0 flex items-center gap-2 border border-[var(--line)] border-b-0 px-3 py-2.5">
+            <Search size={12} className="text-[var(--text-2)] shrink-0" />
+            <input
+              value={userSearch}
+              onChange={e => setUserSearch(e.target.value)}
+              placeholder="search username, role, or organization"
+              className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+            />
+            <span className="text-[9px] shrink-0" style={{ color: 'var(--text-3)' }}>
+              {data.users.length} account{data.users.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto custom-scrollbar border border-[var(--line)]">
+            {(() => {
+              const q = userSearch.trim().toLowerCase();
+              const orgName = (u: ManagedUser) => {
+                if (u.role === 'DEVTEAM') return 'DevTeam HQ';
+                if (u.station_id) return stations.find(st => st.id === u.station_id)?.name ?? u.station_id;
+                if (u.barangay_id) return allLocations.find(l => l.id === u.barangay_id)?.name ?? u.barangay_id;
+                return '—';
+              };
+              const rows = [...data.users]
+                .sort((a, b) => a.username.localeCompare(b.username))
+                .filter(u => !q ||
+                  u.username.toLowerCase().includes(q) ||
+                  u.role.toLowerCase().includes(q) ||
+                  orgName(u).toLowerCase().includes(q));
+              if (rows.length === 0) {
+                return <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching accounts</p>;
+              }
+              return (
+                <div className="divide-y divide-[var(--panel-2)]">
+                  {rows.map(u => {
+                    const rowStyle = ROLE_STYLES[u.role] || DEFAULT_ROLE_STYLE;
+                    return (
+                      <div key={u.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(u.id) ? 'opacity-40' : ''}`}>
+                        <span className={`text-[8px] font-bold px-1.5 py-1 border ${rowStyle.border} ${rowStyle.text} shrink-0`}>{rowStyle.code}</span>
+                        <div className="min-w-0" style={{ width: '22%' }}>
+                          <p className="text-[11px] text-[var(--text)] truncate">{u.username}</p>
+                          <p className="text-[9px] text-[var(--text-2)] truncate">{u.assignment}</p>
+                        </div>
+                        <p className="text-[10px] text-[var(--text-2)] truncate" style={{ width: '18%' }}>
+                          {u.role.replace(/_/g, ' ')}
+                          {(u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN') && u.custom_permissions && (
+                            <span className="ml-1.5 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--accent)' }}>· custom perms</span>
+                          )}
+                        </p>
+                        <p className="text-[10px] text-[var(--text-2)] truncate flex-1 min-w-0">{orgName(u)}</p>
+                        <p className="text-[9px] shrink-0" style={{ color: u.last_login ? 'var(--text-2)' : 'var(--text-3)', width: '140px' }}>
+                          {u.last_login ? new Date(u.last_login).toLocaleString() : 'Never logged in'}
+                        </p>
+                        {u.role !== 'DEVTEAM' && (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
+                            <button onClick={() => handleDelete(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
       {/* ================= APPROVALS TAB ================= */}
       {tab === 'approvals' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
@@ -985,7 +1136,7 @@ export default function DevteamView() {
               <div className="divide-y divide-[var(--panel-2)]">
                 {pendingLocations.map(loc => {
                   const busy = pendingActionIds.has(loc.id);
-                  const roleMeta = ROLE_STYLES[loc.requester_role || ''] || ROLE_STYLES.POLICE;
+                  const roleMeta = ROLE_STYLES[loc.requester_role || ''] || DEFAULT_ROLE_STYLE;
                   return (
                     <div key={loc.id} className={`flex items-center justify-between gap-4 px-4 py-3.5 transition-opacity ${busy ? 'opacity-40' : ''}`}>
                       <div className="flex items-center gap-3 min-w-0">
@@ -1695,8 +1846,8 @@ export default function DevteamView() {
           <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-sm p-6 max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
             <div className="flex items-center justify-between mb-5 pb-4 border-b border-[var(--panel-2)]">
               <div className="flex items-center gap-2">
-                <span className={`text-[8px] font-bold px-1.5 py-1 border ${(ROLE_STYLES[editingUser.role] || ROLE_STYLES.POLICE).border} ${(ROLE_STYLES[editingUser.role] || ROLE_STYLES.POLICE).text}`}>
-                  {(ROLE_STYLES[editingUser.role] || ROLE_STYLES.POLICE).code}
+                <span className={`text-[8px] font-bold px-1.5 py-1 border ${(ROLE_STYLES[editingUser.role] || DEFAULT_ROLE_STYLE).border} ${(ROLE_STYLES[editingUser.role] || DEFAULT_ROLE_STYLE).text}`}>
+                  {(ROLE_STYLES[editingUser.role] || DEFAULT_ROLE_STYLE).code}
                 </span>
                 <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">{editingUser.role.replace('_', ' ')}</span>
               </div>
@@ -1787,11 +1938,84 @@ export default function DevteamView() {
                 <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
                   <KeyRound size={10} /> Permissions
                 </div>
-                {permissionNoteFor(editingUser.role) && (
-                  <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(editingUser.role)}</p>
+
+                {/* Admin permission override (2026-09-04): PNP_ADMIN/
+                    BARANGAY_ADMIN permissions are normally automatic --
+                    this is the only place that can change, and only after
+                    DevTeam re-confirms their own password. Not shown for
+                    DEVTEAM/staff/officer rows: DEVTEAM has no permissions
+                    concept, and staff/officer permissions were already
+                    directly editable with no override needed. */}
+                {(editingUser.role === 'PNP_ADMIN' || editingUser.role === 'BARANGAY_ADMIN') && (
+                  <div className="mb-2 border border-[var(--panel-2)]">
+                    <label className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel-2)]/50 transition-colors">
+                      <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)]">
+                        Override automatic permissions
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={overrideMode}
+                        onChange={e => {
+                          const on = e.target.checked;
+                          setOverrideMode(on);
+                          // Seed the checkboxes with what this admin ALREADY
+                          // effectively has (full access, since they've never
+                          // been overridden) the first time override is
+                          // switched on for them -- permsDraft came from
+                          // their real (empty) user_permissions rows, which
+                          // an admin never needed before now. Saving with
+                          // that empty draft as-is would silently strip every
+                          // permission the moment override is turned on,
+                          // before DevTeam has unchecked anything on purpose.
+                          // Seeding to "everything this role can hold, minus
+                          // whatever's permanently banned for it" instead
+                          // means turning override on and saving with no
+                          // other changes is a no-op, and only an explicit
+                          // uncheck actually restricts anything.
+                          if (on && !editingUser.custom_permissions) {
+                            const seeded: Record<string, boolean> = {};
+                            permissionRowsFor(editingUser.role, true).forEach(p => {
+                              if (p.status !== 'banned') seeded[p.key] = true;
+                            });
+                            setPermsDraft(seeded);
+                          }
+                        }}
+                        className="w-3.5 h-3.5 accent-[var(--accent)]"
+                      />
+                    </label>
+                    {(overrideMode || editingUser.custom_permissions) && (
+                      <div className="px-3 pb-3 pt-1 border-t border-[var(--panel-2)]">
+                        <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                          Confirm DevTeam password
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showOverridePassword ? 'text' : 'password'}
+                            value={overridePassword}
+                            onChange={e => setOverridePassword(e.target.value)}
+                            placeholder={overrideMode ? 'required to apply this override' : 'required to reset to automatic'}
+                            className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 pr-8 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowOverridePassword(s => !s)}
+                            title={showOverridePassword ? 'Hide password' : 'Show password'}
+                            tabIndex={-1}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors"
+                          >
+                            {showOverridePassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {permissionNoteFor(editingUser.role, overrideMode) && (
+                  <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(editingUser.role, overrideMode)}</p>
                 )}
                 <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                  {permissionRowsFor(editingUser.role).map(p => (
+                  {permissionRowsFor(editingUser.role, overrideMode).map(p => (
                     <label
                       key={p.key}
                       title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}

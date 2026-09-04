@@ -31,6 +31,62 @@ import requests
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/{method}"
 POLL_INTERVAL_SECONDS = 4
+
+# BUG FOUND 2026-09-04 (caught live: a real chat got the "Your Telegram ID
+# is..." registration reply TWICE for one message it sent). `offset` used to
+# live only in _poll_loop's local variable, reset to None every time this
+# process starts. Telegram only marks an update "confirmed" (i.e. stops
+# handing it back from getUpdates) once a LATER getUpdates call is made with
+# an offset past it -- receiving the update and even replying to it does not
+# confirm it by itself. So: message arrives, this poller replies, sets its
+# in-memory offset -- then the backend restarts (uvicorn --reload picking up
+# a file change, a crash, a manual bounce, all routine during dev) before
+# that advanced offset ever goes out in another getUpdates call. Telegram
+# still considers the message unconfirmed, the fresh process starts at
+# offset=None same as before, and getUpdates hands back that "old" message
+# again, producing a second identical reply. Persisting the offset to disk
+# after every update processed closes the gap: a restart resumes from the
+# last value written, not from scratch, regardless of whether this process
+# ever got to make another getUpdates call.
+_OFFSET_FILENAME = "telegram_poller_offset.txt"
+
+
+def _writable_dir():
+    # Same env-var-or-home-fallback pattern db.py/port_utils.py each already
+    # use independently for this -- telegram_bot.py has no import of
+    # backend.py's WRITABLE_DIR to share, so it re-derives it the same way.
+    d = os.environ.get("ECOVISION_WRITABLE_DIR") or os.path.join(
+        os.path.expanduser("~"), "EcoVisionSentinelData"
+    )
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _offset_file_path():
+    return os.path.join(_writable_dir(), _OFFSET_FILENAME)
+
+
+def _load_offset():
+    """Best-effort: a missing/corrupt file just means "start from whatever
+    Telegram currently has pending", same as the old offset=None default --
+    never worth crashing the poller over."""
+    try:
+        with open(_offset_file_path(), "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _save_offset(offset):
+    """Best-effort persistence -- a failed write here should degrade back to
+    the old in-memory-only behavior for this run, not crash the poller."""
+    try:
+        with open(_offset_file_path(), "w", encoding="utf-8") as f:
+            f.write(str(offset))
+    except OSError as e:
+        print(f"[telegram] Could not persist poller offset (continuing in-memory only): {e}")
+
+
 REGISTRATION_REPLY_TEXT = (
     "EcoVision Sentinel\n\n"
     "Your Telegram ID is: {chat_id}\n\n"
@@ -74,8 +130,9 @@ def send_message(chat_id, text: str):
 
 
 def _poll_loop(token):
-    offset = None
-    print("[telegram] Registration poller started -- replying to any message with the sender's chat_id.")
+    offset = _load_offset()
+    print(f"[telegram] Registration poller started (resuming from offset={offset}) -- "
+          f"replying to any message with the sender's chat_id.")
     while True:
         try:
             resp = _api(token, "getUpdates", offset=offset, timeout=20)
@@ -87,6 +144,7 @@ def _poll_loop(token):
             updates = resp.json().get("result", [])
             for u in updates:
                 offset = u["update_id"] + 1
+                _save_offset(offset)
                 msg = u.get("message")
                 if not msg:
                     continue

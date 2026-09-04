@@ -53,7 +53,7 @@ Compression=lzma2/fast
 ; Payload is mostly already-compressed binaries (torch DLLs, .pyd files);
 ; solid/max LZMA buys little ratio for a lot of build time here.
 SolidCompression=no
-OutputDir=..\dist_installer
+OutputDir=..\dist
 OutputBaseFilename=EcoVisionSentinel-Setup-{#MyAppVersion}
 SetupIconFile=..\build\icon.ico
 WizardStyle=modern

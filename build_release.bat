@@ -168,8 +168,8 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [5/5] Done. Your installer is in the dist_installer\ folder:
-dir /b dist_installer\*.exe
+echo [5/5] Done. Your installer is in the dist\ folder, alongside win-unpacked:
+dir /b dist\*.exe
 echo Give this .exe to users. Running it installs EcoVision Sentinel
 echo end-to-end into ONE folder they choose -- shortcut, uninstaller,
 echo database, weights, python-env, everything together. No admin/UAC
