@@ -635,6 +635,64 @@ def _migrate_schema(conn, cursor):
         conn.commit()
         print("💾 [DATABASE] Migrated: created audit_log")
 
+    # Added 2026-09-23 (Phase 2 of the same DevTeam backlog -- explicit
+    # request: permissions "diced" down to the smallest unit, e.g. not
+    # "can monitor cameras" but "can monitor only THIS camera"). This
+    # coexists with user_permissions rather than replacing it: a row here
+    # means "explicitly scoped to one resource", a blanket grant still
+    # lives in user_permissions exactly as before. Deliberately additive/
+    # opt-in -- see get_cameras()'s own comment -- so a user with zero rows
+    # here is completely unaffected by this feature ever having shipped.
+    if not table_exists(cursor, "permission_grants"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS permission_grants (
+                id               TEXT PRIMARY KEY,
+                user_id          INTEGER NOT NULL,
+                permission_key   TEXT NOT NULL,
+                resource_type    TEXT NOT NULL,
+                resource_id      TEXT NOT NULL,
+                granted_by       INTEGER,
+                granted_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_grants_user ON permission_grants(user_id, permission_key, resource_type)")
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created permission_grants")
+
+    # Custom roles (#2): a NAMED PRESET layered on top of the real
+    # BARANGAY_STAFF/PNP_OFFICER tier, not a new DB-level role value -- the
+    # user stays a real operator account for every scope/nav/constraint
+    # purpose (chk_user_scope, apply_scope, the ~15 hardcoded role-list
+    # sites across the frontend) and only display_title + which permission
+    # rows get pre-applied at creation time change. custom_role_permission_
+    # defaults is a TEMPLATE, consulted only at account-creation time
+    # (devteam_create_user) -- deleting a role later does not retroactively
+    # touch any account it already created.
+    _ensure_column(conn, cursor, "users", "custom_role_id", "TEXT")
+    if not table_exists(cursor, "custom_roles"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS custom_roles (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                org_type     TEXT NOT NULL CHECK (org_type IN ('barangay', 'police')),
+                created_by   INTEGER,
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created custom_roles")
+    if not table_exists(cursor, "custom_role_permission_defaults"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS custom_role_permission_defaults (
+                role_id          TEXT NOT NULL,
+                permission_key   TEXT NOT NULL,
+                resource_type    TEXT,
+                resource_id      TEXT
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created custom_role_permission_defaults")
+
 
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
     """Writes one audit_log row. Never raises -- an audit-trail failure must
@@ -1210,6 +1268,17 @@ class DevteamCreateUser(BaseModel):
     display_title: Optional[str] = None
     parent_admin_id: Optional[int] = None
     permissions: Optional[dict] = None
+    custom_role_id: Optional[str] = None
+
+class ResourceGrantRequest(BaseModel):
+    permission_key: str
+    resource_type: str
+    resource_id: str
+
+class CustomRoleCreate(BaseModel):
+    name: str
+    org_type: str  # 'barangay' | 'police'
+    permissions: Optional[dict] = None
 
 
 # --- SERIALIZATION HELPERS ---
@@ -1275,6 +1344,7 @@ def _row_to_user_dict_base(row) -> dict:
         "is_sub_admin": bool(d.get("is_sub_admin")),
         "last_login": d.get("last_login"),
         "custom_permissions": bool(d.get("custom_permissions")),
+        "custom_role_id": d.get("custom_role_id"),
     }
 
 def _location_name(cursor, barangay_id, station_id) -> Optional[str]:
@@ -1346,6 +1416,23 @@ async def get_cameras(authorization: Optional[str] = Header(None)):
     sql, params = apply_scope(payload, "SELECT * FROM cameras", [])
     cursor.execute(sql, tuple(params))
     rows = cursor.fetchall()
+
+    # Phase 2 resource-scoped permissions (2026-09-23): additive-only, see
+    # permission_grants' own migration comment. A user with zero
+    # resource-scoped view_map/camera rows is completely unaffected -- this
+    # only NARROWS the org-scoped list above, for the specific user(s) an
+    # admin or DevTeam has explicitly "diced down" to individual cameras.
+    # DEVTEAM is never narrowed -- master control means unrestricted, not
+    # "also subject to its own grants".
+    if payload["role"] != "DEVTEAM":
+        cursor.execute(
+            "SELECT resource_id FROM permission_grants WHERE user_id = ? AND permission_key = 'view_map' AND resource_type = 'camera'",
+            (payload["id"],),
+        )
+        scoped_ids = {r["resource_id"] for r in cursor.fetchall()}
+        if scoped_ids:
+            rows = [r for r in rows if r["id"] in scoped_ids]
+
     conn.close()
     return [_row_to_camera_dict(r) for r in rows]
 
@@ -3098,18 +3185,60 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                 conn.close()
                 raise HTTPException(status_code=400, detail=dup_detail)
 
+        # Custom role (#2, 2026-09-23): a named preset, only ever applied to
+        # a real STANDARD_ROLES account -- an admin's own access is either
+        # automatic or DevTeam-overridden (see AdminPermissionOverride),
+        # never role-templated. org_type must match the account actually
+        # being created: a 'police' role can't be handed to a barangay
+        # account, chk_user_scope-style validation for the role dimension.
+        custom_role = None
+        if new_user.custom_role_id:
+            if role not in STANDARD_ROLES:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Custom roles apply to staff/officer accounts only.")
+            cursor.execute("SELECT * FROM custom_roles WHERE id = ?", (new_user.custom_role_id,))
+            custom_role = cursor.fetchone()
+            if not custom_role:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Unknown custom role.")
+            wanted_org = "police" if is_pnp else "barangay"
+            if custom_role["org_type"] != wanted_org:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"That role is for {custom_role['org_type']} accounts, not {wanted_org}.")
+
+        display_title = new_user.display_title or (custom_role["name"] if custom_role else None)
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, custom_role_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (new_user.username, hash_password(new_user.password), role,
              barangay_id or None, station_id or None, new_user.assignment, parent_id,
-             new_user.display_title, 1 if new_user.display_title else 0),
+             display_title, 1 if display_title else 0,
+             custom_role["id"] if custom_role else None),
         )
         new_id = cursor.lastrowid
 
         if new_user.permissions:
             for key, granted in new_user.permissions.items():
                 if granted and key in VALID_PERMISSION_KEYS:
+                    cursor.execute(
+                        "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
+                        (new_id, key, payload["id"]),
+                    )
+
+        if custom_role:
+            banned = BARANGAY_ONLY_PERMISSIONS if role in PNP_SIDE_ROLES else POLICE_ONLY_PERMISSIONS
+            cursor.execute("SELECT * FROM custom_role_permission_defaults WHERE role_id = ?", (custom_role["id"],))
+            for default in cursor.fetchall():
+                key = default["permission_key"]
+                if key not in VALID_PERMISSION_KEYS or key in banned:
+                    continue
+                if default["resource_type"] and default["resource_id"]:
+                    cursor.execute(
+                        "INSERT INTO permission_grants (id, user_id, permission_key, resource_type, resource_id, granted_by) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), new_id, key, default["resource_type"], default["resource_id"], payload["id"]),
+                    )
+                else:
                     cursor.execute(
                         "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
                         (new_id, key, payload["id"]),
@@ -3482,6 +3611,245 @@ async def devteam_restore_audit_entry(entry_id: str, authorization: Optional[str
         return {"status": "restored", "target_type": entry["target_type"], "target_id": entry["target_id"]}
     finally:
         conn.close()
+
+# --- RESOURCE-SCOPED PERMISSIONS (Phase 2, 2026-09-23) ---
+# "Dice every permission down to the smallest unit" -- not just "can
+# monitor cameras" but "can monitor only THIS camera". Coexists with the
+# existing blanket user_permissions grant (see permission_grants' own
+# migration comment): a resource-scoped row NARROWS what a user who
+# already has (or is exempt from needing) the blanket key can reach, it
+# never widens it -- granting a camera-scoped view_map row to someone with
+# no camera visibility at all does not, by itself, give them the blanket
+# permission back. Two access tiers, per the user's own answer:
+#   - a barangay/PNP admin manages ONLY their own subordinates
+#     (parent_admin_id ownership, same check PATCH .../permissions uses)
+#     and ONLY resources within their own org scope (scope_clause);
+#   - DevTeam has master control -- any user, any resource, no ownership
+#     check, mirroring the existing override-permissions precedent.
+def _resource_grant_target(cursor, user_id: int) -> dict:
+    cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    return dict(row)
+
+def _check_own_subordinate(payload: dict, target: dict):
+    if payload["role"] != "DEVTEAM" and target.get("parent_admin_id") != payload["id"]:
+        raise HTTPException(status_code=403, detail="You can only manage your own subordinates' access")
+
+def _check_permission_key_allowed(target: dict, permission_key: str):
+    if permission_key not in VALID_PERMISSION_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown permission key '{permission_key}'")
+    banned = (
+        BARANGAY_ONLY_PERMISSIONS if target["role"] in PNP_SIDE_ROLES
+        else POLICE_ONLY_PERMISSIONS if target["role"] in BARANGAY_SIDE_ROLES
+        else set()
+    )
+    if permission_key in banned:
+        raise HTTPException(status_code=400, detail=f"'{permission_key}' is not available for {target['role']} accounts")
+
+def _check_resource_in_scope(cursor, payload: dict, resource_type: str, resource_id: str):
+    """DEVTEAM's scope is unrestricted (master control). A barangay/PNP
+    admin can only grant access to a resource that is itself within their
+    own jurisdiction -- an admin cannot hand out visibility into a camera
+    they cannot see themselves."""
+    if payload["role"] == "DEVTEAM":
+        return
+    if resource_type != "camera":
+        raise HTTPException(status_code=400, detail=f"Resource type '{resource_type}' isn't supported yet")
+    frag, params = scope_clause(payload)
+    if frag == "1 = 0":
+        raise HTTPException(status_code=403, detail="Your account has no jurisdiction to grant from")
+    cursor.execute(f"SELECT 1 FROM cameras WHERE id = ?{(' AND ' + frag) if frag else ''}", [resource_id] + params)
+    if not cursor.fetchone():
+        raise HTTPException(status_code=403, detail="That camera is outside your jurisdiction")
+
+def _resource_permissions_handler(payload: dict, user_id: int, method: str, body: Optional[ResourceGrantRequest] = None):
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        target = _resource_grant_target(cursor, user_id)
+        _check_own_subordinate(payload, target)
+        if method == "list":
+            cursor.execute("SELECT * FROM permission_grants WHERE user_id = ? ORDER BY granted_at DESC", (user_id,))
+            return [dict(r) for r in cursor.fetchall()]
+
+        _check_permission_key_allowed(target, body.permission_key)
+        if method == "grant":
+            _check_resource_in_scope(cursor, payload, body.resource_type, body.resource_id)
+            cursor.execute(
+                "SELECT 1 FROM permission_grants WHERE user_id=? AND permission_key=? AND resource_type=? AND resource_id=?",
+                (user_id, body.permission_key, body.resource_type, body.resource_id),
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO permission_grants (id, user_id, permission_key, resource_type, resource_id, granted_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), user_id, body.permission_key, body.resource_type, body.resource_id, payload["id"]),
+                )
+                log_audit(cursor, payload, "permission_grant.created", "user", str(user_id), snapshot={
+                    "permission_key": body.permission_key, "resource_type": body.resource_type, "resource_id": body.resource_id,
+                })
+                conn.commit()
+            return {"status": "granted"}
+        else:  # revoke
+            cursor.execute(
+                "DELETE FROM permission_grants WHERE user_id=? AND permission_key=? AND resource_type=? AND resource_id=?",
+                (user_id, body.permission_key, body.resource_type, body.resource_id),
+            )
+            if cursor.rowcount:
+                log_audit(cursor, payload, "permission_grant.revoked", "user", str(user_id), snapshot={
+                    "permission_key": body.permission_key, "resource_type": body.resource_type, "resource_id": body.resource_id,
+                })
+                conn.commit()
+            return {"status": "revoked"}
+    finally:
+        conn.close()
+
+@app.get("/api/admin/users/{user_id}/resource_permissions")
+async def admin_list_resource_permissions(user_id: int, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_ROLES)
+    return _resource_permissions_handler(payload, user_id, "list")
+
+@app.post("/api/admin/users/{user_id}/resource_permissions")
+async def admin_grant_resource_permission(user_id: int, body: ResourceGrantRequest, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_ROLES)
+    return _resource_permissions_handler(payload, user_id, "grant", body)
+
+@app.delete("/api/admin/users/{user_id}/resource_permissions")
+async def admin_revoke_resource_permission(user_id: int, body: ResourceGrantRequest, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_ROLES)
+    return _resource_permissions_handler(payload, user_id, "revoke", body)
+
+@app.get("/api/devteam/users/{user_id}/resource_permissions")
+async def devteam_list_resource_permissions(user_id: int, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    return _resource_permissions_handler(payload, user_id, "list")
+
+@app.post("/api/devteam/users/{user_id}/resource_permissions")
+async def devteam_grant_resource_permission(user_id: int, body: ResourceGrantRequest, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    return _resource_permissions_handler(payload, user_id, "grant", body)
+
+@app.delete("/api/devteam/users/{user_id}/resource_permissions")
+async def devteam_revoke_resource_permission(user_id: int, body: ResourceGrantRequest, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    return _resource_permissions_handler(payload, user_id, "revoke", body)
+
+@app.get("/api/devteam/cameras/list_for_grants")
+async def devteam_cameras_for_grants(authorization: Optional[str] = Header(None)):
+    """Tiny helper for the Permissions UI's camera picker -- every camera,
+    DevTeam-unscoped, with enough context (name + barangay) to pick from
+    without cross-referencing the Cameras tab separately."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, barangay_id FROM cameras ORDER BY barangay_id, name")
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+# --- CUSTOM ROLES (Phase 2, 2026-09-23) ---
+# A NAMED PERMISSION PRESET layered on the real BARANGAY_STAFF/PNP_OFFICER
+# tier -- not a new DB-level role. See custom_roles' own migration comment
+# for why: the account stays a real operator for every scope/nav/
+# constraint purpose, only display_title + which permissions get
+# pre-applied at creation time come from the role. DevTeam-managed only
+# (mirrors the "Create Role" UI living in DevteamView's Configuration
+# section) -- listing is open to any authenticated admin so their own
+# Create User form can offer the roles DevTeam has defined for their org
+# side, but creating/deleting one is DevTeam-only.
+@app.get("/api/custom_roles")
+async def list_custom_roles(org_type: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_OR_DEVTEAM)
+    conn = get_conn()
+    cursor = conn.cursor()
+    if org_type:
+        cursor.execute("SELECT * FROM custom_roles WHERE org_type = ? ORDER BY name", (org_type,))
+    else:
+        cursor.execute("SELECT * FROM custom_roles ORDER BY name")
+    roles = [dict(r) for r in cursor.fetchall()]
+    if roles:
+        placeholders = ",".join("?" for _ in roles)
+        cursor.execute(
+            f"SELECT * FROM custom_role_permission_defaults WHERE role_id IN ({placeholders})",
+            tuple(r["id"] for r in roles),
+        )
+        defaults_by_role: dict = {}
+        for row in cursor.fetchall():
+            defaults_by_role.setdefault(row["role_id"], []).append(dict(row))
+        for r in roles:
+            r["permission_defaults"] = defaults_by_role.get(r["id"], [])
+    conn.close()
+    return roles
+
+@app.post("/api/devteam/custom_roles")
+async def create_custom_role(body: CustomRoleCreate, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    org_type = body.org_type.strip().lower()
+    if org_type not in ("barangay", "police"):
+        raise HTTPException(status_code=400, detail="org_type must be 'barangay' or 'police'")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Role name is required")
+
+    # A role's permission set is bound by the SAME banned-key rules as the
+    # tier it will be applied to (STANDARD_ROLES only -- custom roles apply
+    # to staff/officer accounts, never to an admin's own automatic access).
+    stand_in_role = "PNP_OFFICER" if org_type == "police" else "BARANGAY_STAFF"
+    banned = BARANGAY_ONLY_PERMISSIONS if stand_in_role in PNP_SIDE_ROLES else POLICE_ONLY_PERMISSIONS
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        role_id = str(uuid.uuid4())
+        cursor.execute(
+            "INSERT INTO custom_roles (id, name, org_type, created_by) VALUES (?, ?, ?, ?)",
+            (role_id, name, org_type, payload["id"]),
+        )
+        for key, granted in (body.permissions or {}).items():
+            if granted and key in VALID_PERMISSION_KEYS and key not in banned:
+                cursor.execute(
+                    "INSERT INTO custom_role_permission_defaults (role_id, permission_key, resource_type, resource_id) "
+                    "VALUES (?, ?, NULL, NULL)",
+                    (role_id, key),
+                )
+        log_audit(cursor, payload, "custom_role.created", "custom_role", role_id, snapshot={"name": name, "org_type": org_type})
+        conn.commit()
+        return {"status": "created", "id": role_id, "name": name, "org_type": org_type}
+    finally:
+        conn.close()
+
+@app.delete("/api/devteam/custom_roles/{role_id}")
+async def delete_custom_role(role_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM users WHERE custom_role_id = ? AND deleted_at IS NULL", (role_id,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Accounts still use this role -- it can't be deleted while assigned.")
+    cursor.execute("SELECT name FROM custom_roles WHERE id = ?", (role_id,))
+    existing = cursor.fetchone()
+    if not existing:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Role not found")
+    cursor.execute("DELETE FROM custom_role_permission_defaults WHERE role_id = ?", (role_id,))
+    cursor.execute("DELETE FROM custom_roles WHERE id = ?", (role_id,))
+    log_audit(cursor, payload, "custom_role.deleted", "custom_role", role_id, snapshot={"name": existing["name"]})
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
 
 # --- DEVTEAM: FULL SYSTEM VISIBILITY (READ-ONLY OVERVIEW) ---
 @app.get("/api/devteam/overview")
