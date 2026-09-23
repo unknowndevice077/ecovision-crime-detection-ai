@@ -119,6 +119,24 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
   const [filingTarget, setFilingTarget] = useState<Incident | null>(null);
   const [actionError, setActionError] = useState('');
 
+  // BUG FOUND 2026-09-22 (user report: "brgy cant add smartpoles"). This
+  // used to collect the two fields via two chained window.prompt() calls.
+  // Electron's renderer never implements window.prompt() -- unlike
+  // alert()/confirm(), which it does support via native dialogs -- so
+  // inside the actual packaged app the call just returns null immediately
+  // with no dialog ever appearing. `if (!name) return;` then silently bails
+  // with zero feedback: the button visibly does nothing. Invisible during
+  // this app's own dev-loop testing because that always runs in a real
+  // browser tab (Chrome/the Browser tool), never through Electron's
+  // BrowserWindow, so prompt() worked there. A controlled in-app modal
+  // replaces both prompts -- same POST /api/cameras call as before, just
+  // collecting the two fields through real form inputs instead of an API
+  // Electron's renderer doesn't have.
+  const [showAddSmartpoleModal, setShowAddSmartpoleModal] = useState(false);
+  const [newSmartpoleName, setNewSmartpoleName] = useState('Sector D Terminal');
+  const [newSmartpolePath, setNewSmartpolePath] = useState('rtsp://192.168.1.50/live');
+  const [addSmartpoleBusy, setAddSmartpoleBusy] = useState(false);
+
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
 
   const [isManualFilingActive, setIsManualFilingActive] = useState(false);
@@ -454,6 +472,32 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
   const closeModal = () => { setShowFilingModal(false); setFilingTarget(null);
   };
 
+  const submitAddSmartpole = async () => {
+    const name = newSmartpoleName.trim();
+    const path = newSmartpolePath.trim();
+    if (!name || !path) return;
+    setAddSmartpoleBusy(true);
+    setActionError('');
+    try {
+      const res = await fetch(`${API_URL}/api/cameras`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ name, url: path, barangay_id: currentUserBarangayId() }),
+      });
+      if (res.ok) {
+        onUpdate();
+        setShowAddSmartpoleModal(false);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setActionError(body.detail || 'Could not register that camera.');
+      }
+    } catch {
+      setActionError('Backend connection failure -- camera was not registered.');
+    } finally {
+      setAddSmartpoleBusy(false);
+    }
+  };
+
   const reportImageUrl = useMemo(() => {
     if (!filingTarget) return '';
     if (filingTarget.screenshot_path) {
@@ -511,38 +555,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
           <div className="w-px h-5" style={{ background: 'var(--line-2)' }} />
 
           <button
-            onClick={async () => {
+            onClick={() => {
               setActionError('');
-              // Used to be entirely fake -- two prompt()s then an alert()
-              // claiming success, with nothing sent anywhere and nothing
-              // saved. Now it actually registers the camera (POST
-              // /api/cameras, the same endpoint the barangay Cameras tab
-              // uses). NOTE: this map's pole markers (SMARTPOLE_LOCATIONS,
-              // above) are still a fixed list of 3 -- a newly added camera
-              // will show up in the Cameras tab and count, but will not
-              // yet appear as a pin on this map. That's a separate, larger
-              // rebuild (deriving pole markers from real camera rows
-              // instead of a hardcoded array) and out of scope for this fix.
-              const name = prompt("Enter New Smartpole Identifier Label:", "Sector D Terminal");
-              if (!name) return;
-              const path = prompt("Enter Network RTSP Surveillance Feed Stream Path:", "rtsp://192.168.1.50/live");
-              if (!path) return;
-              try {
-                const res = await fetch(`${API_URL}/api/cameras`, {
-                  method: "POST",
-                  headers: authHeaders(),
-                  body: JSON.stringify({ name, url: path, barangay_id: currentUserBarangayId() }),
-                });
-                if (res.ok) {
-                  onUpdate();
-                  alert(`${name} registered. It will appear in the Cameras tab -- this map's pole markers are a fixed demo set for now and won't show it yet.`);
-                } else {
-                  const body = await res.json().catch(() => ({}));
-                  setActionError(body.detail || 'Could not register that camera.');
-                }
-              } catch {
-                setActionError('Backend connection failure -- camera was not registered.');
-              }
+              setNewSmartpoleName('Sector D Terminal');
+              setNewSmartpolePath('rtsp://192.168.1.50/live');
+              setShowAddSmartpoleModal(true);
             }}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
             style={{ background: 'var(--accent)' }}
@@ -816,6 +833,82 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                   style={{ background: 'var(--critical)' }}
                 >
                   Remove
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD SMARTPOLE MODAL -- replaces the old window.prompt() flow, which
+          Electron's renderer never actually implements (see the 2026-09-22
+          note on showAddSmartpoleModal's declaration above). */}
+      {showAddSmartpoleModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.82)' }}>
+          <div className="border w-full max-w-md" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
+            <div className="h-11 flex justify-between items-center px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <div className="flex items-center gap-2.5">
+                <Plus size={14} style={{ color: 'var(--accent)' }} />
+                <span className="text-[12px] font-bold uppercase tracking-wide text-[var(--text)]">Register Smartpole</span>
+              </div>
+              <button
+                title="Cancel"
+                aria-label="Cancel"
+                onClick={() => setShowAddSmartpoleModal(false)}
+                className="transition-colors hover:text-[var(--text)]"
+                style={{ color: 'var(--text-3)' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div>
+                <span className={labelClass}>Identifier label</span>
+                <input
+                  type="text"
+                  value={newSmartpoleName}
+                  onChange={(e) => setNewSmartpoleName(e.target.value)}
+                  autoFocus
+                  className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)] transition-colors"
+                  style={{ ...fieldStyle, color: 'var(--text)' }}
+                />
+              </div>
+              <div>
+                <span className={labelClass}>RTSP stream path</span>
+                <input
+                  type="text"
+                  value={newSmartpolePath}
+                  onChange={(e) => setNewSmartpolePath(e.target.value)}
+                  className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)] transition-colors"
+                  style={{ ...fieldStyle, color: 'var(--text)' }}
+                />
+              </div>
+              <p className="label">
+                It will appear in the Cameras tab immediately -- this map's pole markers are a fixed demo set for now and won't show it yet.
+              </p>
+              {actionError && (
+                <div
+                  className="px-2.5 py-1.5 border text-[10px] font-bold uppercase tracking-wider"
+                  style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
+                >
+                  {actionError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setShowAddSmartpoleModal(false)}
+                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-colors hover:border-[var(--text-3)]"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={submitAddSmartpole}
+                  disabled={addSmartpoleBusy || !newSmartpoleName.trim() || !newSmartpolePath.trim()}
+                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                  style={{ background: 'var(--accent)' }}
+                >
+                  {addSmartpoleBusy ? 'Registering…' : 'Register'}
                 </button>
               </div>
             </div>

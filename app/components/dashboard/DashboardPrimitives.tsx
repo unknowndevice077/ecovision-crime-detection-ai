@@ -14,6 +14,7 @@
 // Behaviour is unchanged. This is a move, not a rewrite.
 
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Video, X } from 'lucide-react';
 import { SystemClockText, SystemDateText } from './SystemTime';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
@@ -275,7 +276,18 @@ export function IncidentRow({ alert, onConfirm, onDismiss, cameras }: any) {
    implied to be a dedicated per-camera stream this system doesn't have. */
 function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss }: any) {
     const { aiUrl } = useRuntimeConfig();
-    return (
+    // Portalled straight to document.body -- this <article> row (see
+    // IncidentRow above) carries `animate-rise-in`, whose `both` fill mode
+    // leaves a `transform: translateY(0)` on it permanently after the
+    // animation ends. A non-none transform on an ancestor makes THAT
+    // element the containing block for any `position: fixed` descendant,
+    // so without the portal this modal was being sized/positioned against
+    // the ~310px incident row instead of the viewport -- squashed into a
+    // corner and able to sit behind/between other rows instead of
+    // overlaying the whole screen. Portalling out of that subtree is what
+    // actually fixes it; z-index alone can't, since this was never a
+    // stacking-order problem.
+    return createPortal(
         <div className="fixed inset-0 z-[70] flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,0.75)' }}>
             <div className="border w-full max-w-lg" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
                 <div className="h-9 flex justify-between items-center px-3 border-b" style={{ borderColor: 'var(--line)' }}>
@@ -347,6 +359,7 @@ function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss 
                     </div>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

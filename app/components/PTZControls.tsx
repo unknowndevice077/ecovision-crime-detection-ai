@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-  ZoomIn, ZoomOut, Bookmark, Loader2, Square,
+  ZoomIn, ZoomOut, Bookmark, Loader2, Square, X,
 } from 'lucide-react';
 
 /* PTZ control pad for an ONVIF camera.
@@ -101,8 +102,14 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
     } finally { setBusy(false); }
   };
 
-  const savePreset = async () => {
-    const name = window.prompt('Name this camera position:');
+  // BUG FOUND 2026-09-22: same class of bug as CrimeReportsView's "Add
+  // smartpole" (see its matching note) -- window.prompt() is never
+  // implemented in Electron's renderer, so this silently did nothing in
+  // the packaged app. A small portalled modal replaces it.
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [presetName, setPresetName] = useState('');
+
+  const savePreset = async (name: string) => {
     if (!name) return;
     setBusy(true); setErr(null);
     try {
@@ -112,6 +119,7 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
       if (res.ok) {
         const pr = await fetch(`${apiUrl}/api/ptz/presets`, { headers: authHeaders() });
         if (pr.ok) setPresets((await pr.json()).presets || []);
+        setShowNameModal(false);
       } else {
         setErr((await res.json()).detail || `HTTP ${res.status}`);
       }
@@ -192,7 +200,13 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
                 <option key={p.token} value={p.token} style={{ background: 'var(--panel)' }}>{p.name}</option>
               ))}
             </select>
-            <button onClick={savePreset} disabled={busy} className={`${btn} h-6 px-1.5 gap-1`} style={btnStyle} title="Save current position as a preset">
+            <button
+              onClick={() => { setPresetName(''); setShowNameModal(true); }}
+              disabled={busy}
+              className={`${btn} h-6 px-1.5 gap-1`}
+              style={btnStyle}
+              title="Save current position as a preset"
+            >
               {busy ? <Loader2 size={11} className="animate-spin" /> : <Bookmark size={11} />}
               <span className="label">Save</span>
             </button>
@@ -205,6 +219,55 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
         <span className="label" style={{ color: 'var(--text-3)' }}>
           Camera connected but reports no PTZ capability
         </span>
+      )}
+
+      {showNameModal && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.82)' }}>
+          <div className="border w-full max-w-sm" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
+            <div className="h-10 flex justify-between items-center px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text)]">Name this position</span>
+              <button
+                title="Cancel"
+                aria-label="Cancel"
+                onClick={() => setShowNameModal(false)}
+                style={{ color: 'var(--text-3)' }}
+                className="hover:text-[var(--text)] transition-colors"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="p-3 space-y-2">
+              <input
+                type="text"
+                value={presetName}
+                onChange={(e) => setPresetName(e.target.value)}
+                autoFocus
+                onKeyDown={(e) => { if (e.key === 'Enter') savePreset(presetName.trim()); }}
+                placeholder="e.g. Front gate, wide"
+                className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)] transition-colors"
+                style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
+              />
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setShowNameModal(false)}
+                  className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider border transition-colors hover:border-[var(--text-3)]"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => savePreset(presetName.trim())}
+                  disabled={busy || !presetName.trim()}
+                  className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                  style={{ background: 'var(--accent)' }}
+                >
+                  {busy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );
