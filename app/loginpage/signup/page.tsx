@@ -1,8 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle, Eye, EyeOff } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle, Eye, EyeOff, IdCard, Check } from 'lucide-react';
 import Link from 'next/link';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 
@@ -18,7 +17,18 @@ export default function SignupPage() {
   const [stations, setStations] = useState<Station[]>([]);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const router = useRouter();
+
+  // Step 2 (#9, 2026-09-23): once the account row exists, offer an ID
+  // upload before sending the applicant on to sign-in. Uses the signup-
+  // scoped endpoint (username+password re-proves identity) rather than a
+  // token -- a still-pending BARANGAY_ADMIN can't log in yet to reach the
+  // authenticated .../me/verification endpoint, and a PNP_ADMIN could log
+  // in immediately but this keeps one consistent step for both branches.
+  const [createdUserId, setCreatedUserId] = useState<number | null>(null);
+  const [idFile, setIdFile] = useState<File | null>(null);
+  const [idUploadBusy, setIdUploadBusy] = useState(false);
+  const [idUploadDone, setIdUploadDone] = useState(false);
+  const [idUploadError, setIdUploadError] = useState('');
 
   const isPnp = formData.role === 'PNP_ADMIN';
 
@@ -73,12 +83,32 @@ export default function SignupPage() {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok) router.push('/loginpage/login');
+      if (res.ok) setCreatedUserId(data.id);
       else setError(data.detail || "That username is already taken");
     } catch (err) {
       setError("Cannot reach server — check that the backend is running");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const submitIdDocument = async () => {
+    if (!createdUserId || !idFile) return;
+    setIdUploadBusy(true);
+    setIdUploadError('');
+    try {
+      const body = new FormData();
+      body.append('username', formData.username);
+      body.append('password', formData.password);
+      body.append('id_document', idFile);
+      const res = await fetch(`${API_URL}/api/signup/${createdUserId}/verification`, { method: 'POST', body });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) setIdUploadDone(true);
+      else setIdUploadError(d.detail || 'Could not upload — you can add this later once you can sign in.');
+    } catch {
+      setIdUploadError('Backend connection failure — you can add this later once you can sign in.');
+    } finally {
+      setIdUploadBusy(false);
     }
   };
 
@@ -101,9 +131,65 @@ export default function SignupPage() {
 
         <div className="border" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
           <div className="h-8 flex items-center px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
-            <span className="label" style={{ color: 'var(--text)' }}>Administrator Registration</span>
+            <span className="label" style={{ color: 'var(--text)' }}>
+              {createdUserId === null ? 'Administrator Registration' : 'Verify your identity'}
+            </span>
           </div>
 
+          {createdUserId !== null ? (
+            <div className="p-3.5 space-y-3.5">
+              {idUploadDone ? (
+                <div className="flex items-start gap-2 px-2.5 py-2.5 border" style={{ background: 'rgba(0,180,120,0.08)', borderColor: 'var(--ok)' }}>
+                  <Check size={13} style={{ color: 'var(--ok)' }} className="shrink-0 mt-px" />
+                  <span className="text-[11px] leading-snug" style={{ color: 'var(--text)' }}>
+                    ID submitted. It'll be confirmed alongside your account review.
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
+                    Account created. Upload a government ID now so DevTeam can confirm your identity
+                    alongside your location approval — optional, but speeds up review.
+                  </p>
+                  <div>
+                    <label htmlFor="su-id-doc" className="label flex items-center gap-1.5 mb-1.5">
+                      <IdCard size={11} /> Government ID (JPG, PNG, WEBP, or PDF)
+                    </label>
+                    <input
+                      id="su-id-doc"
+                      type="file"
+                      accept=".jpg,.jpeg,.png,.webp,.pdf"
+                      onChange={e => setIdFile(e.target.files?.[0] || null)}
+                      disabled={idUploadBusy}
+                      className={fieldClass}
+                      style={fieldStyle}
+                    />
+                  </div>
+                  {idUploadError && (
+                    <div className="flex items-start gap-2 px-2.5 py-2 border" style={{ background: 'rgba(229,52,47,0.10)', borderColor: 'var(--critical)' }} role="alert">
+                      <AlertTriangle size={13} style={{ color: 'var(--critical)' }} className="shrink-0 mt-px" />
+                      <span className="text-[11px] leading-snug" style={{ color: 'var(--critical)' }}>{idUploadError}</span>
+                    </div>
+                  )}
+                  <button
+                    onClick={submitIdDocument}
+                    disabled={idUploadBusy || !idFile}
+                    className="w-full py-2.5 text-[11px] font-bold uppercase tracking-[0.15em] text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    style={{ background: 'var(--accent)' }}
+                  >
+                    {idUploadBusy ? 'Uploading…' : 'Submit ID'}
+                  </button>
+                </>
+              )}
+              <Link
+                href="/loginpage/login"
+                className="block text-center text-[10px] tracking-[0.1em] uppercase pt-1 transition-colors hover:text-[var(--text)]"
+                style={{ color: 'var(--text-3)' }}
+              >
+                {idUploadDone ? 'Continue to sign-in' : 'Skip for now — continue to sign-in'}
+              </Link>
+            </div>
+          ) : (
           <form onSubmit={handleSignup} className="p-3.5 space-y-3.5">
             <div>
               <label htmlFor="su-user" className="label flex items-center gap-1.5 mb-1.5">
@@ -254,6 +340,7 @@ export default function SignupPage() {
               {isSubmitting ? "Creating…" : "Create Account"} <ArrowRight size={13} />
             </button>
           </form>
+          )}
         </div>
 
         <div className="mt-3 pt-3 border-t space-y-2" style={{ borderColor: 'var(--line)' }}>

@@ -15,6 +15,7 @@ type ManagedUser = {
   assignment: string;
   parent_admin_id: number | null;
   permissions: string; // JSON string from backend
+  verification_status?: string;
 };
 
 function authHeaders() {
@@ -182,6 +183,30 @@ export default function AdminUsersView() {
     }
   };
 
+  const reviewVerification = async (userId: number, decision: 'verified' | 'rejected') => {
+    try {
+      const res = await fetch(`${API_URL}/api/admin/users/${userId}/verification`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ decision }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { fetchUsers(); }
+      else { setError(d.detail || 'Could not update.'); setTimeout(() => setError(''), 3000); }
+    } catch {
+      setError('Backend connection failure.'); setTimeout(() => setError(''), 3000);
+    }
+  };
+
+  const viewIdDocument = async (userId: number) => {
+    try {
+      const res = await fetch(`${API_URL}/api/users/${userId}/verification_document`, { headers: authHeaders() });
+      if (!res.ok) { setError('No document on file.'); setTimeout(() => setError(''), 3000); return; }
+      const blob = await res.blob();
+      window.open(URL.createObjectURL(blob), '_blank');
+    } catch {
+      setError('Backend connection failure.'); setTimeout(() => setError(''), 3000);
+    }
+  };
+
   const revokeCameraAccess = async (grant: any) => {
     if (!editingPerms) return;
     setGrantBusy(true);
@@ -303,6 +328,16 @@ export default function AdminUsersView() {
                   <div className="text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
                     {activeCount} permission{activeCount === 1 ? '' : 's'} granted
                   </div>
+                  {/* Identity verification (#8, 2026-09-23) */}
+                  {u.verification_status === 'pending' ? (
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <button onClick={() => viewIdDocument(u.id)} className="text-[9px] underline" style={{ color: 'var(--text-2)' }}>View ID</button>
+                      <button onClick={() => reviewVerification(u.id, 'verified')} className="text-[9px] uppercase tracking-wide" style={{ color: 'var(--ok)' }}>Verify</button>
+                      <button onClick={() => reviewVerification(u.id, 'rejected')} className="text-[9px] uppercase tracking-wide" style={{ color: 'var(--critical)' }}>Reject</button>
+                    </div>
+                  ) : u.verification_status === 'verified' ? (
+                    <div className="text-[9px] mt-0.5 uppercase tracking-wide" style={{ color: 'var(--ok)' }}>ID verified</div>
+                  ) : null}
                 </div>
 
                 <span

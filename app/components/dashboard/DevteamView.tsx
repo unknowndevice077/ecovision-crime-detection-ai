@@ -65,15 +65,19 @@ type ManagedUser = {
   permissions: string;
   last_login: string | null;
   custom_permissions: boolean;
+  verification_status?: string;
 };
 
 type PendingLocation = {
   id: string;
   name: string;
   status?: string;
+  requester_id?: number | null;
   requester_username: string | null;
   requester_role: string | null;
   requester_assignment: string | null;
+  requester_verification_status?: string | null;
+  requester_has_document?: boolean;
   created_at: string;
 };
 
@@ -349,6 +353,37 @@ export default function DevteamView() {
   useLiveChannel("*", fetchOverview);
 
   const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  // Not a static mount (VERIFICATION_DOCS_DIR is authenticated-only, see
+  // backend.py) -- a plain <a href> can't carry the Authorization header,
+  // so this fetches the bytes with the token and opens them as a blob URL
+  // instead. Revoked on close via the tab's own lifecycle (best-effort;
+  // browsers don't guarantee a revoke callback for a manually-opened tab,
+  // but this is a small, occasional admin action, not something run at
+  // any volume that would make a leaked blob URL meaningfully costly).
+  const viewVerificationDocument = async (userId: number) => {
+    try {
+      const res = await fetch(`${API_URL}/api/users/${userId}/verification_document`, { headers: authHeaders() });
+      if (!res.ok) { flash('No document on file, or you are not authorized to view it.'); return; }
+      const blob = await res.blob();
+      window.open(URL.createObjectURL(blob), '_blank');
+    } catch {
+      flash('Backend connection failure.');
+    }
+  };
+
+  const reviewVerification = async (userId: number, decision: 'verified' | 'rejected') => {
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/users/${userId}/verification`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ decision }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { flash(`Marked ${decision}.`); fetchOverview(); }
+      else flash(d.detail || 'Could not update.');
+    } catch {
+      flash('Backend connection failure.');
+    }
+  };
 
   // ── Audit log (2026-09-23) ──────────────────────────────────────────────
   // GET /api/devteam/audit_log returns a raw array (not {entries:[...]}) --
@@ -1046,6 +1081,27 @@ export default function DevteamView() {
         <p className="text-[9px] shrink-0" style={{ color: u.last_login ? 'var(--text-2)' : 'var(--text-3)', width: '140px' }}>
           {u.last_login ? new Date(u.last_login).toLocaleString() : 'Never logged in'}
         </p>
+        {/* Identity verification (#8, 2026-09-23) -- pending is the only
+            state DevTeam needs to act on here; unverified (never
+            submitted) and verified/rejected (already resolved) render as
+            plain, non-actionable text so this stays quiet outside the
+            handful of rows that actually need a decision. */}
+        <div className="shrink-0 flex items-center gap-1" style={{ width: '150px' }}>
+          {u.role !== 'DEVTEAM' && u.verification_status === 'pending' ? (
+            <>
+              <button onClick={() => viewVerificationDocument(u.id)} className="text-[9px] underline text-[var(--text-2)] hover:text-[var(--accent)] transition-colors">View ID</button>
+              <button onClick={() => reviewVerification(u.id, 'verified')} className="p-1 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={12} /></button>
+              <button onClick={() => reviewVerification(u.id, 'rejected')} className="p-1 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={12} /></button>
+            </>
+          ) : u.role !== 'DEVTEAM' ? (
+            <span
+              className="text-[9px] uppercase tracking-wide"
+              style={{ color: u.verification_status === 'verified' ? 'var(--ok)' : u.verification_status === 'rejected' ? 'var(--critical)' : 'var(--text-3)' }}
+            >
+              {u.verification_status || 'unverified'}
+            </span>
+          ) : null}
+        </div>
         {withActions && u.role !== 'DEVTEAM' && (
           <div className="flex items-center gap-1 shrink-0">
             <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
@@ -1564,6 +1620,31 @@ export default function DevteamView() {
                           <p className="text-[11px] text-[var(--text)] truncate">{loc.requester_username} <span className="text-[var(--text-2)]">requests</span> {loc.name}</p>
                           <p className="text-[9px] text-[var(--text-2)] flex items-center gap-1">
                             <MapPinned size={9} /> {loc.requester_role} &middot; {loc.requester_assignment} &middot; {new Date(loc.created_at).toLocaleDateString()}
+                          </p>
+                          {/* Identity verification (#9, 2026-09-23) -- a
+                              visible signal + a way to actually look, not a
+                              hard block on approval (see backend.py's
+                              upload_signup_verification/review comments for
+                              why: this app coordinates real barangay/PNP
+                              emergency response, and a technical hiccup in
+                              an ID scan should not be able to brick the only
+                              admin account for a location). */}
+                          <p className="text-[9px] mt-0.5 flex items-center gap-1.5">
+                            {loc.requester_has_document ? (
+                              <span style={{ color: loc.requester_verification_status === 'verified' ? 'var(--ok)' : 'var(--warn)' }}>
+                                ID {loc.requester_verification_status || 'pending'}
+                              </span>
+                            ) : (
+                              <span style={{ color: 'var(--critical)' }}>No ID submitted</span>
+                            )}
+                            {loc.requester_has_document && loc.requester_id != null && (
+                              <button
+                                onClick={() => viewVerificationDocument(loc.requester_id!)}
+                                className="underline text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"
+                              >
+                                View ID
+                              </button>
+                            )}
                           </p>
                         </div>
                       </div>

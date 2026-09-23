@@ -1,8 +1,9 @@
 "use client";
 
-import React from 'react';
-import { User, Shield, MapPin, Key, ShieldCheck, LogOut } from 'lucide-react';
+import React, { useState } from 'react';
+import { User, Shield, MapPin, Key, ShieldCheck, LogOut, IdCard, Clock, ShieldX } from 'lucide-react';
 import { usePermissions } from '../hooks/usePermissions';
+import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 
 interface ProfileViewProps {
   currentUser: {
@@ -15,9 +16,22 @@ interface ProfileViewProps {
     assignment: string;
     display_title?: string;
     is_sub_admin?: boolean;
+    verification_status?: 'unverified' | 'pending' | 'verified' | 'rejected';
   };
   onLogout: () => void;
 }
+
+function authHeaders() {
+  const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+const VERIFICATION_STYLE: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
+  unverified: { label: 'Not submitted', color: 'var(--text-3)', icon: <IdCard size={10} /> },
+  pending: { label: 'Pending review', color: 'var(--warn)', icon: <Clock size={10} /> },
+  verified: { label: 'Verified', color: 'var(--ok)', icon: <ShieldCheck size={10} /> },
+  rejected: { label: 'Rejected — resubmit', color: 'var(--critical)', icon: <ShieldX size={10} /> },
+};
 
 /* A labelled read-only field -- the profile screen is a credentials record,
    so every value gets the same label-over-value treatment as the incident
@@ -33,12 +47,44 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 export default function ProfileView({ currentUser, onLogout }: ProfileViewProps) {
   const { permissions } = usePermissions();
+  const { apiUrl: API_URL } = useRuntimeConfig();
+
+  // Identity verification (#8, 2026-09-23) -- the authenticated counterpart
+  // to the signup page's pre-approval upload: any logged-in account (an
+  // admin-created staff/officer, most directly) can attach or replace their
+  // own ID here. Local, optimistic-free: just reflects whatever
+  // verification_status the next login/refresh brings back, same as every
+  // other read-only field on this screen.
+  const [idFile, setIdFile] = useState<File | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadDone, setUploadDone] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+
+  const submitIdDocument = async () => {
+    if (!idFile) return;
+    setUploadBusy(true);
+    setUploadError('');
+    try {
+      const body = new FormData();
+      body.append('id_document', idFile);
+      const res = await fetch(`${API_URL}/api/users/me/verification`, { method: 'POST', headers: authHeaders(), body });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { setUploadDone(true); setIdFile(null); }
+      else setUploadError(d.detail || 'Could not upload.');
+    } catch {
+      setUploadError('Backend connection failure.');
+    } finally {
+      setUploadBusy(false);
+    }
+  };
 
   if (!currentUser) {
     return <div className="label p-6">Loading operator record…</div>;
   }
 
   const activePerms = Object.entries(permissions).filter(([, v]) => v).map(([k]) => k);
+  const verifStatus = uploadDone ? 'pending' : (currentUser.verification_status || 'unverified');
+  const verifStyle = VERIFICATION_STYLE[verifStatus] || VERIFICATION_STYLE.unverified;
 
   return (
     <div
@@ -156,6 +202,43 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
               </div>
             </div>
           )}
+
+          {/* Identity verification (#8, 2026-09-23) */}
+          <div className="border-t p-3" style={{ borderColor: 'var(--line)' }}>
+            <div className="flex items-center justify-between mb-2">
+              <span className="label">Identity verification</span>
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider" style={{ color: verifStyle.color, borderColor: verifStyle.color }}>
+                {verifStyle.icon} {verifStyle.label}
+              </span>
+            </div>
+            {(verifStatus === 'verified') ? (
+              <p className="text-[10px] leading-relaxed" style={{ color: 'var(--text-3)' }}>
+                Your ID has been confirmed.
+              </p>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,.pdf"
+                  onChange={e => setIdFile(e.target.files?.[0] || null)}
+                  disabled={uploadBusy}
+                  className="flex-1 data text-[10px] border px-2 py-1.5 outline-none"
+                  style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
+                />
+                <button
+                  onClick={submitIdDocument}
+                  disabled={uploadBusy || !idFile}
+                  className="px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-wider text-white disabled:opacity-40 transition-opacity hover:opacity-90 shrink-0"
+                  style={{ background: 'var(--accent)' }}
+                >
+                  {uploadBusy ? 'Uploading…' : 'Submit'}
+                </button>
+              </div>
+            )}
+            {uploadError && (
+              <p className="text-[10px] mt-1.5" style={{ color: 'var(--critical)' }}>{uploadError}</p>
+            )}
+          </div>
         </div>
       </div>
     </div>

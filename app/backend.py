@@ -17,9 +17,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass  # non-interactive/redirected stream that doesn't support reconfigure -- harmless
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header, Body
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -351,8 +352,17 @@ def _remember_esp32_ip(ip: str, source: str):
 _load_learned_esp32_ip()
 RECORDINGS_DIR = os.path.join(WRITABLE_DIR, sys_config["database"].get("recordings_subdir", "recordings"))
 SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
+# Identity verification (#8/#9, 2026-09-23): same on-disk-file + path-in-DB
+# convention as screenshots/recordings above (proven to survive a future
+# SQLite->Postgres migration since only the filename string lives in the
+# DB -- see this dir's own usage below). NOT mounted as a static route the
+# way SCREENSHOTS_DIR/RECORDINGS_DIR are (line ~468) -- a government ID is
+# sensitive, unlike a camera screenshot, so it's only ever served through
+# the authenticated get_verification_document endpoint.
+VERIFICATION_DOCS_DIR = os.path.join(WRITABLE_DIR, "verification_docs")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+os.makedirs(VERIFICATION_DOCS_DIR, exist_ok=True)
 
 # BUG FOUND 2026-09-03 (full-system audit): register_clip and ai_register_clip
 # below both did os.path.join(RECORDINGS_DIR, data.filename) and trusted the
@@ -381,6 +391,37 @@ def _safe_recordings_path(filename: str) -> str:
     if os.path.commonpath([real_dir, candidate]) != real_dir:
         raise HTTPException(status_code=400, detail="Invalid filename.")
     return candidate
+
+MAX_VERIFICATION_DOC_BYTES = 10 * 1024 * 1024
+
+def _save_verification_document(user_id: int, upload: UploadFile) -> str:
+    """Saves an uploaded ID under a SERVER-GENERATED filename -- unlike
+    _safe_recordings_path above, this never even considers the client's
+    own filename for the on-disk path, only its extension, so there's no
+    traversal surface to defend here at all. Returns just the filename
+    (matches SCREENSHOTS_DIR's own convention of storing a basename, not a
+    full path, in the DB -- portable across installs/machines)."""
+    ext = os.path.splitext(upload.filename or "")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
+        raise HTTPException(status_code=400, detail="Accepted formats: JPG, PNG, WEBP, or PDF")
+    filename = f"user{user_id}_{uuid.uuid4().hex}{ext}"
+    dest = os.path.join(VERIFICATION_DOCS_DIR, filename)
+    total = 0
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_VERIFICATION_DOC_BYTES:
+                    raise HTTPException(status_code=400, detail="File too large (10MB max)")
+                f.write(chunk)
+    except HTTPException:
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise
+    return filename
 
 def _ai_core_capture_url() -> str:
     # AI core (maincode/main.py) may have landed on a fallback port if 8001
@@ -726,6 +767,19 @@ def _migrate_schema(conn, cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_report_requests_station ON report_requests(station_id)")
         conn.commit()
         print("💾 [DATABASE] Migrated: created report_requests")
+
+    # Identity verification (#8/#9, 2026-09-23): every account -- admin-
+    # created staff/officers AND self-signup admin applicants -- can attach
+    # a government ID; an admin (their own subordinates) or DevTeam (anyone)
+    # confirms it. Deliberately does NOT gate login (see this feature's own
+    # design note in the review endpoints below) -- these accounts are
+    # already either vetted at creation time by the admin who made them, or
+    # gated by the existing barangay-approval flow for self-signup. This is
+    # an additional trust signal on top of that, not a second login wall.
+    _ensure_column(conn, cursor, "users", "verification_status", "TEXT DEFAULT 'unverified'")
+    _ensure_column(conn, cursor, "users", "id_document_path", "TEXT")
+    _ensure_column(conn, cursor, "users", "verified_by", "INTEGER")
+    _ensure_column(conn, cursor, "users", "verified_at", "TEXT")
 
 
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
@@ -1321,6 +1375,10 @@ class ReportRequestCreate(BaseModel):
 class ReportRequestResponse(BaseModel):
     note: Optional[str] = None
 
+class VerificationReview(BaseModel):
+    decision: str  # 'verified' | 'rejected'
+    note: Optional[str] = None
+
 
 # --- SERIALIZATION HELPERS ---
 # Every one of these returns snake_case keys matching the DB columns 1:1.
@@ -1386,6 +1444,7 @@ def _row_to_user_dict_base(row) -> dict:
         "last_login": d.get("last_login"),
         "custom_permissions": bool(d.get("custom_permissions")),
         "custom_role_id": d.get("custom_role_id"),
+        "verification_status": d.get("verification_status") or "unverified",
     }
 
 def _location_name(cursor, barangay_id, station_id) -> Optional[str]:
@@ -2771,7 +2830,7 @@ async def signup(request: Request, user: UserSignup):
             # No location-approval gate for PNP: the station already exists,
             # which means DevTeam already vetted it.
             conn.commit()
-            return {"status": "success"}
+            return {"status": "success", "id": new_user_id}
 
         cursor.execute("UPDATE barangays SET requested_by = ? WHERE id = ? AND requested_by IS NULL",
                        (new_user_id, barangay_id))
@@ -2780,11 +2839,52 @@ async def signup(request: Request, user: UserSignup):
         cursor.execute("SELECT status FROM barangays WHERE id = ?", (barangay_id,))
         loc_status = cursor.fetchone()["status"]
         if loc_status == "approved":
-            return {"status": "success"}
-        return {"status": "pending_approval",
+            return {"status": "success", "id": new_user_id}
+        # id included (2026-09-23, #9) so the signup form can immediately
+        # offer the ID-upload step via /api/signup/{id}/verification --
+        # this account can't log in yet to reach the authenticated upload
+        # endpoint instead, so the id has to come from right here.
+        return {"status": "pending_approval", "id": new_user_id,
                 "detail": "Account created. A DevTeam administrator must approve this location before you can log in."}
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Operator profile already mapped.")
+    finally:
+        conn.close()
+
+# Identity verification for a self-signup admin applicant (#9). A
+# just-signed-up BARANGAY_ADMIN can't log in until DevTeam approves their
+# barangay (see signup() above), so there's no token to authenticate this
+# upload with -- the applicant's own just-created username+password IS the
+# proof of identity instead, checked directly against the row this same
+# signup call created. Narrower than the authenticated .../me/verification
+# endpoint below on purpose: only reachable for a still-unverified admin
+# applicant, not a general "upload anyone's ID if you know their password"
+# tool.
+@app.post("/api/signup/{user_id}/verification")
+@limiter.limit("5/minute")
+async def upload_signup_verification(
+    request: Request, user_id: int,
+    username: str = Form(...), password: str = Form(...),
+    id_document: UploadFile = File(...),
+):
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        row = cursor.fetchone()
+        if not row or row["username"] != username or not verify_password(password, row["password"]):
+            raise HTTPException(status_code=403, detail="Could not verify those credentials")
+        row = dict(row)
+        if row["role"] not in ADMIN_ROLES:
+            raise HTTPException(status_code=400, detail="This upload is for self-signup admin applications only")
+        filename = _save_verification_document(user_id, id_document)
+        cursor.execute(
+            "UPDATE users SET id_document_path = ?, verification_status = 'pending' WHERE id = ?",
+            (filename, user_id),
+        )
+        log_audit(cursor, {"id": user_id, "username": username}, "user.verification_submitted", "user", str(user_id))
+        conn.commit()
+        return {"status": "submitted"}
     finally:
         conn.close()
 
@@ -2974,8 +3074,9 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
     conn = get_conn()
     cursor = conn.cursor()
     query = """
-        SELECT b.*, u.username AS requester_username, u.role AS requester_role,
-               u.assignment AS requester_assignment
+        SELECT b.*, u.id AS requester_id, u.username AS requester_username, u.role AS requester_role,
+               u.assignment AS requester_assignment, u.verification_status AS requester_verification_status,
+               u.id_document_path AS requester_has_document
         FROM barangays b
         LEFT JOIN users u ON u.id = b.requested_by
     """
@@ -2984,6 +3085,11 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
     else:
         cursor.execute(query + " ORDER BY b.created_at DESC")
     rows = [dict(r) for r in cursor.fetchall()]
+    for r in rows:
+        # Collapse the raw filename to a boolean -- DevTeam still reaches
+        # the actual file through get_verification_document, this list is
+        # just "has one been submitted", not a place to leak the path.
+        r["requester_has_document"] = bool(r.get("requester_has_document"))
     conn.close()
     return rows
 
@@ -3796,6 +3902,106 @@ async def devteam_cameras_for_grants(authorization: Optional[str] = Header(None)
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
+
+# --- IDENTITY VERIFICATION (Phase 4, 2026-09-23) ---
+# Every user can attach a government ID; an admin (their own subordinates)
+# or DevTeam (anyone) confirms it. See VERIFICATION_DOCS_DIR's own comment
+# for why this is never a static mount, and report_requests' migration
+# comment (Phase 3, same session) for the broader pattern this codebase
+# now follows of using an audited, human-reviewed handoff instead of
+# reaching for a permission grant every time two roles need to share
+# something. Deliberately does not block login -- these accounts are
+# already either admin-vetted at creation or barangay-approval-gated for
+# self-signup; this is an additional trust signal DevTeam/admins can act
+# on, not a second gate on top of those.
+@app.post("/api/users/me/verification")
+@limiter.limit("5/minute")
+async def upload_my_verification(request: Request, id_document: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        filename = _save_verification_document(payload["id"], id_document)
+        cursor.execute(
+            "UPDATE users SET id_document_path = ?, verification_status = 'pending', verified_by = NULL, verified_at = NULL WHERE id = ?",
+            (filename, payload["id"]),
+        )
+        log_audit(cursor, payload, "user.verification_submitted", "user", str(payload["id"]))
+        conn.commit()
+        return {"status": "submitted"}
+    finally:
+        conn.close()
+
+@app.get("/api/users/{user_id}/verification_document")
+async def get_verification_document(user_id: int, authorization: Optional[str] = Header(None)):
+    """The one new sensitive-data endpoint in this whole feature -- ownership
+    is checked explicitly (self, own subordinate via parent_admin_id, or
+    DEVTEAM) rather than reusing require_permission()'s key-based model,
+    since 'can see this specific person's ID document' isn't a permission
+    key anyone should be able to grant around -- it's strictly who they are
+    to that account."""
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, parent_admin_id, id_document_path FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        target = dict(target)
+        allowed = (
+            payload["role"] == "DEVTEAM"
+            or payload["id"] == user_id
+            or target.get("parent_admin_id") == payload["id"]
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Not authorized to view this document")
+        if not target["id_document_path"]:
+            raise HTTPException(status_code=404, detail="No document uploaded")
+        real_dir = os.path.realpath(VERIFICATION_DOCS_DIR)
+        real_path = os.path.realpath(os.path.join(real_dir, target["id_document_path"]))
+        if os.path.commonpath([real_dir, real_path]) != real_dir or not os.path.isfile(real_path):
+            raise HTTPException(status_code=404, detail="Document missing from disk")
+        return FileResponse(real_path)
+    finally:
+        conn.close()
+
+def _review_verification(payload: dict, user_id: int, body: VerificationReview, is_devteam_route: bool):
+    if body.decision not in ("verified", "rejected"):
+        raise HTTPException(status_code=400, detail="decision must be 'verified' or 'rejected'")
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        target = dict(target)
+        if not is_devteam_route and target.get("parent_admin_id") != payload["id"]:
+            raise HTTPException(status_code=403, detail="You can only review your own subordinates")
+        if not target["id_document_path"]:
+            raise HTTPException(status_code=400, detail="No document has been uploaded yet")
+        cursor.execute(
+            "UPDATE users SET verification_status = ?, verified_by = ?, verified_at = NOW() WHERE id = ?",
+            (body.decision, payload["id"], user_id),
+        )
+        log_audit(cursor, payload, f"user.verification_{body.decision}", "user", str(user_id), snapshot={"note": body.note})
+        conn.commit()
+        return {"status": body.decision}
+    finally:
+        conn.close()
+
+@app.post("/api/admin/users/{user_id}/verification")
+async def admin_review_verification(user_id: int, body: VerificationReview, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_ROLES)
+    return _review_verification(payload, user_id, body, is_devteam_route=False)
+
+@app.post("/api/devteam/users/{user_id}/verification")
+async def devteam_review_verification(user_id: int, body: VerificationReview, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    return _review_verification(payload, user_id, body, is_devteam_route=True)
 
 # --- CUSTOM ROLES (Phase 2, 2026-09-23) ---
 # A NAMED PERMISSION PRESET layered on the real BARANGAY_STAFF/PNP_OFFICER
