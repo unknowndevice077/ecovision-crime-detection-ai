@@ -849,6 +849,19 @@ export default function DevteamView() {
     setCreateError('');
   };
 
+  // 2026-09-24 user request: a barangay with no covering station is
+  // invisible to every PNP account, and since Phase 3 any report request
+  // from it has nowhere to route -- but jurisdiction was only ever set
+  // later, separately, in the Stations tab, so it was easy to forget
+  // entirely for a barangay created here. Auto-resolves from the existing
+  // relationship when one exists (nothing to ask); only a barangay with no
+  // station at all needs one picked as part of this same creation.
+  const coveringStationFor = (barangayId: string) => {
+    const id = barangayId.trim().toLowerCase();
+    if (!id) return undefined;
+    return stations.find(st => st.barangay_ids.includes(id));
+  };
+
   const handleCreateUser = async () => {
     setCreateError('');
     if (!createForm.username.trim() || !createForm.password.trim() || !createForm.assignment.trim()) {
@@ -864,6 +877,10 @@ export default function DevteamView() {
       setCreateError('A barangay is required for barangay roles.');
       return;
     }
+    if (!isPnp && !coveringStationFor(createForm.barangay_id) && !createForm.station_id) {
+      setCreateError('This barangay has no police station covering it yet -- pick one to assign its jurisdiction.');
+      return;
+    }
     setCreateBusy(true);
     try {
       const res = await fetch(`${API_URL}/api/devteam/users`, {
@@ -874,7 +891,11 @@ export default function DevteamView() {
           password: createForm.password,
           role: createForm.role,
           barangay_id: isPnp ? null : (createForm.barangay_id.trim().toLowerCase() || null),
-          station_id: isPnp ? createForm.station_id : null,
+          // For a barangay role this is jurisdiction, not the account's own
+          // station (see DevteamCreateUser's own comment) -- sent whenever
+          // present; the backend only actually uses it when the barangay
+          // has no covering station yet, and ignores it otherwise.
+          station_id: isPnp ? createForm.station_id : (createForm.station_id || null),
           assignment: createForm.assignment.trim(),
           display_title: createForm.display_title.trim() || null,
           parent_admin_id: createForm.parent_admin_id ? Number(createForm.parent_admin_id) : null,
@@ -887,7 +908,7 @@ export default function DevteamView() {
         flash(`${createForm.username} created (${isPnp ? stations.find(st => st.id === createForm.station_id)?.name ?? createForm.station_id : createForm.barangay_id}).`);
         resetCreateForm();
         fetchOverview();
-        setTab('directory');
+        switchSection('monitoring');
       } else {
         setCreateError(d.detail || 'Could not create account.');
       }
@@ -1874,6 +1895,37 @@ export default function DevteamView() {
                       </button>
                     ))}
                   </div>
+                )}
+
+                {/* Police jurisdiction (2026-09-24) -- auto-resolved and
+                    shown read-only when this barangay already has a
+                    covering station; a required picker only when it
+                    doesn't, so this barangay never silently ends up with
+                    no police coverage the way it used to. */}
+                {createForm.barangay_id.trim() && (
+                  coveringStationFor(createForm.barangay_id) ? (
+                    <p className="mt-2 text-[9px] leading-relaxed text-[var(--text-3)]">
+                      Covered by <span className="text-[var(--text-2)]">{coveringStationFor(createForm.barangay_id)!.name}</span> — already assigned, nothing to pick.
+                    </p>
+                  ) : (
+                    <div className="mt-2">
+                      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                        Police station — this barangay has no jurisdiction assigned yet, pick one
+                      </label>
+                      <select
+                        value={createForm.station_id}
+                        onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
+                        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                      >
+                        <option value="">
+                          {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
+                        </option>
+                        {stations.map(s => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )
                 )}
               </div>
             )}

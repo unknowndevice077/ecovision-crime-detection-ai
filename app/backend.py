@@ -1359,7 +1359,13 @@ class DevteamCreateUser(BaseModel):
     password: str
     role: str
     # Exactly one of these is required, decided by the role's organization:
-    # barangay roles need barangay_id, PNP roles need station_id.
+    # barangay roles need barangay_id, PNP roles need station_id. For a
+    # barangay role, station_id does double duty (2026-09-24) -- not the
+    # new account's own station (chk_user_scope forbids that), but which
+    # station to assign this barangay's jurisdiction to, and ONLY when the
+    # barangay has no covering station yet. Required in that case, ignored
+    # otherwise (an already-covered barangay auto-resolves from the
+    # existing station_barangays link, nothing to pick).
     barangay_id: Optional[str] = None
     station_id: Optional[str] = None
     assignment: str
@@ -3400,6 +3406,14 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                 raise HTTPException(status_code=400, detail=f"Unknown station '{station_id}'")
             barangay_id = ""
         else:
+            # station_id doubles up for this branch (2026-09-24 user
+            # request): a barangay account never gets its OWN station_id
+            # (chk_user_scope forbids it, and the account INSERT below
+            # correctly still sends the now-blanked local `station_id`) --
+            # but the SAME form field is repurposed here to mean "which
+            # station should cover this barangay's jurisdiction", captured
+            # into its own variable before being wiped.
+            picked_station_for_jurisdiction = station_id
             station_id = ""
             cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
             existing_barangay = cursor.fetchone()
@@ -3425,6 +3439,33 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                 cursor.execute(
                     "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
                     (payload["id"], barangay_id),
+                )
+
+            # BUG FOUND 2026-09-24 (user report): creating a barangay account
+            # never connected the barangay to any police station -- that only
+            # ever happened later, separately, if DevTeam remembered to go to
+            # the Stations tab. A barangay with no covering station is
+            # invisible to every PNP account and (since Phase 3) any report
+            # request from it has nowhere to route. Auto-resolve from the
+            # EXISTING jurisdiction relationship when there is one -- nothing
+            # to ask, nothing to reassign. Only a barangay with NO station at
+            # all (brand new, or an old orphaned one from before this fix)
+            # requires picking one as part of this same creation.
+            cursor.execute("SELECT station_id FROM station_barangays WHERE barangay_id = ?", (barangay_id,))
+            already_covered = cursor.fetchone()
+            if not already_covered:
+                if not picked_station_for_jurisdiction:
+                    conn.close()
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This barangay has no police station covering it yet -- pick one to assign its jurisdiction.")
+                cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (picked_station_for_jurisdiction,))
+                if not cursor.fetchone():
+                    conn.close()
+                    raise HTTPException(status_code=400, detail=f"Unknown station '{picked_station_for_jurisdiction}'")
+                cursor.execute(
+                    "INSERT INTO station_barangays (station_id, barangay_id) VALUES (?, ?)",
+                    (picked_station_for_jurisdiction, barangay_id),
                 )
 
         parent_id = new_user.parent_admin_id
