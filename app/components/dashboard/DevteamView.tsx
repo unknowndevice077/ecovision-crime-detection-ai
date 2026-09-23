@@ -81,6 +81,24 @@ type PendingLocation = {
   created_at: string;
 };
 
+// 2026-09-23 bug fix: a self-signup PNP_ADMIN had no location object (a
+// station is DevTeam-created and already permanently approved) to hang a
+// pending status on the way a barangay applicant does -- so it never
+// showed up here at all, and there was nothing for DevTeam to accept.
+// This is that missing queue, driven by the applicant's own account
+// (signup_status) instead of a location.
+type PendingSignup = {
+  id: number;
+  username: string;
+  role: string;
+  assignment: string;
+  station_id: string | null;
+  station_name: string | null;
+  created_at: string;
+  verification_status: string;
+  has_document: boolean;
+};
+
 // Split 2026-09-23 (explicit teacher requirement: separate configuration/
 // CRUD from monitoring in the DevTeam console). Monitoring is read-only --
 // Directory and Users no longer render Edit/Delete anywhere; every mutating
@@ -93,8 +111,8 @@ type Section = 'monitoring' | 'configuration';
 type Tab = 'directory' | 'users' | 'manage_users' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models' | 'audit' | 'permissions';
 
 const SECTION_TABS: Record<Section, Tab[]> = {
-  monitoring: ['directory', 'users'],
-  configuration: ['manage_users', 'permissions', 'approvals', 'create', 'cameras', 'stations', 'models', 'audit'],
+  monitoring: ['directory', 'users', 'cameras', 'models'],
+  configuration: ['manage_users', 'permissions', 'approvals', 'create', 'stations', 'audit'],
 };
 
 type ModelStat = {
@@ -180,6 +198,7 @@ export default function DevteamView() {
   const [cameras, setCameras] = useState<CameraRow[]>([]);
   const [stations, setStations] = useState<Station[]>([]);
   const [pendingLocations, setPendingLocations] = useState<PendingLocation[]>([]);
+  const [pendingSignups, setPendingSignups] = useState<PendingSignup[]>([]);
   const [allLocations, setAllLocations] = useState<PendingLocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -308,11 +327,12 @@ export default function DevteamView() {
 
   const fetchOverview = async () => {
     try {
-      const [overviewRes, locationsRes, allLocationsRes, stationsRes] = await Promise.all([
+      const [overviewRes, locationsRes, allLocationsRes, stationsRes, signupsRes] = await Promise.all([
         fetch(`${API_URL}/api/devteam/overview`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/locations?status=pending`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/locations`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/stations`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/devteam/pending_signups`, { headers: authHeaders() }),
       ]);
       if (overviewRes.ok && locationsRes.ok) {
         const overview = await overviewRes.json();
@@ -321,6 +341,7 @@ export default function DevteamView() {
         setPendingLocations(await locationsRes.json());
         if (allLocationsRes.ok) setAllLocations(await allLocationsRes.json());
         if (stationsRes.ok) setStations(await stationsRes.json());
+        if (signupsRes.ok) setPendingSignups(await signupsRes.json());
         setLoadFailed(false);
       } else if (overviewRes.status === 401 || locationsRes.status === 401) {
         // BUG FOUND 2026-08-19: a 401 here almost always means the stored
@@ -717,6 +738,27 @@ export default function DevteamView() {
       setPendingLocations(snapshot); flash('Backend connection failure.');
     } finally {
       setPendingActionIds(prev => { const n = new Set(prev); n.delete(barangayId); return n; });
+    }
+  };
+
+  // 2026-09-23 bug fix -- the PNP-side counterpart to handleApproval above.
+  // Keyed by user id (not barangay_id -- a PNP applicant has no location
+  // object to key off), calling the new approve_signup/reject_signup
+  // endpoints instead of .../locations/.../approve.
+  const reviewSignup = async (userId: number, decision: 'approve' | 'reject') => {
+    const snapshot = pendingSignups;
+    setPendingSignups(prev => prev.filter(s => s.id !== userId));
+    setPendingActionIds(prev => new Set(prev).add(userId));
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/users/${userId}/${decision === 'approve' ? 'approve_signup' : 'reject_signup'}`, {
+        method: "POST", headers: authHeaders(),
+      });
+      if (!res.ok) { setPendingSignups(snapshot); flash(`Could not ${decision}.`); }
+      else { fetchOverview(); flash(`Application ${decision === 'approve' ? 'approved' : 'rejected'}.`); }
+    } catch {
+      setPendingSignups(snapshot); flash('Backend connection failure.');
+    } finally {
+      setPendingActionIds(prev => { const n = new Set(prev); n.delete(userId); return n; });
     }
   };
 
@@ -1204,6 +1246,13 @@ export default function DevteamView() {
           <>
             <TabButton icon={<LayoutGrid size={12} />} label="Directory" active={tab === 'directory'} onClick={() => setTab('directory')} />
             <TabButton icon={<Users2 size={12} />} label="Users" active={tab === 'users'} onClick={() => setTab('users')} badge={data.users.length} />
+            <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
+            <TabButton
+              icon={<Brain size={12} />}
+              label="AI Models"
+              active={tab === 'models'}
+              onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); fetchThresholdCounts(); }}
+            />
           </>
         ) : (
           <>
@@ -1219,17 +1268,10 @@ export default function DevteamView() {
               label="Approvals"
               active={tab === 'approvals'}
               onClick={() => setTab('approvals')}
-              badge={pendingLocations.length}
+              badge={pendingLocations.length + pendingSignups.length}
             />
             <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
-            <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
             <TabButton icon={<Radio size={12} />} label="Stations" active={tab === 'stations'} onClick={() => setTab('stations')} badge={stations.length} />
-            <TabButton
-              icon={<Brain size={12} />}
-              label="AI Models"
-              active={tab === 'models'}
-              onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); fetchThresholdCounts(); }}
-            />
             <TabButton
               icon={<Undo2 size={12} />}
               label="Audit Log"
@@ -1651,6 +1693,65 @@ export default function DevteamView() {
                       <div className="flex items-center gap-1 shrink-0">
                         <button onClick={() => handleApproval(loc.id, 'reject')} className="p-1.5 border border-transparent hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={13} /></button>
                         <button onClick={() => handleApproval(loc.id, 'approve')} className="p-1.5 border border-transparent hover:border-[var(--ok)]/40 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={13} /></button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 2026-09-23 bug fix: PNP admin self-signups used to skip
+              DevTeam entirely (see backend.py's login() comment for the
+              full report) -- this is the queue that was missing. Same
+              visual shape as the barangay one above on purpose, so the two
+              read as one review surface, not two unrelated features. */}
+          <div className="mt-6 border border-[var(--line)]">
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+              <UserCheck size={12} className="text-[var(--accent)]" />
+              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--accent)]">PNP admin applications</span>
+              <span className="ml-auto text-[9px] text-[var(--accent)]/70">{pendingSignups.length} pending</span>
+            </div>
+            {pendingSignups.length === 0 ? (
+              <div className="py-14 text-center">
+                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No PNP admin signups waiting on review</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-[var(--panel-2)]">
+                {pendingSignups.map(s => {
+                  const busy = pendingActionIds.has(s.id);
+                  const roleMeta = ROLE_STYLES[s.role] || DEFAULT_ROLE_STYLE;
+                  return (
+                    <div key={s.id} className={`flex items-center justify-between gap-4 px-4 py-3.5 transition-opacity ${busy ? 'opacity-40' : ''}`}>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${roleMeta.border} ${roleMeta.text}`}>{roleMeta.code}</span>
+                        <div className="min-w-0">
+                          <p className="text-[11px] text-[var(--text)] truncate">{s.username} <span className="text-[var(--text-2)]">requests</span> {s.station_name || s.station_id}</p>
+                          <p className="text-[9px] text-[var(--text-2)] flex items-center gap-1">
+                            <MapPinned size={9} /> {s.role} &middot; {s.assignment} &middot; {new Date(s.created_at).toLocaleDateString()}
+                          </p>
+                          <p className="text-[9px] mt-0.5 flex items-center gap-1.5">
+                            {s.has_document ? (
+                              <span style={{ color: s.verification_status === 'verified' ? 'var(--ok)' : 'var(--warn)' }}>
+                                ID {s.verification_status || 'pending'}
+                              </span>
+                            ) : (
+                              <span style={{ color: 'var(--critical)' }}>No ID submitted</span>
+                            )}
+                            {s.has_document && (
+                              <button
+                                onClick={() => viewVerificationDocument(s.id)}
+                                className="underline text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"
+                              >
+                                View ID
+                              </button>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button onClick={() => reviewSignup(s.id, 'reject')} className="p-1.5 border border-transparent hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={13} /></button>
+                        <button onClick={() => reviewSignup(s.id, 'approve')} className="p-1.5 border border-transparent hover:border-[var(--ok)]/40 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={13} /></button>
                       </div>
                     </div>
                   );

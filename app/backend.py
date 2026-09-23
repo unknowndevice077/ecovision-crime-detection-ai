@@ -781,6 +781,16 @@ def _migrate_schema(conn, cursor):
     _ensure_column(conn, cursor, "users", "verified_by", "INTEGER")
     _ensure_column(conn, cursor, "users", "verified_at", "TEXT")
 
+    # BUG FOUND 2026-09-23 (user report -- see login()'s matching comment for
+    # the full story): self-signup PNP_ADMIN accounts had no approval gate
+    # at all, and a barangay self-signup against an already-approved
+    # barangay_id skipped review too. DEFAULT 'approved' so every existing
+    # row (every account that was ever admin-created, devteam-created, or
+    # already using the app) is completely unaffected -- only signup()
+    # ever writes 'pending' here, explicitly, for a brand new self-signup
+    # admin account.
+    _ensure_column(conn, cursor, "users", "signup_status", "TEXT DEFAULT 'approved'")
+
 
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
     """Writes one audit_log row. Never raises -- an audit-trail failure must
@@ -1445,6 +1455,7 @@ def _row_to_user_dict_base(row) -> dict:
         "custom_permissions": bool(d.get("custom_permissions")),
         "custom_role_id": d.get("custom_role_id"),
         "verification_status": d.get("verification_status") or "unverified",
+        "signup_status": d.get("signup_status") or "approved",
     }
 
 def _location_name(cursor, barangay_id, station_id) -> Optional[str]:
@@ -2818,32 +2829,45 @@ async def signup(request: Request, user: UserSignup):
             conn.close()
             raise HTTPException(status_code=400, detail=dup_msg)
 
+        # signup_status='pending' unconditionally -- every self-signup admin
+        # account needs an explicit DevTeam decision on THIS account, not on
+        # the location/station it's attached to (see login()'s 2026-09-23
+        # fix comment for the bug this closes). Every other account-creation
+        # path (devteam_create_user, create_my_user) leaves this column at
+        # its 'approved' default, so nothing about those changes.
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, signup_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending')",
             (user.username, hash_password(user.password), role,
              barangay_id or None, station_id or None, user.assignment),
         )
         new_user_id = cursor.lastrowid
 
         if is_pnp:
-            # No location-approval gate for PNP: the station already exists,
-            # which means DevTeam already vetted it.
             conn.commit()
-            return {"status": "success", "id": new_user_id}
+            # id included (2026-09-23, #9) so the signup form can offer the
+            # ID-upload step via /api/signup/{id}/verification -- this
+            # account can't log in yet to reach the authenticated upload
+            # endpoint instead.
+            return {"status": "pending_approval", "id": new_user_id,
+                    "detail": "Account created. A DevTeam administrator must confirm your identity before you can log in."}
 
-        cursor.execute("UPDATE barangays SET requested_by = ? WHERE id = ? AND requested_by IS NULL",
-                       (new_user_id, barangay_id))
+        # requested_by also gets reclaimed when the current holder was since
+        # soft-deleted -- otherwise a second applicant for a barangay whose
+        # original admin was removed would leave requested_by (and so
+        # approve_location's target) pointed at the old, gone account
+        # instead of this new applicant.
+        cursor.execute(
+            "UPDATE barangays SET requested_by = ? WHERE id = ? AND "
+            "(requested_by IS NULL OR requested_by IN (SELECT id FROM users WHERE deleted_at IS NOT NULL))",
+            (new_user_id, barangay_id),
+        )
         conn.commit()
 
-        cursor.execute("SELECT status FROM barangays WHERE id = ?", (barangay_id,))
-        loc_status = cursor.fetchone()["status"]
-        if loc_status == "approved":
-            return {"status": "success", "id": new_user_id}
-        # id included (2026-09-23, #9) so the signup form can immediately
-        # offer the ID-upload step via /api/signup/{id}/verification --
-        # this account can't log in yet to reach the authenticated upload
-        # endpoint instead, so the id has to come from right here.
+        # Always pending now, regardless of whether the LOCATION itself was
+        # already 'approved' from an earlier admin -- that only means the
+        # place was vetted once, not that this new applicant is who they
+        # say they are.
         return {"status": "pending_approval", "id": new_user_id,
                 "detail": "Account created. A DevTeam administrator must approve this location before you can log in."}
     except IntegrityError:
@@ -2905,6 +2929,37 @@ async def login(request: Request, creds: UserLogin):
         raise HTTPException(status_code=401, detail="Invalid Credentials")
 
     user_dict = dict(row)
+
+    # BUG FOUND 2026-09-23 (user report: "sign up approvals doesn't work,
+    # the devteam can't accept approvals, it just confirms it right away"):
+    # a self-signup PNP_ADMIN had NO approval gate at all -- signup()'s own
+    # comment said "No location-approval gate for PNP: the station already
+    # exists, which means DevTeam already vetted it," but vetting the
+    # STATION is not vetting the PERSON claiming to run it. Station ids are
+    # readable by anyone (GET /api/stations is unauthenticated, by design,
+    # for the signup form's picker), so anyone who typed one in got a fully
+    # working admin login instantly, with DevTeam never in the loop -- there
+    # was nothing in the Approvals tab to even click. A second, narrower gap
+    # existed on the barangay side too: signing up for a barangay_id that
+    # was ALREADY 'approved' (e.g. its original admin was later removed)
+    # skipped review for the NEW applicant, since the check only ever
+    # looked at the location's status, never this specific account's.
+    # signup_status closes both: every self-signup admin account is
+    # stamped 'pending' at creation (see signup()), independently of
+    # whether the location/station itself is already vetted, and only
+    # DevTeam approving THIS account (not the location) lifts it.
+    if user_dict["role"] in ADMIN_ROLES and user_dict.get("signup_status") == "pending":
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Your application is still pending DevTeam approval. Please check back later.",
+        )
+    if user_dict["role"] in ADMIN_ROLES and user_dict.get("signup_status") == "rejected":
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Your application was not approved. Contact DevTeam for details.",
+        )
 
     if user_dict["role"] != "DEVTEAM" and user_dict.get("barangay_id"):
         cursor.execute("SELECT status FROM barangays WHERE id = ?", (user_dict["barangay_id"],))
@@ -3103,11 +3158,22 @@ async def approve_location(barangay_id: str, data: LocationDecisionSchema, autho
         "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
         (payload["id"], barangay_id),
     )
-    conn.commit()
     updated = cursor.rowcount
-    conn.close()
     if not updated:
+        conn.close()
         raise HTTPException(status_code=404, detail="Location not found")
+    # 2026-09-23 bug fix: approving the LOCATION used to be the only thing
+    # this button did -- the actual login gate is the applicant's own
+    # signup_status (see login()'s comment for why those two had to become
+    # separate things). Flip the requester's account too, in the same
+    # transaction, so this one click still does what it always visually
+    # promised to do.
+    cursor.execute(
+        "UPDATE users SET signup_status = 'approved' WHERE id = (SELECT requested_by FROM barangays WHERE id = ?) AND signup_status = 'pending'",
+        (barangay_id,),
+    )
+    conn.commit()
+    conn.close()
     await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
     return {"status": "approved", "barangay_id": barangay_id}
 
@@ -3121,13 +3187,96 @@ async def reject_location(barangay_id: str, data: LocationDecisionSchema, author
         "UPDATE barangays SET status = 'rejected', approved_by = ?, approved_at = NOW() WHERE id = ?",
         (payload["id"], barangay_id),
     )
-    conn.commit()
     updated = cursor.rowcount
-    conn.close()
     if not updated:
+        conn.close()
         raise HTTPException(status_code=404, detail="Location not found")
+    cursor.execute(
+        "UPDATE users SET signup_status = 'rejected' WHERE id = (SELECT requested_by FROM barangays WHERE id = ?) AND signup_status = 'pending'",
+        (barangay_id,),
+    )
+    conn.commit()
+    conn.close()
     await manager.broadcast({"channel": "locations", "event": "location_rejected", "barangay_id": barangay_id})
     return {"status": "rejected", "barangay_id": barangay_id}
+
+# 2026-09-23 bug fix (see login()'s comment for the full report): a
+# self-signup PNP_ADMIN had no equivalent of the barangay flow above at
+# all -- the station already existing was treated as sufficient vetting
+# for whoever showed up claiming to run it. Barangays have a `barangays`
+# row to hang a pending/approved/rejected status on; a station is
+# DevTeam-created and already permanently 'approved' by definition, so
+# there's no location-shaped object to reuse here -- the gate has to live
+# directly on signup_status instead. Generic by user id rather than
+# barangay_id-shaped like the endpoints above, so this covers any
+# self-signup admin account, PNP included.
+@app.get("/api/devteam/pending_signups")
+async def list_pending_signups(authorization: Optional[str] = Header(None)):
+    """PNP applications only -- a pending BARANGAY_ADMIN still shows up in
+    GET /api/devteam/locations?status=pending (unchanged, that flow still
+    creates/owns the barangay row); this is specifically for the kind of
+    self-signup that has no location object of its own to attach to."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT u.id, u.username, u.role, u.assignment, u.station_id, u.created_at,
+               u.verification_status, u.id_document_path, s.name AS station_name
+        FROM users u
+        LEFT JOIN police_stations s ON s.id = u.station_id
+        WHERE u.role = 'PNP_ADMIN' AND u.signup_status = 'pending' AND u.deleted_at IS NULL
+        ORDER BY u.created_at DESC
+    """)
+    rows = [dict(r) for r in cursor.fetchall()]
+    for r in rows:
+        r["has_document"] = bool(r.pop("id_document_path"))
+    conn.close()
+    return rows
+
+@app.post("/api/devteam/users/{user_id}/approve_signup")
+async def approve_signup(user_id: int, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        target = dict(target)
+        if target["signup_status"] != "pending":
+            raise HTTPException(status_code=400, detail=f"This application is '{target['signup_status']}', not pending")
+        cursor.execute("UPDATE users SET signup_status = 'approved' WHERE id = ?", (user_id,))
+        log_audit(cursor, payload, "user.signup_approved", "user", str(user_id))
+        conn.commit()
+        await manager.broadcast({"channel": "locations", "event": "signup_approved", "id": user_id})
+        return {"status": "approved"}
+    finally:
+        conn.close()
+
+@app.post("/api/devteam/users/{user_id}/reject_signup")
+async def reject_signup(user_id: int, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        target = dict(target)
+        if target["signup_status"] != "pending":
+            raise HTTPException(status_code=400, detail=f"This application is '{target['signup_status']}', not pending")
+        cursor.execute("UPDATE users SET signup_status = 'rejected' WHERE id = ?", (user_id,))
+        log_audit(cursor, payload, "user.signup_rejected", "user", str(user_id))
+        conn.commit()
+        await manager.broadcast({"channel": "locations", "event": "signup_rejected", "id": user_id})
+        return {"status": "rejected"}
+    finally:
+        conn.close()
 
 # --- ADMIN: MANAGE YOUR OWN USERS ONLY ---
 @app.get("/api/admin/users")
