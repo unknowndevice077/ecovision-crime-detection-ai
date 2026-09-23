@@ -246,8 +246,14 @@ def require_auth(authorization: Optional[str] = Header(None)) -> dict:
     conn = get_conn()
     try:
         cursor = conn.cursor()
+        # deleted_at IS NULL added 2026-09-22 alongside the users-table soft-
+        # delete feature: a soft-deleted account must revoke exactly like a
+        # hard-deleted one did before this existed -- this check is the
+        # entire reason that fix works (see this function's 2026-09-04 note
+        # above), and a "delete" that only hides the row from listings while
+        # leaving every existing session fully valid would defeat it.
         cursor.execute(
-            "SELECT role, barangay_id, station_id, custom_permissions FROM users WHERE id = ?",
+            "SELECT role, barangay_id, station_id, custom_permissions FROM users WHERE id = ? AND deleted_at IS NULL",
             (payload.get("id"),),
         )
         row = cursor.fetchone()
@@ -600,6 +606,67 @@ def _migrate_schema(conn, cursor):
     except Exception as e:
         print(f"⚠️  [DATABASE] Could not ensure manage_notify_targets permission key: {e}")
 
+    # Added 2026-09-22 (user request: DevTeam can monitor what each user has
+    # done, undo it, and audit actions -- "removed a user, removed this
+    # report... recover it"). No audit/activity log of any kind existed
+    # anywhere in this codebase before this -- a delete just deleted, with
+    # no record of who did it, when, or what was lost. deleted_at turns a
+    # delete on these two tables into a soft one (row stays, just hidden
+    # from normal listings/login/lookup); audit_log is the who/what/when,
+    # with a full row snapshot so a delete-type entry can actually be
+    # restored, not just remembered. Scoped to users + incidents first
+    # (the two entities explicitly named); extending to more tables later
+    # is the same _ensure_column + log_audit() call, not a redesign.
+    _ensure_column(conn, cursor, "users", "deleted_at", "TEXT")
+    _ensure_column(conn, cursor, "incidents", "deleted_at", "TEXT")
+    if not table_exists(cursor, "audit_log"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id               TEXT PRIMARY KEY,
+                actor_user_id    INTEGER,
+                actor_username   TEXT NOT NULL,
+                action           TEXT NOT NULL,
+                target_type      TEXT NOT NULL,
+                target_id        TEXT NOT NULL,
+                target_snapshot  TEXT,
+                created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created audit_log")
+
+
+def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
+    """Writes one audit_log row. Never raises -- an audit-trail failure must
+    not be allowed to look like the action itself (a delete, a permission
+    change) failed; matches notify_incident_targets()'s same never-block-
+    the-real-action philosophy elsewhere in this file. Caller is
+    responsible for its own conn.commit() -- this only executes the
+    INSERT, so it shares the caller's transaction and rolls back with it
+    on a real failure, rather than committing an audit entry for an action
+    that itself never actually completed.
+
+    snapshot, when given, is the full row (as a dict) BEFORE the action --
+    what a Restore needs to reconstruct it. json.dumps handles ordinary
+    values; anything it can't serialize is stringified rather than
+    crashing the whole audit write over one awkward field."""
+    try:
+        cursor.execute(
+            "INSERT INTO audit_log (id, actor_user_id, actor_username, action, target_type, target_id, target_snapshot) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                payload.get("id"),
+                payload.get("username") or "unknown",
+                action,
+                target_type,
+                str(target_id),
+                json.dumps(snapshot, default=str) if snapshot is not None else None,
+            ),
+        )
+    except Exception as e:
+        print(f"⚠️  [AUDIT] Could not write audit_log row for {action} {target_type}={target_id}: {e}")
+
 
 # --- DATABASE INITIALIZATION ---
 def init_db():
@@ -890,6 +957,20 @@ VALID_PERMISSION_KEYS = {"view_map", "view_records", "view_history", "manage_cam
 # through every admin role, so a precinct captain could delete a barangay's
 # cameras. Keys listed here are NOT covered by that admin bypass.
 BARANGAY_ONLY_PERMISSIONS = {"manage_cameras"}
+
+# Added 2026-09-22 (explicit user request): the deep crime-history/video
+# archive is police-only now -- barangay accounts (admin tier included)
+# never get it, full stop, not "grantable but usually off." Mirrors
+# BARANGAY_ONLY_PERMISSIONS' shape in the opposite direction: require_
+# permission() hard-bans these for BARANGAY_SIDE_ROLES the same way it
+# already hard-bans manage_cameras for PNP_SIDE_ROLES, and separately
+# carves them out of BARANGAY_ADMIN's automatic bypass -- so this can't be
+# silently reopened by a stale user_permissions row or a future admin-
+# bypass change. Barangay keeps its own live Incident Queue
+# (confirm_dismiss_alerts, on the main dashboard) -- that's a different
+# permission and unaffected; this is specifically the archived/confirmed
+# incident log and the video record vault.
+POLICE_ONLY_PERMISSIONS = {"view_history", "view_records"}
 
 
 def scope_clause(payload: dict, column: str = "barangay_id"):
@@ -1309,6 +1390,21 @@ def require_permission(cursor, payload: dict, key: str):
             detail=f"Cameras are managed by the barangay that owns them; "
                    f"'{role}' accounts have view access only.")
 
+    # Added 2026-09-22 (explicit user request): the mirror image of the
+    # manage_cameras ban above. Applies to BOTH barangay tiers (admin
+    # included, not just staff) and comes before the admin-bypass branch
+    # below so it can't be short-circuited by admin tier or by a future
+    # custom_permissions override -- a DevTeam override grants a DIFFERENT
+    # explicit permission set for an admin whose automatic access was
+    # revoked, it was never meant to be a backdoor around a hard ban. A
+    # stray user_permissions row (however it got there) can't reopen this
+    # either, since this raises before _has_permission is ever consulted.
+    if key in POLICE_ONLY_PERMISSIONS and role in BARANGAY_SIDE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Crime history and the video record vault are police-only; "
+                   f"'{role}' accounts do not have access.")
+
     # Added 2026-09-04 (user request: a password-gated way for DevTeam to
     # override an admin's normally-automatic permissions). Every admin used
     # to hit this branch unconditionally -- user_permissions was never even
@@ -1642,9 +1738,38 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     # filter_barangay_id only ever NARROWS within the caller's scope. It is
     # appended alongside the scope clause, never instead of it, so it cannot
     # be used to reach outside your own jurisdiction.
-    extra_where, extra_params = "", []
+    # deleted_at IS NULL added 2026-09-22 alongside the soft-delete feature
+    # -- a deleted incident stays in the table (so it can be Restored from
+    # the Audit Log) but must disappear from every normal listing, same as
+    # it did when DELETE actually removed the row.
+    where_clauses, where_params = ["deleted_at IS NULL"], []
     if filter_barangay_id and filter_barangay_id.lower() != "all":
-        extra_where, extra_params = "LOWER(barangay_id) = ?", [filter_barangay_id.lower()]
+        where_clauses.append("LOWER(barangay_id) = ?")
+        where_params.append(filter_barangay_id.lower())
+
+    # Added 2026-09-22 (POLICE_ONLY_PERMISSIONS -- explicit user request:
+    # barangay accounts lose the crime-history archive, police-only now).
+    # This endpoint serves BOTH the live Incident Map (view_map) AND the
+    # archived Incident Log (view_history, HistoryView.tsx -- it calls this
+    # SAME endpoint and just drops non-Active rows client-side) from one
+    # query with no other way to tell those two callers apart server-side.
+    # require_permission()'s POLICE_ONLY_PERMISSIONS ban stops a barangay
+    # account from ever being GRANTED view_history going forward, but this
+    # endpoint has always done its own hand-rolled permission check above
+    # (independent of require_permission()) rather than calling it -- so a
+    # stale view_history row granted before this restriction existed would
+    # silently still work, and even without one, a barangay caller who only
+    # has view_map would still get every Confirmed/Dismissed row back, i.e.
+    # the exact archive being restricted. Enforcing a hard status filter
+    # here, not just refusing the grant, closes both gaps at once: a
+    # barangay-side caller only ever gets their own currently-ACTIVE
+    # incidents (their live queue/map), never the historical record,
+    # regardless of which permission key let them into this endpoint at
+    # all or how old that grant is.
+    if role in BARANGAY_SIDE_ROLES:
+        where_clauses.append("status = 'Active'")
+    extra_where = " AND ".join(where_clauses)
+    extra_params = where_params
 
     sql, params = apply_scope(
         payload, "SELECT * FROM incidents", [],
@@ -1937,19 +2062,27 @@ async def delete_incident(incident_id: str, authorization: Optional[str] = Heade
     require_role(payload, {"DEVTEAM"} | ADMIN_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
-    # See _incident_owned_by's BUG FOUND 2026-09-03 comment -- this DELETE
-    # cascades to incident_reports, so without this check any admin anywhere
-    # could destroy another jurisdiction's incident AND any filed police
-    # report against it.
+    # See _incident_owned_by's BUG FOUND 2026-09-03 comment -- this used to
+    # cascade to incident_reports on a hard DELETE, so without this check
+    # any admin anywhere could destroy another jurisdiction's incident AND
+    # any filed police report against it. Soft delete (2026-09-22, see
+    # log_audit's own note) no longer cascades at all -- the incident row
+    # (and any report tied to it) physically stays, just hidden -- but the
+    # jurisdiction check still matters just as much: it's still a real
+    # remove-this-from-my-view action, still shouldn't reach outside your
+    # own scope.
     if not _incident_owned_by(cursor, incident_id, payload):
         conn.close()
         raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
-    cursor.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
-    conn.commit()
-    deleted = cursor.rowcount
-    conn.close()
-    if not deleted:
+    cursor.execute("SELECT * FROM incidents WHERE id = ? AND deleted_at IS NULL", (incident_id,))
+    target = cursor.fetchone()
+    if not target:
+        conn.close()
         raise HTTPException(status_code=404, detail="Incident not found")
+    cursor.execute("UPDATE incidents SET deleted_at = NOW() WHERE id = ?", (incident_id,))
+    log_audit(cursor, payload, "incident.deleted", "incident", incident_id, snapshot=dict(target))
+    conn.commit()
+    conn.close()
     return {"status": "deleted"}
 
 @app.patch("/api/incidents/{incident_id}/archive")
@@ -2485,12 +2618,14 @@ async def signup(request: Request, user: UserSignup):
                     (barangay_id, user.barangay_id.strip().title()),
                 )
 
-        # One admin per org unit, matching the unique indexes.
+        # One admin per org unit, matching the unique indexes. deleted_at IS
+        # NULL added 2026-09-22 -- a soft-deleted admin's slot must free up
+        # for a new signup, same as it did when delete meant delete.
         if is_pnp:
-            cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = ?", (station_id, role))
+            cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = ? AND deleted_at IS NULL", (station_id, role))
             dup_msg = "This station already has a PNP Admin account."
         else:
-            cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = ?", (barangay_id, role))
+            cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = ? AND deleted_at IS NULL", (barangay_id, role))
             dup_msg = "This location already has a Barangay Admin account."
         if cursor.fetchone():
             conn.close()
@@ -2530,7 +2665,12 @@ async def signup(request: Request, user: UserSignup):
 async def login(request: Request, creds: UserLogin):
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE username = ?", (creds.username,))
+    # deleted_at IS NULL added 2026-09-22 -- a soft-deleted account must not
+    # be able to log in and mint a fresh, fully-valid token for itself.
+    # Deliberately still returns the generic "Invalid Credentials" (not
+    # "this account was deleted") -- same reasoning as a wrong password:
+    # don't tell an unauthenticated caller which usernames exist/existed.
+    cursor.execute("SELECT * FROM users WHERE username = ? AND deleted_at IS NULL", (creds.username,))
     row = cursor.fetchone()
     if not row or not verify_password(creds.password, row["password"]):
         conn.close()
@@ -2762,10 +2902,14 @@ async def list_my_users(authorization: Optional[str] = Header(None)):
     require_role(payload, ADMIN_OR_DEVTEAM)
     conn = get_conn()
     cursor = conn.cursor()
+    # deleted_at IS NULL added 2026-09-22 -- a soft-deleted subordinate
+    # shouldn't keep showing up in an admin's own team list (or DevTeam's
+    # full list) as if still active; the Audit Log is where a removed
+    # account is meant to be found and restored from, not here.
     if payload["role"] == "DEVTEAM":
-        cursor.execute("SELECT * FROM users")
+        cursor.execute("SELECT * FROM users WHERE deleted_at IS NULL")
     else:
-        cursor.execute("SELECT * FROM users WHERE parent_admin_id = ?", (payload["id"],))
+        cursor.execute("SELECT * FROM users WHERE parent_admin_id = ? AND deleted_at IS NULL", (payload["id"],))
     rows = cursor.fetchall()
     result = _rows_to_user_dicts_batch(cursor, rows)
     conn.close()
@@ -2904,12 +3048,16 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         if role in STANDARD_ROLES and parent_id is None:
             # Auto-attach to whichever admin already runs this org unit, so
             # the account shows up nested under someone in the directory.
+            # deleted_at IS NULL added 2026-09-22 -- don't auto-attach a new
+            # account to an admin who was soft-deleted; look for a still-
+            # active one instead (falls through to unassigned if there
+            # isn't one, same as before this feature existed).
             if is_pnp:
                 cursor.execute(
-                    "SELECT id FROM users WHERE station_id = ? AND role = 'PNP_ADMIN'", (station_id,))
+                    "SELECT id FROM users WHERE station_id = ? AND role = 'PNP_ADMIN' AND deleted_at IS NULL", (station_id,))
             else:
                 cursor.execute(
-                    "SELECT id FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN'", (barangay_id,))
+                    "SELECT id FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN' AND deleted_at IS NULL", (barangay_id,))
             existing_admin = cursor.fetchone()
             parent_id = existing_admin["id"] if existing_admin else None
 
@@ -2929,16 +3077,22 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         # got the same treatment. Two separate, specific checks instead, so
         # the account either gets created or the operator is told exactly
         # why it didn't.
-        cursor.execute("SELECT 1 FROM users WHERE username = ?", (new_user.username,))
+        # deleted_at IS NULL added 2026-09-22 on all three checks below --
+        # a soft-deleted account's username and org-admin slot both free up
+        # for reuse, same as a hard delete did. (Restoring a soft-deleted
+        # user later, if their old username was reused by someone else in
+        # the meantime, correctly fails on the username UNIQUE constraint
+        # rather than silently colliding two accounts.)
+        cursor.execute("SELECT 1 FROM users WHERE username = ? AND deleted_at IS NULL", (new_user.username,))
         if cursor.fetchone():
             conn.close()
             raise HTTPException(status_code=400, detail=f"Username '{new_user.username}' is already taken.")
         if role in ADMIN_ROLES:
             if is_pnp:
-                cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = 'PNP_ADMIN'", (station_id,))
+                cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = 'PNP_ADMIN' AND deleted_at IS NULL", (station_id,))
                 dup_detail = "This station already has a PNP Admin account."
             else:
-                cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN'", (barangay_id,))
+                cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN' AND deleted_at IS NULL", (barangay_id,))
                 dup_detail = "This barangay already has a Barangay Admin account."
             if cursor.fetchone():
                 conn.close()
@@ -3007,7 +3161,7 @@ async def delete_my_user(user_id: int, authorization: Optional[str] = Header(Non
 
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT parent_admin_id FROM users WHERE id = ?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
     target = cursor.fetchone()
     if not target:
         conn.close()
@@ -3016,7 +3170,18 @@ async def delete_my_user(user_id: int, authorization: Optional[str] = Header(Non
         conn.close()
         raise HTTPException(status_code=403, detail="You can only remove your own users")
 
-    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    # Soft delete, added 2026-09-22 (user request: DevTeam can audit/undo
+    # removals). The row stays -- require_auth/login's deleted_at IS NULL
+    # checks are what actually revokes access, same as a hard delete used
+    # to -- but a snapshot + Restore is now possible, where a hard DELETE
+    # gave up that row forever the instant this ran.
+    cursor.execute("UPDATE users SET deleted_at = NOW() WHERE id = ?", (user_id,))
+    # Snapshot excludes the password hash -- restoring never needs it (the
+    # row's real password is untouched by a soft delete; this snapshot is
+    # for audit DISPLAY only, not row reconstruction), and there's no
+    # reason for even a hash to sit in an audit trail a UI might render.
+    snapshot = {k: v for k, v in dict(target).items() if k != "password"}
+    log_audit(cursor, payload, "user.deleted", "user", user_id, snapshot=snapshot)
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
@@ -3185,10 +3350,25 @@ async def devteam_override_admin_permissions(
             await manager.broadcast({"channel": "users", "event": "permissions_reset", "id": user_id})
             return {"status": "reset_to_automatic", "id": user_id}
 
+        # Added 2026-09-22: mirrors the hard bans require_permission() itself
+        # enforces (BARANGAY_ONLY_PERMISSIONS for PNP targets, POLICE_ONLY_
+        # PERMISSIONS for barangay targets) -- without this, the override
+        # endpoint would happily store a user_permissions row require_
+        # permission() can never actually honor for this target (it 403s
+        # before ever consulting the row), which is harmless functionally
+        # but a confusing, dead-on-arrival grant to leave sitting in an
+        # audit trail. VALID_PERMISSION_KEYS alone already filtered out
+        # anything not a real key at all; this filters out real keys that
+        # are real but banned for THIS target's org side.
+        banned_for_target = (
+            BARANGAY_ONLY_PERMISSIONS if target["role"] in PNP_SIDE_ROLES
+            else POLICE_ONLY_PERMISSIONS if target["role"] in BARANGAY_SIDE_ROLES
+            else set()
+        )
         cursor.execute("UPDATE users SET custom_permissions = 1 WHERE id = ?", (user_id,))
         cursor.execute("DELETE FROM user_permissions WHERE user_id = ?", (user_id,))
         for key, granted in data.permissions.items():
-            if granted and key in VALID_PERMISSION_KEYS:
+            if granted and key in VALID_PERMISSION_KEYS and key not in banned_for_target:
                 cursor.execute(
                     "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?)",
                     (user_id, key, payload["id"]),
@@ -3201,29 +3381,107 @@ async def devteam_override_admin_permissions(
 
 @app.delete("/api/devteam/users/{user_id}")
 async def devteam_delete_user(user_id: int, authorization: Optional[str] = Header(None)):
-    """Full-power delete -- devteam can remove a captain (and, via ON DELETE
-    CASCADE on parent_admin_id, that captain's own sub-accounts lose their
-    parent link and become unassigned rather than vanish silently) or any
-    single standard/sub-admin account directly."""
+    """Soft delete -- devteam can remove a captain or any single standard/
+    sub-admin account. A soft-deleted captain's own sub-accounts keep their
+    parent_admin_id exactly as it was (the referenced row still physically
+    exists, just hidden from login/listings) rather than losing the link --
+    if the captain is later Restored from the Audit Log, that relationship
+    is intact again automatically, with nothing left to reattach by hand."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
 
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
     target = cursor.fetchone()
     if not target:
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
-    if target[0] == "DEVTEAM":
+    if target["role"] == "DEVTEAM":
         conn.close()
         raise HTTPException(status_code=403, detail="DevTeam accounts cannot be deleted from this panel")
 
-    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    cursor.execute("UPDATE users SET deleted_at = NOW() WHERE id = ?", (user_id,))
+    snapshot = {k: v for k, v in dict(target).items() if k != "password"}
+    log_audit(cursor, payload, "user.deleted", "user", user_id, snapshot=snapshot)
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
+
+# --- DEVTEAM: AUDIT LOG ---
+# User request 2026-09-22: "monitor what each user has done... removed a
+# user, removed this report like that and recover it." log_audit() (see its
+# own docstring) is called from every soft-deleting endpoint above; this is
+# where DevTeam reads that trail back and, for a delete-type entry whose
+# target is still soft-deleted, undoes it.
+@app.get("/api/devteam/audit_log")
+async def devteam_list_audit_log(
+    action: Optional[str] = None, limit: int = 200, authorization: Optional[str] = Header(None)
+):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    limit = max(1, min(limit, 500))
+    conn = get_conn()
+    cursor = conn.cursor()
+    if action:
+        cursor.execute(
+            "SELECT * FROM audit_log WHERE action = ? ORDER BY created_at DESC LIMIT ?",
+            (action, limit),
+        )
+    else:
+        cursor.execute("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?", (limit,))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    for r in rows:
+        # Stored as a JSON string (see log_audit) -- decoded here so the
+        # frontend gets real nested fields, not a string to re-parse itself.
+        if r.get("target_snapshot"):
+            try:
+                r["target_snapshot"] = json.loads(r["target_snapshot"])
+            except Exception:
+                pass
+    return rows
+
+@app.post("/api/devteam/audit_log/{entry_id}/restore")
+async def devteam_restore_audit_entry(entry_id: str, authorization: Optional[str] = Header(None)):
+    """Undoes exactly one soft delete -- not a generic action-reverser (see
+    log_audit's own design note: this project deliberately chose log +
+    recoverable-delete over a generic per-action undo button). Only
+    delete-type audit entries whose target is STILL soft-deleted are
+    restorable; an already-restored or since-hard-changed target 400s
+    with a specific reason rather than silently no-op'ing."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM audit_log WHERE id = ?", (entry_id,))
+        entry = cursor.fetchone()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Audit log entry not found")
+        entry = dict(entry)
+        if not entry["action"].endswith(".deleted"):
+            raise HTTPException(status_code=400, detail="Only a delete-type entry can be restored")
+
+        table = {"user": "users", "incident": "incidents"}.get(entry["target_type"])
+        if not table:
+            raise HTTPException(status_code=400, detail=f"Restoring a '{entry['target_type']}' isn't supported yet")
+
+        cursor.execute(f"SELECT deleted_at FROM {table} WHERE id = ?", (entry["target_id"],))
+        current = cursor.fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="The original row no longer exists -- cannot restore")
+        if current["deleted_at"] is None:
+            raise HTTPException(status_code=400, detail="This was already restored (or never actually soft-deleted)")
+
+        cursor.execute(f"UPDATE {table} SET deleted_at = NULL WHERE id = ?", (entry["target_id"],))
+        log_audit(cursor, payload, f"{entry['target_type']}.restored", entry["target_type"], entry["target_id"])
+        conn.commit()
+        await manager.broadcast({"channel": entry["target_type"] + "s", "event": entry["target_type"] + "_restored", "id": entry["target_id"]})
+        return {"status": "restored", "target_type": entry["target_type"], "target_id": entry["target_id"]}
+    finally:
+        conn.close()
 
 # --- DEVTEAM: FULL SYSTEM VISIBILITY (READ-ONLY OVERVIEW) ---
 @app.get("/api/devteam/overview")
@@ -3249,7 +3507,10 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     # override feature -- DevteamView needs it to know whether an admin row
     # is still on the automatic default or has been explicitly overridden,
     # so it can show the right control (and the right current checkboxes).
-    cursor.execute("SELECT id, username, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, last_login, custom_permissions FROM users")
+    # deleted_at IS NULL added 2026-09-22 -- same reasoning as list_my_users
+    # above: a soft-deleted account belongs in the Audit Log, not sitting in
+    # Directory/Users looking exactly like an active one.
+    cursor.execute("SELECT id, username, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, last_login, custom_permissions FROM users WHERE deleted_at IS NULL")
     user_rows = cursor.fetchall()
     users = [dict(r) for r in user_rows]
     perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])

@@ -15,6 +15,15 @@ export const PERMISSION_KEYS = [
   { key: "view_history", label: "View Crime History" },
   { key: "manage_cameras", label: "Manage Cameras" },
   { key: "confirm_dismiss_alerts", label: "Confirm / Dismiss Alerts" },
+  // BUG FOUND 2026-09-22: backend.py's VALID_PERMISSION_KEYS has always had
+  // 6 keys -- this list (and usePermissions.ts's own separate copy) only
+  // ever had 5, missing manage_notify_targets entirely. Not just cosmetic:
+  // onlyEditablePermissions() strips anything not in permissionStatus's
+  // key set before a create/save request goes out, so a manage_notify_
+  // targets grant could never actually be applied through either Create
+  // User or the permission-editor modal, no matter what -- the checkbox
+  // for it simply didn't exist to check.
+  { key: "manage_notify_targets", label: "Manage Responder Notifications" },
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]["key"];
@@ -31,7 +40,13 @@ export type PermissionStatus = "editable" | "always" | "banned";
 
 const ADMIN_ROLES = new Set(["PNP_ADMIN", "BARANGAY_ADMIN"]);
 const PNP_ROLES = new Set(["PNP_ADMIN", "PNP_OFFICER"]);
+const BARANGAY_ROLES = new Set(["BARANGAY_ADMIN", "BARANGAY_STAFF"]);
 const BARANGAY_ONLY_PERMISSIONS = new Set<string>(["manage_cameras"]);
+// Added 2026-09-22 (explicit user request): the deep crime-history archive
+// and video record vault are police-only now, mirrors backend.py's
+// POLICE_ONLY_PERMISSIONS exactly -- barangay accounts (admin tier
+// included) never get these two, full stop.
+const POLICE_ONLY_PERMISSIONS = new Set<string>(["view_records", "view_history"]);
 
 // customPermissions added 2026-09-04 alongside backend.py's override
 // endpoint (POST /api/devteam/users/{id}/override_permissions):
@@ -49,7 +64,8 @@ const BARANGAY_ONLY_PERMISSIONS = new Set<string>(["manage_cameras"]);
 // non-admin) is unaffected.
 export function permissionStatus(role: string, key: string, customPermissions: boolean = false): PermissionStatus {
   if (BARANGAY_ONLY_PERMISSIONS.has(key) && PNP_ROLES.has(role)) return "banned";
-  if (ADMIN_ROLES.has(role) && !customPermissions && !BARANGAY_ONLY_PERMISSIONS.has(key)) return "always";
+  if (POLICE_ONLY_PERMISSIONS.has(key) && BARANGAY_ROLES.has(role)) return "banned";
+  if (ADMIN_ROLES.has(role) && !customPermissions && !BARANGAY_ONLY_PERMISSIONS.has(key) && !POLICE_ONLY_PERMISSIONS.has(key)) return "always";
   return "editable";
 }
 
@@ -75,13 +91,20 @@ export function onlyEditablePermissions(role: string, draft: Record<string, bool
 // rows to speak for themselves.
 export function permissionNoteFor(role: string, customPermissions: boolean = false): string | null {
   const rows = permissionRowsFor(role, customPermissions);
-  const hasBanned = rows.some((r) => r.status === "banned");
+  const bannedKeys = new Set(rows.filter((r) => r.status === "banned").map((r) => r.key));
+  const hasCameraBan = [...bannedKeys].some((k) => BARANGAY_ONLY_PERMISSIONS.has(k));
+  const hasHistoryBan = [...bannedKeys].some((k) => POLICE_ONLY_PERMISSIONS.has(k));
   const hasAlways = rows.some((r) => r.status === "always");
-  if (hasBanned && hasAlways) {
-    return "Admin-tier accounts get view/alert access automatically. Camera management is locked for every PNP account -- cameras are barangay property, not police administration.";
+
+  const banNotes: string[] = [];
+  if (hasCameraBan) banNotes.push("Camera management is locked for every PNP account -- cameras are barangay property, not police administration.");
+  if (hasHistoryBan) banNotes.push("Crime history and the video record vault are locked for every barangay account -- police-only, regardless of tier.");
+
+  if (banNotes.length && hasAlways) {
+    return `Admin-tier accounts get view/alert access automatically. ${banNotes.join(" ")}`;
   }
-  if (hasBanned) {
-    return "Camera management is locked for PNP accounts -- cameras are barangay property, not police administration.";
+  if (banNotes.length) {
+    return banNotes.join(" ");
   }
   if (hasAlways) {
     return "Admin-tier accounts get view/alert access automatically. Camera management still needs a grant, same as any standard account.";

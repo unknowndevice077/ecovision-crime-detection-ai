@@ -19,7 +19,14 @@ export type PermissionKey =
   | 'view_records'
   | 'view_history'
   | 'manage_cameras'
-  | 'confirm_dismiss_alerts';
+  | 'confirm_dismiss_alerts'
+  // BUG FOUND 2026-09-22: missing from this union (and from lib/permissions.ts's
+  // own separate PERMISSION_KEYS copy) since the key was added to the backend
+  // -- can('manage_notify_targets') would still work at runtime (this is just
+  // a TS union, nothing here throws), but it was never included in any of
+  // the hardcoded role-default objects below, so it silently always read as
+  // undefined/false for every role, including DEVTEAM.
+  | 'manage_notify_targets';
 
 type StoredUser = {
   role: string;
@@ -47,7 +54,7 @@ export function usePermissions() {
     if (user.role === 'DEVTEAM') {
       return {
         view_map: true, view_records: true, view_history: true,
-        manage_cameras: true, confirm_dismiss_alerts: true,
+        manage_cameras: true, confirm_dismiss_alerts: true, manage_notify_targets: true,
       };
     }
 
@@ -70,11 +77,31 @@ export function usePermissions() {
     // as a standard operator account; an admin still on the automatic
     // default (the overwhelming majority, and every admin before this
     // feature existed) is completely unaffected by this branch.
-    if ((user.role === 'PNP_ADMIN' || user.role === 'BARANGAY_ADMIN') && !user.custom_permissions) {
+    //
+    // BUG FOUND 2026-09-22 (explicit user request: barangay loses the
+    // crime-history archive, police-only now): this used to give BOTH
+    // PNP_ADMIN and BARANGAY_ADMIN the same view_records/view_history:true
+    // default. Split the branch -- PNP_ADMIN is unaffected, BARANGAY_ADMIN
+    // now always reads false for both regardless of custom_permissions,
+    // mirroring backend.py's POLICE_ONLY_PERMISSIONS hard ban (which
+    // applies unconditionally, override or not -- see require_permission's
+    // 2026-09-22 comment for why an override can't reopen this).
+    if (user.role === 'PNP_ADMIN' && !user.custom_permissions) {
       return {
         view_map: true, view_records: true, view_history: true,
-        manage_cameras: user.role === 'BARANGAY_ADMIN',
-        confirm_dismiss_alerts: true,
+        manage_cameras: false, confirm_dismiss_alerts: true, manage_notify_targets: true,
+      };
+    }
+    if (user.role === 'BARANGAY_ADMIN') {
+      const raw = !user.custom_permissions ? {} : (
+        typeof user.permissions === 'string'
+          ? (() => { try { return JSON.parse(user.permissions as string); } catch { return {}; } })()
+          : (user.permissions ?? {})
+      );
+      return {
+        ...raw,
+        view_map: true, manage_cameras: true, confirm_dismiss_alerts: true,
+        view_records: false, view_history: false,
       };
     }
 
@@ -85,6 +112,16 @@ export function usePermissions() {
         ? (() => { try { return JSON.parse(user.permissions as string); } catch { return {}; } })()
         : (user.permissions ?? {});
       return { ...raw, manage_cameras: false };
+    }
+
+    // BARANGAY_STAFF: same defense as PNP_OFFICER above -- a view_history/
+    // view_records grant issued before the 2026-09-22 restriction existed
+    // must not keep showing a nav item that would now just 403.
+    if (user.role === 'BARANGAY_STAFF') {
+      const raw = typeof user.permissions === 'string'
+        ? (() => { try { return JSON.parse(user.permissions as string); } catch { return {}; } })()
+        : (user.permissions ?? {});
+      return { ...raw, view_history: false, view_records: false };
     }
 
     if (!user.permissions) return {};

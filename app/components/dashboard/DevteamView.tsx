@@ -77,7 +77,21 @@ type PendingLocation = {
   created_at: string;
 };
 
-type Tab = 'directory' | 'users' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models';
+// Split 2026-09-23 (explicit teacher requirement: separate configuration/
+// CRUD from monitoring in the DevTeam console). Monitoring is read-only --
+// Directory and Users no longer render Edit/Delete anywhere; every mutating
+// action (including the account editor those two tabs used to open inline)
+// lives under Configuration's "Manage Users" tab instead. This is a single
+// frontend-only reorganization: no endpoint changes, no new permission
+// checks -- the backend already required DEVTEAM for every one of these
+// calls regardless of which tab triggered them.
+type Section = 'monitoring' | 'configuration';
+type Tab = 'directory' | 'users' | 'manage_users' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models' | 'audit';
+
+const SECTION_TABS: Record<Section, Tab[]> = {
+  monitoring: ['directory', 'users'],
+  configuration: ['manage_users', 'approvals', 'create', 'cameras', 'stations', 'models', 'audit'],
+};
 
 type ModelStat = {
   label: string; value: number; unit: string; note?: string; good?: boolean;
@@ -144,6 +158,17 @@ type Station = { id: string; name: string; barangay_ids: string[]; staff_count: 
 
 type CameraRow = { id: string; name: string; url: string; status: string; barangay_id: string };
 
+type AuditEntry = {
+  id: string;
+  actor_user_id: number | null;
+  actor_username: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  target_snapshot: Record<string, any> | null;
+  created_at: string;
+};
+
 export default function DevteamView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const router = useRouter();
@@ -154,7 +179,9 @@ export default function DevteamView() {
   const [allLocations, setAllLocations] = useState<PendingLocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [section, setSection] = useState<Section>('monitoring');
   const [tab, setTab] = useState<Tab>('directory');
+  const switchSection = (s: Section) => { setSection(s); setTab(SECTION_TABS[s][0]); };
   // Separate from `search` (Directory tab's own callsign/location filter) --
   // sharing one box across tabs meant switching tabs silently carried a
   // stale filter over, or typing in one unexpectedly filtered the other.
@@ -321,6 +348,39 @@ export default function DevteamView() {
   useLiveChannel("*", fetchOverview);
 
   const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  // ── Audit log (2026-09-23) ──────────────────────────────────────────────
+  // GET /api/devteam/audit_log returns a raw array (not {entries:[...]}) --
+  // see backend.py's devteam_list_audit_log. Fetched on demand like the AI
+  // Models tab, not on every overview poll: this is a review surface, not
+  // live-incident data.
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [auditLoaded, setAuditLoaded] = useState(false);
+  const [auditActionFilter, setAuditActionFilter] = useState('');
+  const [auditBusyIds, setAuditBusyIds] = useState<Set<string>>(new Set());
+
+  const fetchAuditLog = async (action?: string) => {
+    try {
+      const qs = action ? `?action=${encodeURIComponent(action)}` : '';
+      const res = await fetch(`${API_URL}/api/devteam/audit_log${qs}`, { headers: authHeaders() });
+      if (res.ok) setAuditEntries(await res.json());
+    } catch { /* leave whatever was last shown */ }
+    finally { setAuditLoaded(true); }
+  };
+
+  const restoreAuditEntry = async (entry: AuditEntry) => {
+    setAuditBusyIds(prev => new Set(prev).add(entry.id));
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/audit_log/${entry.id}/restore`, { method: 'POST', headers: authHeaders() });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { flash(`${entry.target_type} ${entry.target_id} restored.`); fetchAuditLog(auditActionFilter || undefined); fetchOverview(); }
+      else flash(d.detail || 'Could not restore.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setAuditBusyIds(prev => { const n = new Set(prev); n.delete(entry.id); return n; });
+    }
+  };
 
   // ── Detection models ──────────────────────────────────────────────────────
   // Fetched on demand rather than with the overview: config.json changes only
@@ -758,10 +818,6 @@ export default function DevteamView() {
                     </p>
                     <p className="text-[9px] text-[var(--text-2)] truncate">{u.assignment}</p>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
-                    <button onClick={() => handleDelete(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
-                  </div>
                 </div>
               );
             })}
@@ -835,6 +891,57 @@ export default function DevteamView() {
     return Array.from(set).sort();
   }, [allLocations, data]);
 
+  // Shared between the Monitoring "Users" tab (read-only) and Configuration's
+  // "Manage Users" tab (adds Edit/Delete) -- same sorted/filtered list, same
+  // row markup, so the two views can't quietly drift apart. Only the action
+  // column differs, gated by the `withActions` flag on renderUserListRow.
+  const userOrgName = (u: ManagedUser) => {
+    if (u.role === 'DEVTEAM') return 'DevTeam HQ';
+    if (u.station_id) return stations.find(st => st.id === u.station_id)?.name ?? u.station_id;
+    if (u.barangay_id) return allLocations.find(l => l.id === u.barangay_id)?.name ?? u.barangay_id;
+    return '—';
+  };
+
+  const visibleUsers = useMemo(() => {
+    if (!data) return [] as ManagedUser[];
+    const q = userSearch.trim().toLowerCase();
+    return ([...data.users] as ManagedUser[])
+      .sort((a, b) => a.username.localeCompare(b.username))
+      .filter(u => !q ||
+        u.username.toLowerCase().includes(q) ||
+        u.role.toLowerCase().includes(q) ||
+        userOrgName(u).toLowerCase().includes(q));
+  }, [data, userSearch, stations, allLocations]);
+
+  const renderUserListRow = (u: ManagedUser, withActions: boolean) => {
+    const rowStyle = ROLE_STYLES[u.role] || DEFAULT_ROLE_STYLE;
+    return (
+      <div key={u.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(u.id) ? 'opacity-40' : ''}`}>
+        <span className={`text-[8px] font-bold px-1.5 py-1 border ${rowStyle.border} ${rowStyle.text} shrink-0`}>{rowStyle.code}</span>
+        <div className="min-w-0" style={{ width: '22%' }}>
+          <p className="text-[11px] text-[var(--text)] truncate">{u.username}</p>
+          <p className="text-[9px] text-[var(--text-2)] truncate">{u.assignment}</p>
+        </div>
+        <p className="text-[10px] text-[var(--text-2)] truncate" style={{ width: '18%' }}>
+          {u.role.replace(/_/g, ' ')}
+          {(u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN') && u.custom_permissions && (
+            <span className="ml-1.5 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--accent)' }}>· custom perms</span>
+          )}
+        </p>
+        <p className="text-[10px] text-[var(--text-2)] truncate flex-1 min-w-0">{userOrgName(u)}</p>
+        <p className="text-[9px] shrink-0" style={{ color: u.last_login ? 'var(--text-2)' : 'var(--text-3)', width: '140px' }}>
+          {u.last_login ? new Date(u.last_login).toLocaleString() : 'Never logged in'}
+        </p>
+        {withActions && u.role !== 'DEVTEAM' && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
+            <button onClick={() => handleDelete(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const eligibleParents = useMemo(() => {
     if (!data) return [];
     const roleMeta = CREATABLE_ROLES.find(r => r.role === createForm.role);
@@ -895,35 +1002,66 @@ export default function DevteamView() {
         </div>
       )}
 
-      {/* STAT STRIP — inline ledger, not cards */}
-      <div className="shrink-0 flex items-stretch border-b border-[var(--line)] px-7">
-        <StatCell icon={<Users2 size={13} />} label="Users" val={data.totals.users} />
-        <StatCell icon={<ShieldAlert size={13} />} label="Incidents" val={data.totals.incidents} />
-        <StatCell icon={<Activity size={13} />} label="Active" val={data.totals.active_incidents} accent="text-[var(--critical)]" />
-        <StatCell icon={<Video size={13} />} label="Cameras" val={data.totals.cameras} />
-        <StatCell icon={<Film size={13} />} label="Records" val={data.totals.video_records} last />
+      {/* SECTION TOGGLE — 2026-09-23: config/CRUD split from monitoring,
+          explicit teacher requirement. Everything that only shows state
+          (Directory, Users) lives under Monitoring; everything that changes
+          state (account edits/deletes, create, cameras, stations, AI model
+          toggles, approvals, the audit log's restore action) lives under
+          Configuration. Switching section jumps to that section's first tab
+          rather than leaving `tab` pointed at a tab the new section doesn't
+          have. */}
+      <div className="shrink-0 flex items-center gap-2 px-7 pt-3 border-b border-[var(--line)]">
+        <SectionButton label="Monitoring" active={section === 'monitoring'} onClick={() => switchSection('monitoring')} />
+        <SectionButton label="Configuration" active={section === 'configuration'} onClick={() => switchSection('configuration')} />
       </div>
+
+      {/* STAT STRIP — inline ledger, not cards. Monitoring only: these are
+          read-only totals, not controls, and belong with the rest of the
+          read-only section. */}
+      {section === 'monitoring' && (
+        <div className="shrink-0 flex items-stretch border-b border-[var(--line)] px-7">
+          <StatCell icon={<Users2 size={13} />} label="Users" val={data.totals.users} />
+          <StatCell icon={<ShieldAlert size={13} />} label="Incidents" val={data.totals.incidents} />
+          <StatCell icon={<Activity size={13} />} label="Active" val={data.totals.active_incidents} accent="text-[var(--critical)]" />
+          <StatCell icon={<Video size={13} />} label="Cameras" val={data.totals.cameras} />
+          <StatCell icon={<Film size={13} />} label="Records" val={data.totals.video_records} last />
+        </div>
+      )}
 
       {/* TABS */}
       <div className="shrink-0 flex items-center gap-1 px-7 border-b border-[var(--line)]">
-        <TabButton icon={<LayoutGrid size={12} />} label="Directory" active={tab === 'directory'} onClick={() => setTab('directory')} />
-        <TabButton icon={<Users2 size={12} />} label="Users" active={tab === 'users'} onClick={() => setTab('users')} badge={data.users.length} />
-        <TabButton
-          icon={<ClipboardList size={12} />}
-          label="Approvals"
-          active={tab === 'approvals'}
-          onClick={() => setTab('approvals')}
-          badge={pendingLocations.length}
-        />
-        <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
-        <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
-        <TabButton icon={<Radio size={12} />} label="Stations" active={tab === 'stations'} onClick={() => setTab('stations')} badge={stations.length} />
-        <TabButton
-          icon={<Brain size={12} />}
-          label="AI Models"
-          active={tab === 'models'}
-          onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); fetchThresholdCounts(); }}
-        />
+        {section === 'monitoring' ? (
+          <>
+            <TabButton icon={<LayoutGrid size={12} />} label="Directory" active={tab === 'directory'} onClick={() => setTab('directory')} />
+            <TabButton icon={<Users2 size={12} />} label="Users" active={tab === 'users'} onClick={() => setTab('users')} badge={data.users.length} />
+          </>
+        ) : (
+          <>
+            <TabButton icon={<Users2 size={12} />} label="Manage Users" active={tab === 'manage_users'} onClick={() => setTab('manage_users')} badge={data.users.length} />
+            <TabButton
+              icon={<ClipboardList size={12} />}
+              label="Approvals"
+              active={tab === 'approvals'}
+              onClick={() => setTab('approvals')}
+              badge={pendingLocations.length}
+            />
+            <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
+            <TabButton icon={<Video size={12} />} label="Cameras" active={tab === 'cameras'} onClick={() => setTab('cameras')} badge={cameras.length} />
+            <TabButton icon={<Radio size={12} />} label="Stations" active={tab === 'stations'} onClick={() => setTab('stations')} badge={stations.length} />
+            <TabButton
+              icon={<Brain size={12} />}
+              label="AI Models"
+              active={tab === 'models'}
+              onClick={() => { setTab('models'); if (!modelsLoaded) fetchModels(); if (!optimizeState) fetchOptimizeStatus(); fetchThresholdCounts(); }}
+            />
+            <TabButton
+              icon={<Undo2 size={12} />}
+              label="Audit Log"
+              active={tab === 'audit'}
+              onClick={() => { setTab('audit'); fetchAuditLog(auditActionFilter || undefined); }}
+            />
+          </>
+        )}
       </div>
 
       {/* ================= DIRECTORY TAB ================= */}
@@ -1065,56 +1203,44 @@ export default function DevteamView() {
             </span>
           </div>
           <div className="flex-1 overflow-y-auto custom-scrollbar border border-[var(--line)]">
-            {(() => {
-              const q = userSearch.trim().toLowerCase();
-              const orgName = (u: ManagedUser) => {
-                if (u.role === 'DEVTEAM') return 'DevTeam HQ';
-                if (u.station_id) return stations.find(st => st.id === u.station_id)?.name ?? u.station_id;
-                if (u.barangay_id) return allLocations.find(l => l.id === u.barangay_id)?.name ?? u.barangay_id;
-                return '—';
-              };
-              const rows = [...data.users]
-                .sort((a, b) => a.username.localeCompare(b.username))
-                .filter(u => !q ||
-                  u.username.toLowerCase().includes(q) ||
-                  u.role.toLowerCase().includes(q) ||
-                  orgName(u).toLowerCase().includes(q));
-              if (rows.length === 0) {
-                return <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching accounts</p>;
-              }
-              return (
-                <div className="divide-y divide-[var(--panel-2)]">
-                  {rows.map(u => {
-                    const rowStyle = ROLE_STYLES[u.role] || DEFAULT_ROLE_STYLE;
-                    return (
-                      <div key={u.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(u.id) ? 'opacity-40' : ''}`}>
-                        <span className={`text-[8px] font-bold px-1.5 py-1 border ${rowStyle.border} ${rowStyle.text} shrink-0`}>{rowStyle.code}</span>
-                        <div className="min-w-0" style={{ width: '22%' }}>
-                          <p className="text-[11px] text-[var(--text)] truncate">{u.username}</p>
-                          <p className="text-[9px] text-[var(--text-2)] truncate">{u.assignment}</p>
-                        </div>
-                        <p className="text-[10px] text-[var(--text-2)] truncate" style={{ width: '18%' }}>
-                          {u.role.replace(/_/g, ' ')}
-                          {(u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN') && u.custom_permissions && (
-                            <span className="ml-1.5 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--accent)' }}>· custom perms</span>
-                          )}
-                        </p>
-                        <p className="text-[10px] text-[var(--text-2)] truncate flex-1 min-w-0">{orgName(u)}</p>
-                        <p className="text-[9px] shrink-0" style={{ color: u.last_login ? 'var(--text-2)' : 'var(--text-3)', width: '140px' }}>
-                          {u.last_login ? new Date(u.last_login).toLocaleString() : 'Never logged in'}
-                        </p>
-                        {u.role !== 'DEVTEAM' && (
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
-                            <button onClick={() => handleDelete(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })()}
+            {visibleUsers.length === 0 ? (
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching accounts</p>
+            ) : (
+              <div className="divide-y divide-[var(--panel-2)]">
+                {visibleUsers.map(u => renderUserListRow(u, false))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================= MANAGE USERS TAB (Configuration) ================= */}
+      {/* Same list as Monitoring's "Users" tab (visibleUsers/renderUserListRow
+          shared above), but this is the one place Edit/Delete actually
+          render -- per the 2026-09-23 config/monitoring split, every
+          mutating control lives under Configuration only. */}
+      {tab === 'manage_users' && (
+        <div className="flex-1 min-h-0 flex flex-col px-7 pb-7 pt-4">
+          <div className="shrink-0 flex items-center gap-2 border border-[var(--line)] border-b-0 px-3 py-2.5">
+            <Search size={12} className="text-[var(--text-2)] shrink-0" />
+            <input
+              value={userSearch}
+              onChange={e => setUserSearch(e.target.value)}
+              placeholder="search username, role, or organization"
+              className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+            />
+            <span className="text-[9px] shrink-0" style={{ color: 'var(--text-3)' }}>
+              {visibleUsers.length} account{visibleUsers.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto custom-scrollbar border border-[var(--line)]">
+            {visibleUsers.length === 0 ? (
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching accounts</p>
+            ) : (
+              <div className="divide-y divide-[var(--panel-2)]">
+                {visibleUsers.map(u => renderUserListRow(u, true))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1509,6 +1635,86 @@ export default function DevteamView() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ================= AUDIT LOG TAB (Configuration) ================= */}
+      {/* 2026-09-23: who-did-what + recover, not a generic undo button (see
+          backend.py's log_audit docstring for why). Only delete-type entries
+          (action ending in ".deleted") whose target is still soft-deleted
+          are restorable -- the backend enforces that with a specific 400,
+          this just disables the button for anything else so DevTeam isn't
+          clicking Restore on a row that can never do anything. */}
+      {tab === 'audit' && (
+        <div className="flex-1 min-h-0 flex flex-col px-7 pb-7 pt-4">
+          <div className="shrink-0 flex items-center gap-2 border border-[var(--line)] border-b-0 px-3 py-2.5">
+            <Search size={12} className="text-[var(--text-2)] shrink-0" />
+            <input
+              value={auditActionFilter}
+              onChange={e => setAuditActionFilter(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') fetchAuditLog(auditActionFilter.trim() || undefined); }}
+              placeholder="filter by action, e.g. user.deleted (enter to apply)"
+              className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+            />
+            {auditActionFilter && (
+              <button
+                onClick={() => { setAuditActionFilter(''); fetchAuditLog(); }}
+                className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)] hover:text-[var(--text)] shrink-0"
+              >
+                Clear
+              </button>
+            )}
+            <span className="text-[9px] shrink-0" style={{ color: 'var(--text-3)' }}>
+              {auditEntries.length} entr{auditEntries.length === 1 ? 'y' : 'ies'}
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto custom-scrollbar border border-[var(--line)]">
+            {!auditLoaded ? (
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">Loading…</p>
+            ) : auditEntries.length === 0 ? (
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No audit entries yet</p>
+            ) : (
+              <div className="divide-y divide-[var(--panel-2)]">
+                {auditEntries.map(entry => {
+                  const restorable = entry.action.endsWith('.deleted');
+                  const busy = auditBusyIds.has(entry.id);
+                  const label = entry.target_snapshot?.username || entry.target_snapshot?.title || entry.target_id;
+                  return (
+                    <div key={entry.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${busy ? 'opacity-40' : ''}`}>
+                      <span
+                        className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${
+                          entry.action.endsWith('.deleted')
+                            ? 'border-[var(--critical)]/30 text-[var(--critical)]'
+                            : entry.action.endsWith('.restored')
+                            ? 'border-[var(--ok)]/30 text-[var(--ok)]'
+                            : 'border-[var(--line-2)] text-[var(--text-2)]'
+                        }`}
+                      >
+                        {entry.action}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] text-[var(--text)] truncate">
+                          {entry.target_type} <span className="text-[var(--text-2)]">{label}</span>
+                        </p>
+                        <p className="text-[9px] text-[var(--text-2)] truncate">
+                          by {entry.actor_username} &middot; {new Date(entry.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                      {restorable && (
+                        <button
+                          onClick={() => restoreAuditEntry(entry)}
+                          disabled={busy}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 text-[9px] tracking-[0.1em] uppercase border border-[var(--ok)]/30 text-[var(--ok)] hover:bg-[var(--ok)]/10 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                        >
+                          <Undo2 size={11} /> {busy ? 'Restoring…' : 'Restore'}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -2058,6 +2264,21 @@ function StatCell({ icon, label, val, accent, last }: any) {
         <p className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)]">{label}</p>
       </div>
     </div>
+  );
+}
+
+function SectionButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3.5 py-1.5 text-[10px] font-bold tracking-[0.15em] uppercase border transition-colors ${
+        active
+          ? 'border-[var(--accent)] text-[var(--accent)] bg-[var(--accent)]/[0.08]'
+          : 'border-[var(--line)] text-[var(--text-2)] hover:border-[var(--line-2)] hover:text-[var(--text)]'
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
