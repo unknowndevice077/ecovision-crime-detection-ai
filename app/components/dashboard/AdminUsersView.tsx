@@ -128,12 +128,72 @@ export default function AdminUsersView() {
     }
   };
 
+  // ── Camera-level access (Phase 2, 2026-09-23) ───────────────────────────
+  // "Dice every permission down to the smallest unit" -- the barangay/PNP
+  // admin's own scoped-down version of DevTeam's Permissions tab: restrict
+  // ONE of their own subordinates to specific cameras only. Reuses
+  // GET /api/cameras as-is for the picker -- it's already org-scoped to
+  // this admin's own token, so no separate "cameras I can grant" endpoint
+  // is needed the way DevTeam's unscoped picker needed one.
+  const [grantCameras, setGrantCameras] = useState<{ id: string; name: string }[]>([]);
+  const [userGrants, setUserGrants] = useState<any[]>([]);
+  const [grantCameraId, setGrantCameraId] = useState('');
+  const [grantBusy, setGrantBusy] = useState(false);
+
+  const fetchUserGrants = async (userId: number) => {
+    try {
+      const res = await fetch(`${API_URL}/api/admin/users/${userId}/resource_permissions`, { headers: authHeaders() });
+      if (res.ok) setUserGrants(await res.json());
+    } catch { /* leave whatever was last shown */ }
+  };
+
   const openPermissions = (u: ManagedUser) => {
     setEditingPerms(u);
     try {
       setPermsDraft(JSON.parse(u.permissions || "{}"));
     } catch {
       setPermsDraft({});
+    }
+    setGrantCameraId('');
+    fetchUserGrants(u.id);
+    if (grantCameras.length === 0) {
+      fetch(`${API_URL}/api/cameras`, { headers: authHeaders() })
+        .then(res => res.ok ? res.json() : [])
+        .then(setGrantCameras)
+        .catch(() => {});
+    }
+  };
+
+  const grantCameraAccess = async () => {
+    if (!editingPerms || !grantCameraId) return;
+    setGrantBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/resource_permissions`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ permission_key: 'view_map', resource_type: 'camera', resource_id: grantCameraId }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { fetchUserGrants(editingPerms.id); setGrantCameraId(''); }
+      else { setError(d.detail || 'Could not grant.'); setTimeout(() => setError(''), 3000); }
+    } catch {
+      setError('Backend connection failure.'); setTimeout(() => setError(''), 3000);
+    } finally {
+      setGrantBusy(false);
+    }
+  };
+
+  const revokeCameraAccess = async (grant: any) => {
+    if (!editingPerms) return;
+    setGrantBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/resource_permissions`, {
+        method: 'DELETE', headers: authHeaders(),
+        body: JSON.stringify({ permission_key: grant.permission_key, resource_type: grant.resource_type, resource_id: grant.resource_id }),
+      });
+      if (res.ok) fetchUserGrants(editingPerms.id);
+    } catch { /* leave the list as-is -- user can retry */ }
+    finally {
+      setGrantBusy(false);
     }
   };
 
@@ -468,6 +528,61 @@ export default function AdminUsersView() {
               >
                 <Save size={12} /> Save permissions
               </button>
+
+              {/* CAMERA-LEVEL ACCESS -- Phase 2, 2026-09-23. Independent of
+                  the checkbox list above (applies/saves immediately, not on
+                  the Save button) since it's a live restriction, not a
+                  draft. Leaving this empty changes nothing -- see
+                  DevteamView's Permissions tab for the same "opt-in only"
+                  note. */}
+              <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--line)' }}>
+                <div className="label mb-1.5">Camera-level access</div>
+                <p className="text-[9.5px] leading-relaxed mb-2" style={{ color: 'var(--text-3)' }}>
+                  Restrict this account to specific cameras only. No grants below means they see
+                  every camera your account can see.
+                </p>
+                {userGrants.length > 0 && (
+                  <div className="space-y-1 mb-2">
+                    {userGrants.map(g => {
+                      const cam = grantCameras.find(c => c.id === g.resource_id);
+                      return (
+                        <div key={g.id} className="flex items-center justify-between px-2 py-1.5 border" style={{ borderColor: 'var(--line-2)' }}>
+                          <span className="text-[10.5px]" style={{ color: 'var(--text)' }}>{cam ? cam.name : g.resource_id}</span>
+                          <button
+                            onClick={() => revokeCameraAccess(g)}
+                            disabled={grantBusy}
+                            className="text-[9px] uppercase tracking-wider disabled:opacity-40"
+                            style={{ color: 'var(--critical)' }}
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={grantCameraId}
+                    onChange={e => setGrantCameraId(e.target.value)}
+                    className="flex-1 data border p-2 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
+                    style={inputStyle}
+                  >
+                    <option value="">select a camera…</option>
+                    {grantCameras.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={grantCameraAccess}
+                    disabled={grantBusy || !grantCameraId}
+                    className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white disabled:opacity-40 transition-opacity hover:opacity-90 shrink-0"
+                    style={{ background: 'var(--accent)' }}
+                  >
+                    Grant
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

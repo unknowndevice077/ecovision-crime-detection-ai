@@ -86,11 +86,11 @@ type PendingLocation = {
 // checks -- the backend already required DEVTEAM for every one of these
 // calls regardless of which tab triggered them.
 type Section = 'monitoring' | 'configuration';
-type Tab = 'directory' | 'users' | 'manage_users' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models' | 'audit';
+type Tab = 'directory' | 'users' | 'manage_users' | 'approvals' | 'create' | 'cameras' | 'stations' | 'models' | 'audit' | 'permissions';
 
 const SECTION_TABS: Record<Section, Tab[]> = {
   monitoring: ['directory', 'users'],
-  configuration: ['manage_users', 'approvals', 'create', 'cameras', 'stations', 'models', 'audit'],
+  configuration: ['manage_users', 'permissions', 'approvals', 'create', 'cameras', 'stations', 'models', 'audit'],
 };
 
 type ModelStat = {
@@ -221,6 +221,7 @@ export default function DevteamView() {
   const [createForm, setCreateForm] = useState({
     username: '', password: '', assignment: '', display_title: '',
     role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '' as string,
+    custom_role_id: '' as string,
   });
   const [createPerms, setCreatePerms] = useState<Record<string, boolean>>({});
   const [createBusy, setCreateBusy] = useState(false);
@@ -366,6 +367,118 @@ export default function DevteamView() {
       if (res.ok) setAuditEntries(await res.json());
     } catch { /* leave whatever was last shown */ }
     finally { setAuditLoaded(true); }
+  };
+
+  // ── Phase 2: resource-scoped permissions + custom roles (2026-09-23) ────
+  // "Dice every permission down to the smallest unit" -- the user's own
+  // example was camera-level, and that's the only resource type wired into
+  // an actual enforcement point right now (GET /api/cameras filters on a
+  // camera-scoped view_map grant, see backend.py). The picker below is
+  // deliberately narrow to just that -- offering other permission keys
+  // here would create grant rows nothing ever consults, the same "looks
+  // like a promise the app doesn't keep" problem lib/permissions.ts's own
+  // top comment warns about.
+  const [customRoles, setCustomRoles] = useState<any[]>([]);
+  const [rolesLoaded, setRolesLoaded] = useState(false);
+  const [newRoleForm, setNewRoleForm] = useState<{ name: string; org_type: 'barangay' | 'police' }>({ name: '', org_type: 'barangay' });
+  const [newRolePerms, setNewRolePerms] = useState<Record<string, boolean>>({});
+  const [roleBusy, setRoleBusy] = useState(false);
+
+  const [grantUserId, setGrantUserId] = useState('');
+  const [grantCameraId, setGrantCameraId] = useState('');
+  const [grantBusy, setGrantBusy] = useState(false);
+  const [grantCameras, setGrantCameras] = useState<{ id: string; name: string; barangay_id: string }[]>([]);
+  const [userGrants, setUserGrants] = useState<any[]>([]);
+
+  const fetchCustomRoles = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/custom_roles`, { headers: authHeaders() });
+      if (res.ok) setCustomRoles(await res.json());
+    } catch { /* leave whatever was last shown */ }
+    finally { setRolesLoaded(true); }
+  };
+
+  const createCustomRole = async () => {
+    const name = newRoleForm.name.trim();
+    if (!name) return;
+    setRoleBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/custom_roles`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ name, org_type: newRoleForm.org_type, permissions: newRolePerms }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { flash(`Role "${name}" created.`); setNewRoleForm({ name: '', org_type: newRoleForm.org_type }); setNewRolePerms({}); fetchCustomRoles(); }
+      else flash(d.detail || 'Could not create role.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setRoleBusy(false);
+    }
+  };
+
+  const deleteCustomRole = async (id: string, name: string) => {
+    setRoleBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/custom_roles/${id}`, { method: 'DELETE', headers: authHeaders() });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { flash(`Role "${name}" deleted.`); fetchCustomRoles(); }
+      else flash(d.detail || 'Could not delete role.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setRoleBusy(false);
+    }
+  };
+
+  const fetchGrantCameras = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/cameras/list_for_grants`, { headers: authHeaders() });
+      if (res.ok) setGrantCameras(await res.json());
+    } catch { /* leave whatever was last shown */ }
+  };
+
+  const fetchUserGrants = async (userId: string) => {
+    if (!userId) { setUserGrants([]); return; }
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/users/${userId}/resource_permissions`, { headers: authHeaders() });
+      if (res.ok) setUserGrants(await res.json());
+    } catch { /* leave whatever was last shown */ }
+  };
+
+  const grantResourcePermission = async () => {
+    if (!grantUserId || !grantCameraId) return;
+    setGrantBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/users/${grantUserId}/resource_permissions`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ permission_key: 'view_map', resource_type: 'camera', resource_id: grantCameraId }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { flash('Camera access granted.'); fetchUserGrants(grantUserId); }
+      else flash(d.detail || 'Could not grant.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setGrantBusy(false);
+    }
+  };
+
+  const revokeResourcePermission = async (grant: any) => {
+    setGrantBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/users/${grant.user_id}/resource_permissions`, {
+        method: 'DELETE', headers: authHeaders(),
+        body: JSON.stringify({ permission_key: grant.permission_key, resource_type: grant.resource_type, resource_id: grant.resource_id }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) { flash('Revoked.'); fetchUserGrants(String(grant.user_id)); }
+      else flash(d.detail || 'Could not revoke.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setGrantBusy(false);
+    }
   };
 
   const restoreAuditEntry = async (entry: AuditEntry) => {
@@ -654,7 +767,7 @@ export default function DevteamView() {
   };
 
   const resetCreateForm = () => {
-    setCreateForm({ username: '', password: '', assignment: '', display_title: '', role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '' });
+    setCreateForm({ username: '', password: '', assignment: '', display_title: '', role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '', custom_role_id: '' });
     setCreatePerms({});
     setCreateError('');
   };
@@ -689,6 +802,7 @@ export default function DevteamView() {
           display_title: createForm.display_title.trim() || null,
           parent_admin_id: createForm.parent_admin_id ? Number(createForm.parent_admin_id) : null,
           permissions: onlyEditablePermissions(createForm.role, createPerms),
+          custom_role_id: createForm.custom_role_id || null,
         }),
       });
       const d = await res.json().catch(() => ({}));
@@ -1039,6 +1153,12 @@ export default function DevteamView() {
           <>
             <TabButton icon={<Users2 size={12} />} label="Manage Users" active={tab === 'manage_users'} onClick={() => setTab('manage_users')} badge={data.users.length} />
             <TabButton
+              icon={<KeyRound size={12} />}
+              label="Permissions"
+              active={tab === 'permissions'}
+              onClick={() => { setTab('permissions'); if (!rolesLoaded) fetchCustomRoles(); fetchGrantCameras(); }}
+            />
+            <TabButton
               icon={<ClipboardList size={12} />}
               label="Approvals"
               active={tab === 'approvals'}
@@ -1245,6 +1365,179 @@ export default function DevteamView() {
         </div>
       )}
 
+      {/* ================= PERMISSIONS TAB (Configuration) ================= */}
+      {/* Phase 2, 2026-09-23: "dice every permission down to the smallest
+          unit" (#3) + custom roles (#2). Two independent panels -- roles are
+          a creation-time template, resource grants are a live per-user
+          restriction -- kept on one tab since both are DevTeam's master
+          permission tooling, per the user's own answer ("it should also be
+          in devteam wherein all roles must be diced up to the smallest
+          things"). A barangay/PNP admin gets the equivalent resource-grant
+          panel, scoped to their own subordinates, inside their own admin
+          view (AdminUsersView.tsx) -- not duplicated here. */}
+      {tab === 'permissions' && (
+        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-6">
+
+          {/* CAMERA-LEVEL ACCESS GRANTS */}
+          <div className="border border-[var(--line)]">
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+              <Video size={12} className="text-[var(--accent)]" />
+              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text)]">Camera-level access</span>
+            </div>
+            <div className="p-4">
+              <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-3">
+                Restricts a user to specific cameras only. Leave a user with no grants here and
+                nothing changes -- they see every camera their role/org already allows. Add one
+                or more grants and they see ONLY those cameras, nothing else.
+              </p>
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <select
+                  value={grantUserId}
+                  onChange={e => { setGrantUserId(e.target.value); fetchUserGrants(e.target.value); }}
+                  className="bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                >
+                  <option value="">select a user…</option>
+                  {visibleUsers.filter(u => u.role !== 'DEVTEAM').map(u => (
+                    <option key={u.id} value={u.id}>{u.username} ({u.role.replace(/_/g, ' ')})</option>
+                  ))}
+                </select>
+                <select
+                  value={grantCameraId}
+                  onChange={e => setGrantCameraId(e.target.value)}
+                  className="bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                >
+                  <option value="">select a camera…</option>
+                  {grantCameras.map(c => (
+                    <option key={c.id} value={c.id}>{c.name} ({c.barangay_id})</option>
+                  ))}
+                </select>
+                <button
+                  onClick={grantResourcePermission}
+                  disabled={grantBusy || !grantUserId || !grantCameraId}
+                  className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90"
+                >
+                  Grant
+                </button>
+              </div>
+
+              {grantUserId && (
+                userGrants.length === 0 ? (
+                  <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] py-4 text-center border border-[var(--panel-2)]">
+                    No camera-level grants for this user -- they see everything their role/org allows.
+                  </p>
+                ) : (
+                  <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
+                    {userGrants.map(g => {
+                      const cam = grantCameras.find(c => c.id === g.resource_id);
+                      return (
+                        <div key={g.id} className="flex items-center justify-between px-3 py-2">
+                          <span className="text-[10px] text-[var(--text)]">
+                            {g.permission_key} <span className="text-[var(--text-2)]">on</span> {cam ? cam.name : g.resource_id}
+                          </span>
+                          <button
+                            onClick={() => revokeResourcePermission(g)}
+                            disabled={grantBusy}
+                            className="text-[9px] tracking-[0.1em] uppercase text-[var(--critical)]/80 hover:text-[var(--critical)] disabled:opacity-40"
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+
+          {/* CUSTOM ROLES */}
+          <div className="border border-[var(--line)]">
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+              <KeyRound size={12} className="text-[var(--accent)]" />
+              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text)]">Custom roles</span>
+              <span className="ml-auto text-[9px] text-[var(--text-2)]">
+                {customRoles.length} role{customRoles.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <div className="p-4">
+              <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-3">
+                A named permission preset layered on a real Barangay Staff or PNP Officer account --
+                the account itself is unaffected everywhere else (org, scope, login). Creating a user
+                with this role sets their display title and pre-applies these permissions.
+              </p>
+
+              {customRoles.length > 0 && (
+                <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] mb-4">
+                  {customRoles.map(r => (
+                    <div key={r.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <p className="text-[11px] text-[var(--text)] truncate">
+                          {r.name} <span className="text-[9px] text-[var(--text-2)] uppercase tracking-wide ml-1">{r.org_type}</span>
+                        </p>
+                        <p className="text-[9px] text-[var(--text-2)] truncate">
+                          {(r.permission_defaults || []).map((d: any) => d.permission_key).join(', ') || 'no permissions'}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => deleteCustomRole(r.id, r.name)}
+                        disabled={roleBusy}
+                        className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors shrink-0"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <FieldInput label="Role name" value={newRoleForm.name} onChange={(v: string) => setNewRoleForm({ ...newRoleForm, name: v })} placeholder="e.g. Gate Monitor" />
+                <div>
+                  <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Applies to</label>
+                  <select
+                    value={newRoleForm.org_type}
+                    onChange={e => { setNewRoleForm({ ...newRoleForm, org_type: e.target.value as 'barangay' | 'police' }); setNewRolePerms({}); }}
+                    className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                  >
+                    <option value="barangay">Barangay Staff</option>
+                    <option value="police">PNP Officer</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] mb-3">
+                {permissionRowsFor(newRoleForm.org_type === 'police' ? 'PNP_OFFICER' : 'BARANGAY_STAFF').map(p => (
+                  <label
+                    key={p.key}
+                    className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
+                  >
+                    <span className="text-[10px] text-[var(--text)]">
+                      {p.label}
+                      {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={p.status === 'editable' ? !!newRolePerms[p.key] : false}
+                      disabled={p.status !== 'editable'}
+                      onChange={e => setNewRolePerms({ ...newRolePerms, [p.key]: e.target.checked })}
+                      className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <button
+                onClick={createCustomRole}
+                disabled={roleBusy || !newRoleForm.name.trim()}
+                className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+              >
+                <Save size={12} /> {roleBusy ? 'Saving…' : 'Create role'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ================= APPROVALS TAB ================= */}
       {tab === 'approvals' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
@@ -1415,6 +1708,27 @@ export default function DevteamView() {
                   {eligibleParents.map(p => (
                     <option key={p.id} value={p.id}>{p.username} ({p.role})</option>
                   ))}
+                </select>
+              </div>
+            )}
+
+            {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
+              <div className="mb-4">
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                  Custom role (optional — sets a display title and pre-applies its permissions)
+                </label>
+                <select
+                  value={createForm.custom_role_id}
+                  onChange={e => setCreateForm({ ...createForm, custom_role_id: e.target.value })}
+                  onFocus={() => { if (!rolesLoaded) fetchCustomRoles(); }}
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                >
+                  <option value="">No custom role — plain {createForm.role === 'PNP_OFFICER' ? 'PNP Officer' : 'Barangay Staff'}</option>
+                  {customRoles
+                    .filter(r => r.org_type === (createForm.role === 'PNP_OFFICER' ? 'police' : 'barangay'))
+                    .map(r => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
                 </select>
               </div>
             )}
