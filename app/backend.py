@@ -693,6 +693,40 @@ def _migrate_schema(conn, cursor):
         conn.commit()
         print("💾 [DATABASE] Migrated: created custom_role_permission_defaults")
 
+    # Report requests (#7, 2026-09-23): a formal barangay -> police
+    # workflow for requesting a specific report/crime record. Deliberately
+    # NOT implemented as "accepting grants the barangay resource-scoped
+    # view_history access" (the plan's original sketch) -- POLICE_ONLY_
+    # PERMISSIONS' hard ban on view_history for BARANGAY_SIDE_ROLES (#5,
+    # this same session) fires in require_permission() before a grant row
+    # is ever consulted, specifically so it CANNOT be reopened this way; a
+    # permission_grants row here would be silently dead on arrival, exactly
+    # the "looks like a promise the app doesn't keep" failure mode this
+    # codebase has fixed twice already this session. Instead: police writes
+    # response_note back onto the request itself as the deliverable --
+    # #5's boundary (no standing archive access) and #7's ask (a formal,
+    # trackable request/response with an accept step) both hold, cleanly.
+    if not table_exists(cursor, "report_requests"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS report_requests (
+                id             TEXT PRIMARY KEY,
+                barangay_id    TEXT NOT NULL,
+                station_id     TEXT,
+                incident_id    TEXT,
+                description    TEXT NOT NULL,
+                requested_by   INTEGER NOT NULL,
+                status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'fulfilled', 'declined')),
+                requested_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                responded_by   INTEGER,
+                responded_at   TEXT,
+                response_note  TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_report_requests_barangay ON report_requests(barangay_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_report_requests_station ON report_requests(station_id)")
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created report_requests")
+
 
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
     """Writes one audit_log row. Never raises -- an audit-trail failure must
@@ -1279,6 +1313,13 @@ class CustomRoleCreate(BaseModel):
     name: str
     org_type: str  # 'barangay' | 'police'
     permissions: Optional[dict] = None
+
+class ReportRequestCreate(BaseModel):
+    incident_id: Optional[str] = None
+    description: str
+
+class ReportRequestResponse(BaseModel):
+    note: Optional[str] = None
 
 
 # --- SERIALIZATION HELPERS ---
@@ -3850,6 +3891,133 @@ async def delete_custom_role(role_id: str, authorization: Optional[str] = Header
     conn.commit()
     conn.close()
     return {"status": "deleted"}
+
+# --- REPORT REQUESTS (Phase 3, 2026-09-23) ---
+# Barangay formally requests a specific report/crime record from police;
+# police accepts (or declines) and hands the actual information back via
+# response_note. See report_requests' own migration comment for why this
+# does NOT grant any view_history access -- #5's ban on that for barangay
+# accounts is unconditional and stays that way here too.
+@app.post("/api/report_requests")
+async def create_report_request(body: ReportRequestCreate, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, BARANGAY_SIDE_ROLES)
+    barangay_id = payload.get("barangay_id")
+    if not barangay_id:
+        raise HTTPException(status_code=400, detail="Your account has no barangay assigned")
+    description = (body.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="Describe what you're requesting")
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        if body.incident_id:
+            # Can only be tied to an incident this barangay can actually see
+            # -- reuses the same scope_clause() GET /api/incidents applies,
+            # so a request can't be used to probe for the existence of an
+            # incident outside the caller's own jurisdiction.
+            frag, params = scope_clause(payload)
+            where = f"id = ? AND deleted_at IS NULL" + (f" AND {frag}" if frag else "")
+            cursor.execute(f"SELECT 1 FROM incidents WHERE {where}", [body.incident_id] + params)
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Incident not found")
+
+        cursor.execute("SELECT station_id FROM station_barangays WHERE barangay_id = ? LIMIT 1", (barangay_id,))
+        row = cursor.fetchone()
+        station_id = row["station_id"] if row else None
+
+        request_id = str(uuid.uuid4())
+        cursor.execute(
+            "INSERT INTO report_requests (id, barangay_id, station_id, incident_id, description, requested_by) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (request_id, barangay_id, station_id, body.incident_id, description, payload["id"]),
+        )
+        log_audit(cursor, payload, "report_request.created", "report_request", request_id, snapshot={
+            "barangay_id": barangay_id, "incident_id": body.incident_id, "description": description,
+        })
+        conn.commit()
+        if station_id:
+            await manager.broadcast({"channel": "report_requests", "event": "created", "id": request_id, "station_id": station_id})
+        return {"status": "created", "id": request_id, "station_id": station_id}
+    finally:
+        conn.close()
+
+@app.get("/api/report_requests")
+async def list_report_requests(authorization: Optional[str] = Header(None)):
+    """Role-branched, not scope-param-driven: a barangay account only ever
+    has an outbox (things it asked for) and a PNP account only ever has an
+    inbox (things asked of it) -- there's no ambiguity to resolve with a
+    query param the way notify_targets' single shared table needed one."""
+    payload = require_auth(authorization)
+    role = payload["role"]
+    conn = get_conn()
+    cursor = conn.cursor()
+    if role == "DEVTEAM":
+        cursor.execute("SELECT * FROM report_requests ORDER BY requested_at DESC")
+    elif role in BARANGAY_SIDE_ROLES:
+        cursor.execute("SELECT * FROM report_requests WHERE barangay_id = ? ORDER BY requested_at DESC", (payload.get("barangay_id"),))
+    elif role in PNP_SIDE_ROLES:
+        cursor.execute("SELECT * FROM report_requests WHERE station_id = ? ORDER BY requested_at DESC", (payload.get("station_id"),))
+    else:
+        conn.close()
+        return []
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+def _respond_to_report_request(payload: dict, request_id: str, new_status: str, note: Optional[str], require_current: str):
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM report_requests WHERE id = ?", (request_id,))
+        req = cursor.fetchone()
+        if not req:
+            raise HTTPException(status_code=404, detail="Request not found")
+        req = dict(req)
+        if payload["role"] != "DEVTEAM" and req["station_id"] != payload.get("station_id"):
+            raise HTTPException(status_code=403, detail="This request wasn't routed to your station")
+        if req["status"] != require_current:
+            raise HTTPException(status_code=400, detail=f"Request is '{req['status']}', not '{require_current}'")
+        cursor.execute(
+            "UPDATE report_requests SET status = ?, responded_by = ?, responded_at = NOW(), response_note = ? WHERE id = ?",
+            (new_status, payload["id"], note, request_id),
+        )
+        log_audit(cursor, payload, f"report_request.{new_status}", "report_request", request_id, snapshot={"note": note})
+        conn.commit()
+        return {"status": new_status}
+    finally:
+        conn.close()
+
+@app.post("/api/report_requests/{request_id}/accept")
+async def accept_report_request(request_id: str, body: ReportRequestResponse, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    result = _respond_to_report_request(payload, request_id, "accepted", body.note, require_current="pending")
+    await manager.broadcast({"channel": "report_requests", "event": "accepted", "id": request_id})
+    return result
+
+@app.post("/api/report_requests/{request_id}/decline")
+async def decline_report_request(request_id: str, body: ReportRequestResponse, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    result = _respond_to_report_request(payload, request_id, "declined", body.note, require_current="pending")
+    await manager.broadcast({"channel": "report_requests", "event": "declined", "id": request_id})
+    return result
+
+@app.post("/api/report_requests/{request_id}/fulfill")
+async def fulfill_report_request(request_id: str, body: ReportRequestResponse, authorization: Optional[str] = Header(None)):
+    """The actual deliverable: police hands the requested information back
+    as response_note, visible to the requesting barangay through this same
+    request record -- a one-time, audited handoff rather than a standing
+    grant into the archive itself."""
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    if not (body.note or "").strip():
+        raise HTTPException(status_code=400, detail="Include the report/information being handed over")
+    result = _respond_to_report_request(payload, request_id, "fulfilled", body.note, require_current="accepted")
+    await manager.broadcast({"channel": "report_requests", "event": "fulfilled", "id": request_id})
+    return result
 
 # --- DEVTEAM: FULL SYSTEM VISIBILITY (READ-ONLY OVERVIEW) ---
 @app.get("/api/devteam/overview")

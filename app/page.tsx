@@ -21,7 +21,8 @@ import {
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin,
   Maximize2, X, Sun, User,
   BatteryMedium, Thermometer, Zap, Plus, Film, Users, Terminal,
-  Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi, Siren
+  Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi, Siren,
+  ClipboardList
 } from 'lucide-react';
 
 // Every tab view was previously eagerly imported at module top -- all six
@@ -37,6 +38,7 @@ const RecordsView = dynamic(() => import('./components/RecordsView'), { ssr: fal
 const ProfileView = dynamic(() => import('./components/ProfileView'), { ssr: false });
 const AdminUsersView = dynamic(() => import('./components/dashboard/AdminUsersView'), { ssr: false });
 const DevteamView = dynamic(() => import('./components/dashboard/DevteamView'), { ssr: false });
+const ReportRequestsView = dynamic(() => import('./components/dashboard/ReportRequestsView'), { ssr: false });
 
 type Alert = {
   id: string;
@@ -610,6 +612,7 @@ const fetchCameras = async (userObj: any) => {
                 {can('view_history') && (
                   <NavItem label="Incident Log" icon={<AlertOctagon size={16} />} active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} badge={pendingAlerts.length} badgeTone="critical" />
                 )}
+                <NavItem label="Report Requests" icon={<ClipboardList size={16} />} active={activeTab === 'report-requests'} onClick={() => setActiveTab('report-requests')} />
               </>
             )}
             {isBarangay && (
@@ -646,6 +649,7 @@ const fetchCameras = async (userObj: any) => {
                 )}
                 <NavItem label="Cameras" icon={<Video size={16} />} active={activeTab === 'cameras'} onClick={() => setActiveTab('cameras')} badge={cameras.length} badgeTone="neutral" />
                 <NavItem label="Hardware" icon={<Zap size={16} />} active={activeTab === 'health'} onClick={() => setActiveTab('health')} />
+                <NavItem label="Report Requests" icon={<ClipboardList size={16} />} active={activeTab === 'report-requests'} onClick={() => setActiveTab('report-requests')} />
               </>
             )}
             {(currentUser.role === 'PNP_ADMIN' || currentUser.role === 'BARANGAY_ADMIN') && (
@@ -1030,6 +1034,8 @@ const fetchCameras = async (userObj: any) => {
                   )}
                 </div>
               )}
+
+              {activeTab === 'report-requests' && <ReportRequestsView />}
 
               {activeTab === 'manage-users' && <AdminUsersView />}
               {activeTab === 'devteam' && <DevteamView />}
