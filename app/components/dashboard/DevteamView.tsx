@@ -4,7 +4,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import {
   ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
   Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
-  Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus, ChevronDown,
+  Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus,
   Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff, Gauge, Undo2
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -112,8 +112,17 @@ type Tab = 'directory' | 'users' | 'manage_users' | 'approvals' | 'create' | 'ca
 
 const SECTION_TABS: Record<Section, Tab[]> = {
   monitoring: ['directory', 'users', 'cameras', 'models'],
-  configuration: ['manage_users', 'permissions', 'approvals', 'create', 'stations', 'audit'],
+  configuration: ['manage_users', 'create', 'permissions', 'approvals', 'stations', 'audit'],
 };
+
+// 2026-09-29 user request: Configuration's tab order is drag-and-drop
+// reorderable, EXCEPT Manage Users and Create User, which always lead --
+// "first and second is manage users and create users next are the other
+// stuff." CONFIG_TAIL_DEFAULT_ORDER is just the default arrangement of
+// that draggable remainder; the live order lives in configTabOrder state
+// (persisted to localStorage), not here.
+const CONFIG_TAIL_DEFAULT_ORDER: Tab[] = ['permissions', 'approvals', 'stations', 'audit'];
+const CONFIG_TAB_ORDER_STORAGE_KEY = 'devteam_config_tab_order_v1';
 
 type ModelStat = {
   label: string; value: number; unit: string; note?: string; good?: boolean;
@@ -205,6 +214,43 @@ export default function DevteamView() {
   const [section, setSection] = useState<Section>('monitoring');
   const [tab, setTab] = useState<Tab>('directory');
   const switchSection = (s: Section) => { setSection(s); setTab(SECTION_TABS[s][0]); };
+
+  // 2026-09-29: drag-and-drop tab reordering for Configuration's draggable
+  // tail (Permissions/Approvals/Stations/Audit Log) -- Manage Users and
+  // Create User are rendered separately, always first, never draggable.
+  // Persisted per-browser (localStorage) since this is a personal layout
+  // preference, not something that needs to follow the account across
+  // devices. Loaded lazily (useState initializer, not an effect) so the
+  // tab bar never flashes the default order before snapping to a saved one.
+  const [configTabOrder, setConfigTabOrder] = useState<Tab[]>(() => {
+    if (typeof window === "undefined") return CONFIG_TAIL_DEFAULT_ORDER;
+    try {
+      const raw = localStorage.getItem(CONFIG_TAB_ORDER_STORAGE_KEY);
+      if (!raw) return CONFIG_TAIL_DEFAULT_ORDER;
+      const saved: string[] = JSON.parse(raw);
+      // Keep only tabs that still belong in the draggable tail, then
+      // append any tail tab missing from the saved order (a future tab
+      // added after this preference was saved) so nothing silently
+      // disappears from the bar.
+      const valid = saved.filter((t): t is Tab => CONFIG_TAIL_DEFAULT_ORDER.includes(t as Tab));
+      const missing = CONFIG_TAIL_DEFAULT_ORDER.filter(t => !valid.includes(t));
+      return [...valid, ...missing];
+    } catch {
+      return CONFIG_TAIL_DEFAULT_ORDER;
+    }
+  });
+  const [draggedConfigTab, setDraggedConfigTab] = useState<Tab | null>(null);
+
+  const reorderConfigTab = (target: Tab) => {
+    if (!draggedConfigTab || draggedConfigTab === target) return;
+    setConfigTabOrder(prev => {
+      const next = prev.filter(t => t !== draggedConfigTab);
+      const targetIdx = next.indexOf(target);
+      next.splice(targetIdx, 0, draggedConfigTab);
+      try { localStorage.setItem(CONFIG_TAB_ORDER_STORAGE_KEY, JSON.stringify(next)); } catch { /* per-device convenience only */ }
+      return next;
+    });
+  };
   // Separate from `search` (Directory tab's own callsign/location filter) --
   // sharing one box across tabs meant switching tabs silently carried a
   // stale filter over, or typing in one unexpectedly filtered the other.
@@ -249,7 +295,12 @@ export default function DevteamView() {
   const [createPerms, setCreatePerms] = useState<Record<string, boolean>>({});
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
-  const [locPickerOpen, setLocPickerOpen] = useState(false);
+  // 2026-09-29 user request: which cameras this account should see, picked
+  // at creation time instead of a separate trip to the Permissions tab
+  // afterward. Applied as resource_permissions grants once the account
+  // actually exists (there's no user id to grant against until then).
+  const [createCameraGrants, setCreateCameraGrants] = useState<string[]>([]);
+  const [showAddRoleModal, setShowAddRoleModal] = useState(false);
 
   // STATIONS TAB. jurisDraft holds pending edits keyed by station id, so the
   // checkboxes stay responsive and the PUT only fires on Save -- toggling a
@@ -258,6 +309,34 @@ export default function DevteamView() {
   const [newStationName, setNewStationName] = useState('');
   const [stationBusy, setStationBusy] = useState(false);
   const [jurisDraft, setJurisDraft] = useState<Record<string, string[]>>({});
+  // 2026-09-29 user request: "make a barangay" moves here from Create User
+  // -- a new barangay is registered directly under the station covering it,
+  // in one step, instead of existing station-less until someone remembers
+  // to assign one later. Keyed by station id so each card's input is
+  // independent.
+  const [newBarangayDraft, setNewBarangayDraft] = useState<Record<string, string>>({});
+  const [addBarangayBusyId, setAddBarangayBusyId] = useState<string | null>(null);
+
+  const handleAddBarangayToStation = async (stationId: string) => {
+    const raw = (newBarangayDraft[stationId] || '').trim();
+    if (!raw) return;
+    setAddBarangayBusyId(stationId);
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/stations/${stationId}/barangays`, {
+        method: "POST", headers: authHeaders(), body: JSON.stringify({ barangay_id: raw }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        flash(`"${raw}" added to this station's jurisdiction.`);
+        setNewBarangayDraft(prev => ({ ...prev, [stationId]: '' }));
+        fetchOverview();
+      } else flash(d.detail || 'Could not add barangay.');
+    } catch {
+      flash('Backend connection failure.');
+    } finally {
+      setAddBarangayBusyId(null);
+    }
+  };
 
   const handleCreateStation = async () => {
     const name = newStationName.trim();
@@ -454,7 +533,11 @@ export default function DevteamView() {
     finally { setRolesLoaded(true); }
   };
 
-  const createCustomRole = async () => {
+  // onCreated lets a caller (the Create User tab's "+ Add Role" modal) react
+  // to the new role's id -- e.g. auto-selecting it -- without this function
+  // needing to know who's calling it. Optional so the Permissions tab's own
+  // plain "Create role" button is unaffected.
+  const createCustomRole = async (onCreated?: (id: string, name: string) => void) => {
     const name = newRoleForm.name.trim();
     if (!name) return;
     setRoleBusy(true);
@@ -464,8 +547,15 @@ export default function DevteamView() {
         body: JSON.stringify({ name, org_type: newRoleForm.org_type, permissions: newRolePerms }),
       });
       const d = await res.json().catch(() => ({}));
-      if (res.ok) { flash(`Role "${name}" created.`); setNewRoleForm({ name: '', org_type: newRoleForm.org_type }); setNewRolePerms({}); fetchCustomRoles(); }
-      else flash(d.detail || 'Could not create role.');
+      if (res.ok) {
+        flash(`Role "${name}" created.`);
+        setNewRoleForm({ name: '', org_type: newRoleForm.org_type });
+        setNewRolePerms({});
+        fetchCustomRoles();
+        if (onCreated && d.id) onCreated(d.id, name);
+      } else {
+        flash(d.detail || 'Could not create role.');
+      }
     } catch {
       flash('Backend connection failure.');
     } finally {
@@ -847,6 +937,7 @@ export default function DevteamView() {
     setCreateForm({ username: '', password: '', assignment: '', display_title: '', role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '', custom_role_id: '' });
     setCreatePerms({});
     setCreateError('');
+    setCreateCameraGrants([]);
   };
 
   // 2026-09-24 user request: a barangay with no covering station is
@@ -861,6 +952,24 @@ export default function DevteamView() {
     if (!id) return undefined;
     return stations.find(st => st.barangay_ids.includes(id));
   };
+
+  // 2026-09-29 user request: "which camera they should be able to see when
+  // the account is created" -- scoped to what the account being created
+  // could plausibly need: its own barangay's cameras, or every camera in
+  // the selected station's jurisdiction for a PNP role. Empty until enough
+  // of the form is filled in to know which cameras are even relevant.
+  const relevantCamerasForCreate = useMemo(() => {
+    const isPnp = PNP_ROLES.includes(createForm.role);
+    if (isPnp) {
+      const st = stations.find(s => s.id === createForm.station_id);
+      if (!st) return [];
+      const covered = new Set(st.barangay_ids);
+      return cameras.filter(c => covered.has(c.barangay_id));
+    }
+    const bid = createForm.barangay_id.trim().toLowerCase();
+    if (!bid) return [];
+    return cameras.filter(c => c.barangay_id === bid);
+  }, [createForm.role, createForm.station_id, createForm.barangay_id, stations, cameras]);
 
   const handleCreateUser = async () => {
     setCreateError('');
@@ -905,6 +1014,20 @@ export default function DevteamView() {
       });
       const d = await res.json().catch(() => ({}));
       if (res.ok) {
+        // Camera grants (2026-09-29): there's no user id to grant against
+        // until creation actually succeeds, so these fire as a follow-up
+        // batch rather than in the same request. Best-effort -- the account
+        // itself is already created either way; a failed grant here is
+        // fixable from the Permissions tab, not worth rolling back the
+        // whole account creation over.
+        if (createCameraGrants.length > 0 && d.id) {
+          await Promise.all(createCameraGrants.map(camId =>
+            fetch(`${API_URL}/api/devteam/users/${d.id}/resource_permissions`, {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({ permission_key: 'view_map', resource_type: 'camera', resource_id: camId }),
+            })
+          ));
+        }
         flash(`${createForm.username} created (${isPnp ? stations.find(st => st.id === createForm.station_id)?.name ?? createForm.station_id : createForm.barangay_id}).`);
         resetCreateForm();
         fetchOverview();
@@ -1277,28 +1400,48 @@ export default function DevteamView() {
           </>
         ) : (
           <>
+            {/* Fixed, never draggable -- "first and second is manage users
+                and create users." */}
             <TabButton icon={<Users2 size={12} />} label="Manage Users" active={tab === 'manage_users'} onClick={() => setTab('manage_users')} badge={data.users.length} />
-            <TabButton
-              icon={<KeyRound size={12} />}
-              label="Permissions"
-              active={tab === 'permissions'}
-              onClick={() => { setTab('permissions'); if (!rolesLoaded) fetchCustomRoles(); fetchGrantCameras(); }}
-            />
-            <TabButton
-              icon={<ClipboardList size={12} />}
-              label="Approvals"
-              active={tab === 'approvals'}
-              onClick={() => setTab('approvals')}
-              badge={pendingLocations.length + pendingSignups.length}
-            />
             <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
-            <TabButton icon={<Radio size={12} />} label="Stations" active={tab === 'stations'} onClick={() => setTab('stations')} badge={stations.length} />
-            <TabButton
-              icon={<Undo2 size={12} />}
-              label="Audit Log"
-              active={tab === 'audit'}
-              onClick={() => { setTab('audit'); fetchAuditLog(auditActionFilter || undefined); }}
-            />
+
+            {/* Drag-and-drop reorderable tail (2026-09-29). Native HTML5 DnD
+                directly on each tab button -- no added handle/icon, no
+                separate "customize order" control, just the arrangement
+                itself. Order persists per-browser (configTabOrder). */}
+            {configTabOrder.map(t => {
+              const def: { icon: React.ReactNode; label: string; onClick: () => void; badge?: number } | null =
+                t === 'permissions' ? {
+                  icon: <KeyRound size={12} />, label: 'Permissions',
+                  onClick: () => { setTab('permissions'); if (!rolesLoaded) fetchCustomRoles(); fetchGrantCameras(); },
+                } : t === 'approvals' ? {
+                  icon: <ClipboardList size={12} />, label: 'Approvals',
+                  onClick: () => setTab('approvals'),
+                  badge: pendingLocations.length + pendingSignups.length,
+                } : t === 'stations' ? {
+                  icon: <Radio size={12} />, label: 'Stations',
+                  onClick: () => setTab('stations'),
+                  badge: stations.length,
+                } : t === 'audit' ? {
+                  icon: <Undo2 size={12} />, label: 'Audit Log',
+                  onClick: () => { setTab('audit'); fetchAuditLog(auditActionFilter || undefined); },
+                } : null;
+              if (!def) return null;
+              return (
+                <div
+                  key={t}
+                  draggable
+                  onDragStart={() => setDraggedConfigTab(t)}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={() => reorderConfigTab(t)}
+                  onDragEnd={() => setDraggedConfigTab(null)}
+                  className={`cursor-move transition-opacity ${draggedConfigTab === t ? 'opacity-30' : ''}`}
+                  title="Drag to reorder"
+                >
+                  <TabButton icon={def.icon} label={def.label} active={tab === t} onClick={def.onClick} badge={def.badge} />
+                </div>
+              );
+            })}
           </>
         )}
       </div>
@@ -1646,7 +1789,7 @@ export default function DevteamView() {
               </div>
 
               <button
-                onClick={createCustomRole}
+                onClick={() => createCustomRole()}
                 disabled={roleBusy || !newRoleForm.name.trim()}
                 className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
               >
@@ -1804,9 +1947,17 @@ export default function DevteamView() {
       )}
 
       {/* ================= CREATE USER TAB ================= */}
+      {/* 2026-09-29 user request: full-width two-column layout -- identity
+          and location on the left, role/access assignment (custom role,
+          base permissions, camera-level access) on the right, instead of a
+          single narrow centered column that left most of the tab's width
+          empty. Barangay is now a required pick from EXISTING barangays
+          only -- creating a new one moved to the Stations tab (see its own
+          2026-09-29 note) so a barangay can never again end up with no
+          police coverage the way typing a fresh id here used to risk. */}
       {tab === 'create' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
-          <div className="max-w-2xl border border-[var(--line)] p-6">
+          <div className="border border-[var(--line)] p-6">
             <div className="flex items-center gap-2 mb-1">
               <UserPlus size={13} className="text-[var(--accent)]" />
               <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Create account — any role</h2>
@@ -1815,7 +1966,7 @@ export default function DevteamView() {
               Skips the self-signup approval queue. Connects the account to a location and grants permissions from the same tree admins use.
             </p>
 
-            <div className="grid grid-cols-2 gap-3 mb-4">
+            <div className="grid grid-cols-4 gap-3 mb-6">
               {CREATABLE_ROLES.map(r => {
                 const active = createForm.role === r.role;
                 const style = ROLE_STYLES[r.role];
@@ -1832,182 +1983,290 @@ export default function DevteamView() {
               })}
             </div>
 
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <FieldInput label="Username" value={createForm.username} onChange={(v: string) => setCreateForm({ ...createForm, username: v })} />
-              <FieldInput label="Password" type="password" value={createForm.password} onChange={(v: string) => setCreateForm({ ...createForm, password: v })} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <FieldInput label="Assignment" value={createForm.assignment} onChange={(v: string) => setCreateForm({ ...createForm, assignment: v })} placeholder="e.g. Patrol Unit 3" />
-              <FieldInput label="Display title (optional)" value={createForm.display_title} onChange={(v: string) => setCreateForm({ ...createForm, display_title: v })} placeholder="e.g. Assistant Captain" />
-            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
 
-            {/* Scope field follows the role's organization. PNP accounts are
-                scoped to a station's jurisdiction, barangay accounts to a
-                single barangay -- the DB's chk_user_scope rejects the wrong
-                combination, so offering both at once would just produce a
-                confusing 400. */}
-            {PNP_ROLES.includes(createForm.role) ? (
-              <div className="mb-3">
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                  Police station — this account sees every barangay in its jurisdiction
-                </label>
-                <select
-                  value={createForm.station_id}
-                  onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                >
-                  <option value="">
-                    {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
-                  </option>
-                  {stations.map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.barangay_ids.length} barangay{s.barangay_ids.length === 1 ? '' : 's'})
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ) : (
-              <div className="mb-3 relative">
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Barangay — this account is scoped to exactly this one</label>
-                <button
-                  type="button"
-                  onClick={() => setLocPickerOpen(o => !o)}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none flex items-center justify-between transition-colors"
-                >
-                  <span className={createForm.barangay_id ? '' : 'text-[var(--text-3)]'}>{createForm.barangay_id || 'select or type a barangay id'}</span>
-                  <ChevronDown size={12} className="text-[var(--text-2)]" />
-                </button>
-                <input
-                  value={createForm.barangay_id}
-                  onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
-                  placeholder="type to create a new barangay id, e.g. 'cogon'"
-                  className="w-full mt-2 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                />
-                {locPickerOpen && knownLocationIds.length > 0 && (
-                  <div className="mt-1 border border-[var(--line)] bg-[var(--panel)] max-h-32 overflow-y-auto custom-scrollbar">
-                    {knownLocationIds.map(loc => (
-                      <button
-                        key={loc}
-                        onClick={() => { setCreateForm({ ...createForm, barangay_id: loc }); setLocPickerOpen(false); }}
-                        className="w-full text-left px-3 py-1.5 text-[10px] text-[var(--text)] hover:bg-[var(--panel-2)] hover:text-[var(--text)] transition-colors"
-                      >
-                        {loc}
-                      </button>
-                    ))}
+              {/* LEFT — identity and location */}
+              <div>
+                <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-3">Identity</div>
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <FieldInput label="Username" value={createForm.username} onChange={(v: string) => setCreateForm({ ...createForm, username: v })} />
+                  <FieldInput label="Password" type="password" value={createForm.password} onChange={(v: string) => setCreateForm({ ...createForm, password: v })} />
+                </div>
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <FieldInput label="Assignment" value={createForm.assignment} onChange={(v: string) => setCreateForm({ ...createForm, assignment: v })} placeholder="e.g. Patrol Unit 3" />
+                  <FieldInput label="Display title (optional)" value={createForm.display_title} onChange={(v: string) => setCreateForm({ ...createForm, display_title: v })} placeholder="e.g. Assistant Captain" />
+                </div>
+
+                {/* Scope field follows the role's organization. PNP accounts
+                    are scoped to a station's jurisdiction, barangay
+                    accounts to a single barangay -- the DB's chk_user_scope
+                    rejects the wrong combination, so offering both at once
+                    would just produce a confusing 400. */}
+                {PNP_ROLES.includes(createForm.role) ? (
+                  <div className="mb-3">
+                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                      Police station — this account sees every barangay in its jurisdiction
+                    </label>
+                    <select
+                      value={createForm.station_id}
+                      onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                    >
+                      <option value="">
+                        {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
+                      </option>
+                      {stations.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.barangay_ids.length} barangay{s.barangay_ids.length === 1 ? '' : 's'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div className="mb-3">
+                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Barangay — this account is scoped to exactly this one</label>
+                    <select
+                      value={createForm.barangay_id}
+                      onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                    >
+                      <option value="">
+                        {knownLocationIds.length ? 'select a barangay…' : 'no barangays yet — register one in the Stations tab'}
+                      </option>
+                      {knownLocationIds.map(loc => (
+                        <option key={loc} value={loc}>{loc}</option>
+                      ))}
+                    </select>
+
+                    {/* Police jurisdiction (2026-09-24) -- auto-resolved and
+                        shown read-only when this barangay already has a
+                        covering station; a required picker only when it
+                        doesn't (a self-signup barangay awaiting review,
+                        typically), so this barangay never silently ends up
+                        with no police coverage. */}
+                    {createForm.barangay_id.trim() && (
+                      coveringStationFor(createForm.barangay_id) ? (
+                        <p className="mt-2 text-[9px] leading-relaxed text-[var(--text-3)]">
+                          Covered by <span className="text-[var(--text-2)]">{coveringStationFor(createForm.barangay_id)!.name}</span> — already assigned, nothing to pick.
+                        </p>
+                      ) : (
+                        <div className="mt-2">
+                          <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
+                            Police station — this barangay has no jurisdiction assigned yet, pick one
+                          </label>
+                          <select
+                            value={createForm.station_id}
+                            onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
+                            className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                          >
+                            <option value="">
+                              {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
+                            </option>
+                            {stations.map(s => (
+                              <option key={s.id} value={s.id}>{s.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )
+                    )}
                   </div>
                 )}
 
-                {/* Police jurisdiction (2026-09-24) -- auto-resolved and
-                    shown read-only when this barangay already has a
-                    covering station; a required picker only when it
-                    doesn't, so this barangay never silently ends up with
-                    no police coverage the way it used to. */}
-                {createForm.barangay_id.trim() && (
-                  coveringStationFor(createForm.barangay_id) ? (
-                    <p className="mt-2 text-[9px] leading-relaxed text-[var(--text-3)]">
-                      Covered by <span className="text-[var(--text-2)]">{coveringStationFor(createForm.barangay_id)!.name}</span> — already assigned, nothing to pick.
-                    </p>
-                  ) : (
-                    <div className="mt-2">
-                      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                        Police station — this barangay has no jurisdiction assigned yet, pick one
-                      </label>
-                      <select
-                        value={createForm.station_id}
-                        onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
-                        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                      >
-                        <option value="">
-                          {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
-                        </option>
-                        {stations.map(s => (
-                          <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  )
+                {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
+                  <div className="mb-3">
+                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Reports to (optional — auto-attaches to the location's captain if left blank)</label>
+                    <select
+                      value={createForm.parent_admin_id}
+                      onChange={e => setCreateForm({ ...createForm, parent_admin_id: e.target.value })}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                    >
+                      <option value="">Auto-attach to location captain</option>
+                      {eligibleParents.map(p => (
+                        <option key={p.id} value={p.id}>{p.username} ({p.role})</option>
+                      ))}
+                    </select>
+                  </div>
                 )}
               </div>
-            )}
 
-            {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
-              <div className="mb-4">
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Reports to (optional — auto-attaches to the location's captain if left blank)</label>
-                <select
-                  value={createForm.parent_admin_id}
-                  onChange={e => setCreateForm({ ...createForm, parent_admin_id: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                >
-                  <option value="">Auto-attach to location captain</option>
-                  {eligibleParents.map(p => (
-                    <option key={p.id} value={p.id}>{p.username} ({p.role})</option>
-                  ))}
-                </select>
-              </div>
-            )}
+              {/* RIGHT — role & access assignment */}
+              <div>
+                <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-3">Role &amp; access</div>
 
-            {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
-              <div className="mb-4">
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                  Custom role (optional — sets a display title and pre-applies its permissions)
-                </label>
-                <select
-                  value={createForm.custom_role_id}
-                  onChange={e => setCreateForm({ ...createForm, custom_role_id: e.target.value })}
-                  onFocus={() => { if (!rolesLoaded) fetchCustomRoles(); }}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                >
-                  <option value="">No custom role — plain {createForm.role === 'PNP_OFFICER' ? 'PNP Officer' : 'Barangay Staff'}</option>
-                  {customRoles
-                    .filter(r => r.org_type === (createForm.role === 'PNP_OFFICER' ? 'police' : 'barangay'))
-                    .map(r => (
-                      <option key={r.id} value={r.id}>{r.name}</option>
+                {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] block">
+                        Custom role (optional — sets a display title and pre-applies its permissions)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewRoleForm({ name: '', org_type: createForm.role === 'PNP_OFFICER' ? 'police' : 'barangay' });
+                          setNewRolePerms({});
+                          setShowAddRoleModal(true);
+                        }}
+                        className="text-[9px] tracking-[0.1em] uppercase text-[var(--accent)] hover:opacity-80 transition-opacity shrink-0"
+                      >
+                        + Add role
+                      </button>
+                    </div>
+                    <select
+                      value={createForm.custom_role_id}
+                      onChange={e => setCreateForm({ ...createForm, custom_role_id: e.target.value })}
+                      onFocus={() => { if (!rolesLoaded) fetchCustomRoles(); }}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                    >
+                      <option value="">No custom role — plain {createForm.role === 'PNP_OFFICER' ? 'PNP Officer' : 'Barangay Staff'}</option>
+                      {customRoles
+                        .filter(r => r.org_type === (createForm.role === 'PNP_OFFICER' ? 'police' : 'barangay'))
+                        .map(r => (
+                          <option key={r.id} value={r.id}>{r.name}</option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className="mb-4">
+                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
+                    <KeyRound size={10} /> Permissions — same tree used everywhere else
+                  </div>
+                  {permissionNoteFor(createForm.role) && (
+                    <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(createForm.role)}</p>
+                  )}
+                  <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
+                    {permissionRowsFor(createForm.role).map(p => (
+                      <label
+                        key={p.key}
+                        title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
+                        className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
+                      >
+                        <span className="text-[10px] text-[var(--text)]">
+                          {p.label}
+                          {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
+                          {p.status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!createPerms[p.key]}
+                          disabled={p.status !== 'editable'}
+                          onChange={e => setCreatePerms({ ...createPerms, [p.key]: e.target.checked })}
+                          className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
+                        />
+                      </label>
                     ))}
-                </select>
-              </div>
-            )}
+                  </div>
+                </div>
 
-            <div className="mb-5 pt-4 border-t border-[var(--panel-2)]">
-              <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
-                <KeyRound size={10} /> Permissions — same tree used everywhere else
-              </div>
-              {permissionNoteFor(createForm.role) && (
-                <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(createForm.role)}</p>
-              )}
-              <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                {permissionRowsFor(createForm.role).map(p => (
-                  <label
-                    key={p.key}
-                    title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
-                    className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
-                  >
-                    <span className="text-[10px] text-[var(--text)]">
-                      {p.label}
-                      {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
-                      {p.status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!createPerms[p.key]}
-                      disabled={p.status !== 'editable'}
-                      onChange={e => setCreatePerms({ ...createPerms, [p.key]: e.target.checked })}
-                      className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
-                    />
-                  </label>
-                ))}
+                {/* Camera-level access (2026-09-29): picked here instead of
+                    a separate trip to the Permissions tab after creation.
+                    Only shows once enough of the left column is filled in
+                    to know which cameras are even relevant -- see
+                    relevantCamerasForCreate. Leaving nothing checked means
+                    the account sees every camera its role/org already
+                    allows, same "opt-in only" rule as the Permissions tab. */}
+                <div>
+                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
+                    <Video size={10} /> Camera-level access (optional)
+                  </div>
+                  {relevantCamerasForCreate.length === 0 ? (
+                    <p className="text-[9px] leading-relaxed text-[var(--text-3)] border border-[var(--panel-2)] px-3 py-2.5">
+                      {PNP_ROLES.includes(createForm.role)
+                        ? 'Pick a station to see its cameras here.'
+                        : 'Pick a barangay to see its cameras here.'}
+                    </p>
+                  ) : (
+                    <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] max-h-40 overflow-y-auto custom-scrollbar">
+                      {relevantCamerasForCreate.map(c => (
+                        <label key={c.id} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel)] transition-colors">
+                          <span className="text-[10px] text-[var(--text)] truncate">{c.name} <span className="text-[var(--text-3)]">({c.barangay_id})</span></span>
+                          <input
+                            type="checkbox"
+                            checked={createCameraGrants.includes(c.id)}
+                            onChange={e => setCreateCameraGrants(prev => e.target.checked ? [...prev, c.id] : prev.filter(id => id !== c.id))}
+                            className="w-3.5 h-3.5 accent-[var(--accent)] shrink-0"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  {createCameraGrants.length > 0 && (
+                    <p className="text-[9px] mt-1.5 text-[var(--text-3)]">
+                      Restricted to {createCameraGrants.length} camera{createCameraGrants.length === 1 ? '' : 's'} — nothing else.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
 
             {createError && (
-              <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide mb-3">{createError}</p>
+              <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide mt-5">{createError}</p>
             )}
 
             <button
               onClick={handleCreateUser}
               disabled={createBusy}
-              className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+              className="w-full mt-5 py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
             >
               <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* "+ ADD ROLE" MODAL -- opened from the Create User tab's custom-role
+          picker so a new role can be defined without leaving the account-
+          creation flow. Same fields as the Permissions tab's own role
+          form, reusing the same state (newRoleForm/newRolePerms) and
+          createCustomRole -- just auto-selects the result into createForm
+          on success instead of leaving it for a separate pick later. */}
+      {showAddRoleModal && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-sm p-5 max-h-[85vh] overflow-y-auto custom-scrollbar font-mono">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-[var(--panel-2)]">
+              <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">New custom role</span>
+              <button onClick={() => setShowAddRoleModal(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <FieldInput label="Role name" value={newRoleForm.name} onChange={(v: string) => setNewRoleForm({ ...newRoleForm, name: v })} placeholder="e.g. Gate Monitor" />
+              <div>
+                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Applies to</label>
+                <select
+                  value={newRoleForm.org_type}
+                  onChange={e => { setNewRoleForm({ ...newRoleForm, org_type: e.target.value as 'barangay' | 'police' }); setNewRolePerms({}); }}
+                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+                >
+                  <option value="barangay">Barangay Staff</option>
+                  <option value="police">PNP Officer</option>
+                </select>
+              </div>
+            </div>
+            <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] mb-4">
+              {permissionRowsFor(newRoleForm.org_type === 'police' ? 'PNP_OFFICER' : 'BARANGAY_STAFF').map(p => (
+                <label
+                  key={p.key}
+                  className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
+                >
+                  <span className="text-[10px] text-[var(--text)]">
+                    {p.label}
+                    {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={p.status === 'editable' ? !!newRolePerms[p.key] : false}
+                    disabled={p.status !== 'editable'}
+                    onChange={e => setNewRolePerms({ ...newRolePerms, [p.key]: e.target.checked })}
+                    className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
+                  />
+                </label>
+              ))}
+            </div>
+            <button
+              onClick={() => createCustomRole((id) => { setCreateForm(prev => ({ ...prev, custom_role_id: id })); setShowAddRoleModal(false); })}
+              disabled={roleBusy || !newRoleForm.name.trim()}
+              className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+            >
+              <Save size={12} /> {roleBusy ? 'Saving…' : 'Create & select'}
             </button>
           </div>
         </div>
@@ -2090,6 +2349,29 @@ export default function DevteamView() {
                 </div>
 
                 <div className="p-4">
+                  {/* 2026-09-29: registering a NEW barangay happens here now,
+                      directly under the station that will cover it, instead
+                      of in Create User. */}
+                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
+                    Register a barangay under this station
+                  </div>
+                  <div className="flex items-end gap-2 mb-4">
+                    <input
+                      value={newBarangayDraft[st.id] || ''}
+                      onChange={e => setNewBarangayDraft(prev => ({ ...prev, [st.id]: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') handleAddBarangayToStation(st.id); }}
+                      placeholder="e.g. cogon"
+                      className="flex-1 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
+                    />
+                    <button
+                      onClick={() => handleAddBarangayToStation(st.id)}
+                      disabled={!newBarangayDraft[st.id]?.trim() || addBarangayBusyId === st.id}
+                      className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90"
+                    >
+                      Add
+                    </button>
+                  </div>
+
                   <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
                     Jurisdiction — barangays this station can see
                   </div>

@@ -3011,6 +3011,10 @@ class StationSchema(BaseModel):
 class StationJurisdictionSchema(BaseModel):
     barangay_ids: List[str]
 
+class StationBarangayCreate(BaseModel):
+    barangay_id: str
+    name: Optional[str] = None
+
 
 @app.get("/api/devteam/stations")
 async def list_stations(authorization: Optional[str] = Header(None)):
@@ -3099,6 +3103,55 @@ async def set_station_jurisdiction(station_id: str, data: StationJurisdictionSch
 
     await manager.broadcast({"channel": "stations", "event": "jurisdiction_updated", "id": station_id})
     return {"status": "updated", "id": station_id, "barangay_ids": wanted}
+
+
+# 2026-09-29 user request: registering a NEW barangay used to happen inside
+# Create User (typing a fresh barangay_id there silently created it) -- a
+# barangay made that way had no station connection at all until DevTeam
+# separately remembered to visit this tab and check it into a jurisdiction
+# (see devteam_create_user's own 2026-09-24 fix for the bug that caused).
+# Moved here instead: a station's own tab is where a NEW barangay is
+# registered now, and it's assigned to THIS station's jurisdiction in the
+# same step -- there's no longer a path that creates a barangay with no
+# station at all. devteam_create_user's barangay branch now REJECTS an
+# unknown barangay_id rather than silently making one.
+@app.post("/api/devteam/stations/{station_id}/barangays")
+async def create_barangay_for_station(station_id: str, body: StationBarangayCreate, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (station_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Station not found")
+
+        barangay_id = body.barangay_id.strip().lower()
+        if not barangay_id:
+            raise HTTPException(status_code=400, detail="Barangay id is required")
+
+        cursor.execute("SELECT status FROM barangays WHERE id = ?", (barangay_id,))
+        existing = cursor.fetchone()
+        if existing:
+            if existing["status"] != "approved":
+                cursor.execute(
+                    "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
+                    (payload["id"], barangay_id),
+                )
+        else:
+            cursor.execute(
+                "INSERT INTO barangays (id, name, status, approved_by, approved_at) VALUES (?, ?, 'approved', ?, NOW())",
+                (barangay_id, (body.name or barangay_id).strip().title(), payload["id"]),
+            )
+
+        cursor.execute("SELECT 1 FROM station_barangays WHERE station_id = ? AND barangay_id = ?", (station_id, barangay_id))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO station_barangays (station_id, barangay_id) VALUES (?, ?)", (station_id, barangay_id))
+        conn.commit()
+        await manager.broadcast({"channel": "stations", "event": "jurisdiction_updated", "id": station_id})
+        return {"status": "created", "barangay_id": barangay_id}
+    finally:
+        conn.close()
 
 
 @app.delete("/api/devteam/stations/{station_id}")
@@ -3417,13 +3470,20 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             station_id = ""
             cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
             existing_barangay = cursor.fetchone()
+            # BUG FOUND 2026-09-29 (user request): this used to silently
+            # create a brand-new barangay row right here -- "make a
+            # barangay" doesn't belong in account creation, it belongs in
+            # the Stations tab, where the barangay is registered directly
+            # under the station covering it (POST .../stations/{id}/
+            # barangays) instead of drifting station-less until someone
+            # remembers to assign one. An unknown barangay_id here is now a
+            # hard error pointing at where to actually register it.
             if not existing_barangay:
-                cursor.execute(
-                    "INSERT INTO barangays (id, name, status, approved_by, approved_at) "
-                    "VALUES (?, ?, 'approved', ?, NOW())",
-                    (barangay_id, barangay_id.title(), payload["id"]),
-                )
-            elif existing_barangay["status"] != "approved":
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown barangay '{barangay_id}' -- register it from the Stations tab first.")
+            if existing_barangay["status"] != "approved":
                 # BUG FOUND 2026-09-02 (full account sweep): only the brand-new
                 # case was ever promoted to 'approved' -- a barangay_id that
                 # already existed as 'pending' or 'rejected' (an old self-signup
