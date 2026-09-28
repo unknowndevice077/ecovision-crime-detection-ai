@@ -791,6 +791,29 @@ def _migrate_schema(conn, cursor):
     # admin account.
     _ensure_column(conn, cursor, "users", "signup_status", "TEXT DEFAULT 'approved'")
 
+    # 2026-09-29: descriptive records for stations and barangays, entered
+    # through the DevTeam "Add station"/"Add barangay" forms. Field set
+    # follows the real PNP hierarchy (Regional Office -> City/Provincial
+    # Police Office -> station) and PSA's 10-digit PSGC barangay code.
+    for col in ("station_type", "parent_office", "regional_office", "commander",
+                "address", "contact_number", "description"):
+        _ensure_column(conn, cursor, "police_stations", col, "TEXT")
+    for col in ("psgc_code", "city_municipality", "province", "region", "captain_name",
+                "hall_address", "contact_number", "description"):
+        _ensure_column(conn, cursor, "barangays", col, "TEXT")
+
+    # AI report drafts: ai_context is the detector's own metadata for an
+    # AI-triggered incident (detector, people in frame, weapons), JSON. An
+    # incident_reports row is now a structured, officer-edited report:
+    # ai_draft is the machine draft exactly as generated at filing time,
+    # report_body the officer's edited version -- both kept so a reviewer
+    # can see what the officer changed.
+    _ensure_column(conn, cursor, "incident_details", "ai_context", "TEXT")
+    _ensure_column(conn, cursor, "incident_reports", "ai_draft", "TEXT")
+    _ensure_column(conn, cursor, "incident_reports", "report_body", "TEXT")
+    _ensure_column(conn, cursor, "incident_reports", "report_status", "TEXT DEFAULT 'confirmed'")
+    _ensure_column(conn, cursor, "incident_reports", "updated_at", "TEXT")
+
 
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
     """Writes one audit_log row. Never raises -- an audit-trail failure must
@@ -1309,6 +1332,10 @@ class AiTriggerSchema(BaseModel):
     # /api/ai_trigger test) doesn't break; the incident just has no camera
     # link, same as before this existed.
     camera_id: Optional[str] = None
+    # Detector metadata for the AI report draft: detector, attribution,
+    # people_in_frame, track_id, weapons [{name, conf}]. Free-form on purpose
+    # so the AI core can add keys without a backend release.
+    context: Optional[dict] = None
 
 class PanicSchema(BaseModel):
     event: str
@@ -2051,6 +2078,254 @@ async def add_incident(incident: IncidentSchema, authorization: Optional[str] = 
     finally:
         conn.close()
 
+# --- AI REPORT DRAFTS ---
+# There is no language model in this stack: the "AI report" is assembled
+# from what the detectors and evidence files actually recorded (event,
+# model, confidence, people in frame, weapons, measured scene brightness,
+# evidence hashes), phrased as a police blotter narrative. Every statement
+# traces back to a stored value, and the draft says plainly that an
+# officer has to verify it before it becomes the official report.
+
+AI_EVENT_PHRASES = {
+    "ASSAULT": "a suspected physical assault",
+    "ARMED THREAT": "a person carrying or brandishing a suspected weapon",
+    "ROBBERY": "a suspected robbery",
+    "VANDALISM": "suspected vandalism / damage to property",
+    "PHYSICAL VIOLENCE": "suspected physical violence",
+    "THEFT": "a suspected theft",
+    "HARDWARE_PANIC_INTERRUPT": "a manual panic-button activation on the smartpole",
+}
+
+AI_RECOMMENDED_ACTIONS = {
+    "ARMED THREAT": "Dispatch the nearest mobile patrol immediately and approach as an armed-subject call. Secure the area and preserve the camera footage.",
+    "ROBBERY": "Dispatch a patrol unit to the scene, identify and interview the complainant, and canvass for other CCTV along likely escape routes.",
+    "ASSAULT": "Dispatch a patrol unit to the scene, check for injured persons and arrange medical assistance, and identify the parties involved.",
+    "PHYSICAL VIOLENCE": "Dispatch a patrol unit to the scene, check for injured persons and arrange medical assistance, and identify the parties involved.",
+    "VANDALISM": "Coordinate with the barangay to document the damage and identify the property owner; review footage for identifiable subjects.",
+    "HARDWARE_PANIC_INTERRUPT": "Contact the barangay tanod on duty and dispatch the nearest unit to the smartpole to check on the person who pressed the panic button.",
+}
+
+NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+
+
+def _confidence_band(conf: Optional[float]) -> str:
+    if conf is None:
+        return "unknown"
+    if conf >= 0.85:
+        return "high"
+    if conf >= 0.65:
+        return "moderate"
+    return "low"
+
+
+def _time_of_day(hhmmss: str) -> str:
+    try:
+        h = int(str(hhmmss).replace(":", "")[:2])
+    except ValueError:
+        return "unknown"
+    if 5 <= h < 11:
+        return "morning"
+    if 11 <= h < 14:
+        return "midday"
+    if 14 <= h < 18:
+        return "afternoon"
+    if 18 <= h < 21:
+        return "evening"
+    return "night"
+
+
+def _format_12h(hhmmss: str) -> str:
+    digits = str(hhmmss).replace(":", "")[:4]
+    try:
+        return datetime.strptime(digits, "%H%M").strftime("%I:%M %p").lstrip("0")
+    except ValueError:
+        return str(hhmmss)
+
+
+def _scene_lighting(screenshot_url: Optional[str]) -> Optional[dict]:
+    """Mean brightness (HSV value channel) of the evidence frame itself."""
+    if not screenshot_url or screenshot_url.startswith("http"):
+        return None
+    img = cv2.imread(os.path.join(SCREENSHOTS_DIR, os.path.basename(screenshot_url)))
+    if img is None:
+        return None
+    v = float(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 2].mean())
+    if v >= 140:
+        label = "well lit (daylight or strong lighting)"
+    elif v >= 80:
+        label = "moderately lit (dusk or artificial lighting)"
+    else:
+        label = "poorly lit (night / low light)"
+    return {"label": label, "brightness": round(v, 1)}
+
+
+def _people_phrase(n: int) -> str:
+    word = NUMBER_WORDS[n] if 0 <= n < len(NUMBER_WORDS) else str(n)
+    return f"{word.capitalize()} ({n}) person{'s were' if n != 1 else ' was'}"
+
+
+def build_ai_report_draft(cursor, incident_id: str) -> Optional[dict]:
+    cursor.execute(
+        """SELECT i.*, d.narrative AS d_narrative, d.ai_context, v.screenshot_path, v.screenshot_sha256,
+                  c.name AS camera_name, b.name AS barangay_name, b.city_municipality, b.province
+           FROM incidents i
+           LEFT JOIN incident_details d ON d.incident_id = i.id
+           LEFT JOIN incident_visibility v ON v.incident_id = i.id
+           LEFT JOIN cameras c ON c.id = i.camera_id
+           LEFT JOIN barangays b ON b.id = i.barangay_id
+           WHERE i.id = ?""",
+        (incident_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    inc = dict(row)
+    try:
+        ctx = json.loads(inc.get("ai_context") or "{}") or {}
+    except (TypeError, ValueError):
+        ctx = {}
+
+    cursor.execute(
+        """SELECT s.name FROM station_barangays sb JOIN police_stations s ON s.id = sb.station_id
+           WHERE sb.barangay_id = ? ORDER BY s.name LIMIT 1""",
+        (inc.get("barangay_id"),),
+    )
+    st = cursor.fetchone()
+    station_name = st["name"] if st else None
+
+    cursor.execute(
+        "SELECT filename, duration, sha256, recorded_at FROM video_records WHERE associated_incident_id = ? ORDER BY recorded_at",
+        (incident_id,),
+    )
+    clips = [dict(r) for r in cursor.fetchall()]
+
+    event = (inc.get("type") or "UNKNOWN").upper()
+    conf = inc.get("confidence")
+    band = _confidence_band(conf)
+    tod = _time_of_day(inc.get("occurred_time") or "")
+    lighting = _scene_lighting(inc.get("screenshot_path"))
+    people = ctx.get("people_in_frame")
+    weapons = [w for w in (ctx.get("weapons") or []) if isinstance(w, dict) and w.get("name")]
+    detector = ctx.get("detector")
+    source = inc.get("source") or "MANUAL"
+
+    place_bits = [inc.get("camera_name") or inc.get("location_name") or "an unnamed camera location"]
+    if inc.get("barangay_name"):
+        place_bits.append(f"Barangay {inc['barangay_name']}")
+    if inc.get("city_municipality"):
+        place_bits.append(inc["city_municipality"])
+    place = ", ".join(place_bits)
+    when = f"{inc.get('occurred_date')} at approximately {_format_12h(inc.get('occurred_time') or '')} ({tod})"
+    what = AI_EVENT_PHRASES.get(event, f"a suspected {event.lower()} incident")
+
+    paras = []
+    if source == "HARDWARE_PANIC":
+        paras.append(f"On {when}, {what} was recorded at {place}. No AI model was involved in raising this alert.")
+    elif source == "AI_AUTOMATION":
+        s = f"On {when}, the EcoVision AI surveillance system flagged {what} at {place}."
+        if conf is not None:
+            s += f" The alert was raised{f' by the {detector}' if detector else ''} with {round(conf * 100)}% confidence ({band})."
+        paras.append(s)
+    else:
+        paras.append(f"On {when}, {what} was filed manually by an operator for {place}.")
+
+    obs = []
+    if isinstance(people, int):
+        obs.append(f"{_people_phrase(people)} in the camera's field of view at the time of detection.")
+    attribution = ctx.get("attribution")
+    if attribution == "track" and ctx.get("track_id") is not None:
+        obs.append(f"The alert was attributed to tracked person #{ctx['track_id']}.")
+    elif attribution == "scene":
+        obs.append("The alert was raised on the scene as a whole; the system could not attribute it to one specific person.")
+    if weapons:
+        obs.append("Suspected weapon(s) detected: " + ", ".join(
+            f"{w['name']} ({round(float(w.get('conf', 0)) * 100)}%)" for w in weapons) + ".")
+    elif source == "AI_AUTOMATION" and event != "ARMED THREAT" and ctx:
+        obs.append("No weapon was detected.")
+    if lighting:
+        obs.append(f"Analysis of the evidence frame indicates the scene was {lighting['label']}.")
+    if obs:
+        paras.append(" ".join(obs))
+
+    ev = []
+    if inc.get("screenshot_path"):
+        h = inc.get("screenshot_sha256")
+        ev.append(f"A still frame was captured at the moment of detection{f' (SHA-256 {h[:16]}…)' if h else ''}.")
+    for c in clips:
+        line = f"Video clip {c['filename']}"
+        if c.get("duration"):
+            line += f" ({c['duration']})"
+        line += " is on file"
+        if c.get("sha256"):
+            line += f" (SHA-256 {c['sha256'][:16]}…)"
+        ev.append(line + ".")
+    if ev:
+        paras.append(" ".join(ev))
+
+    paras.append(
+        "This narrative was generated automatically from sensor and model output and has not been verified. "
+        "The reporting officer must review the footage, confirm or correct each statement, and add the "
+        "complainant, victim, witness and suspect information gathered on scene.")
+
+    if weapons:
+        suspect = "Subject seen with suspected " + ", ".join(w["name"] for w in weapons) + ". Physical description to be completed by the responding officer from the footage."
+    elif attribution == "track" and ctx.get("track_id") is not None:
+        suspect = f"Tracked person #{ctx['track_id']} in the footage. Physical description to be completed by the responding officer."
+    else:
+        suspect = "Unidentified. To be completed by the responding officer from the footage and witness accounts."
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "incident_type": event,
+        "severity": inc.get("severity"),
+        "occurred_date": inc.get("occurred_date"),
+        "occurred_time": inc.get("occurred_time"),
+        "time_of_day": tod,
+        "location": {
+            "camera_name": inc.get("camera_name") or inc.get("location_name"),
+            "camera_id": inc.get("camera_id"),
+            "barangay": inc.get("barangay_name") or inc.get("barangay_id"),
+            "city_municipality": inc.get("city_municipality"),
+            "province": inc.get("province"),
+            "station": station_name,
+        },
+        "detection": {
+            "source": source,
+            "detector": detector,
+            "confidence": conf,
+            "confidence_band": band,
+            "people_in_frame": people,
+            "attribution": attribution,
+            "track_id": ctx.get("track_id"),
+            "weapons": weapons,
+        },
+        "scene": {"lighting": lighting["label"] if lighting else None,
+                  "brightness": lighting["brightness"] if lighting else None},
+        "evidence": {
+            "snapshot": inc.get("screenshot_path"),
+            "snapshot_sha256": inc.get("screenshot_sha256"),
+            "clips": clips,
+        },
+        "narrative": "\n\n".join(paras),
+        "suspect_description": suspect,
+        "recommended_action": AI_RECOMMENDED_ACTIONS.get(event, "Dispatch a patrol unit to verify the incident on scene."),
+    }
+
+
+def _ai_one_liner(event: str, conf: float, location_name: Optional[str], ctx: dict) -> str:
+    what = AI_EVENT_PHRASES.get((event or "").upper(), f"a suspected {(event or 'unknown').lower()} incident")
+    s = f"AI flagged {what} at {location_name or 'an unnamed camera'} ({round((conf or 0) * 100)}% confidence"
+    if ctx.get("detector"):
+        s += f", {ctx['detector']}"
+    s += ")."
+    if isinstance(ctx.get("people_in_frame"), int):
+        s += f" {ctx['people_in_frame']} person(s) in view."
+    weapons = [w.get("name") for w in (ctx.get("weapons") or []) if isinstance(w, dict) and w.get("name")]
+    if weapons:
+        s += f" Weapon: {', '.join(weapons)}."
+    return s
+
+
 @app.post("/api/ai_trigger")
 async def ai_trigger(data: AiTriggerSchema):
     # Deliberately NOT behind require_auth -- called by the local AI
@@ -2079,10 +2354,12 @@ async def ai_trigger(data: AiTriggerSchema):
          now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), data.confidence, data.barangay_id.lower(),
          data.camera_id),
     )
+    ctx = data.context or {}
     cursor.execute(
-        """INSERT INTO incident_details (incident_id, narrative, nature_of_call, arrival_reason, additional_officers)
-           VALUES (?, ?, 'EMERGENCY_AI_FLAG', 'AUTOMATED_TRIGGER', 'NONE')""",
-        (incident_id, "Autonomous edge detection triggered via spatiotemporal analysis classification matrix."),
+        """INSERT INTO incident_details (incident_id, narrative, nature_of_call, arrival_reason, additional_officers, ai_context)
+           VALUES (?, ?, 'EMERGENCY_AI_FLAG', 'AUTOMATED_TRIGGER', 'NONE', ?)""",
+        (incident_id, _ai_one_liner(data.event, data.confidence, data.location_name, ctx),
+         json.dumps(ctx) if ctx else None),
     )
     cursor.execute(
         "INSERT INTO incident_visibility (incident_id, map_hidden, screenshot_path, screenshot_sha256) VALUES (?, 0, ?, ?)",
@@ -2306,6 +2583,103 @@ async def archive_incident(incident_id: str, authorization: Optional[str] = Head
         raise HTTPException(status_code=404, detail="Incident not found")
     return {"status": "archived_from_map", "id": incident_id}
 
+_REPORT_REQUIRED = ("reporting_officer", "badge_number", "narrative")
+
+
+class ReportDraftSchema(BaseModel):
+    report_body: dict
+
+
+def _parse_report_row(r) -> dict:
+    d = dict(r)
+    for k in ("ai_draft", "report_body"):
+        try:
+            d[k] = json.loads(d[k]) if d.get(k) else None
+        except (TypeError, ValueError):
+            d[k] = None
+    return d
+
+
+def _upsert_incident_report(cursor, incident_id: str, payload: dict, body: dict, status: str,
+                            ai_draft: Optional[dict] = None):
+    """One open draft per incident: saving again (or confirming) updates it
+    in place. Once confirmed, a later save starts a fresh draft -- an
+    amendment -- so a filed report is never silently overwritten."""
+    if ai_draft is None:
+        ai_draft = build_ai_report_draft(cursor, incident_id)
+    cols = {
+        "reported_by": payload["id"],
+        "narrative": body.get("narrative"),
+        "nature_of_call": body.get("nature_of_incident"),
+        "arrival_reason": body.get("action_taken"),
+        "additional_officers": body.get("additional_officers"),
+        "ai_draft": json.dumps(ai_draft) if ai_draft else None,
+        "report_body": json.dumps(body),
+        "report_status": status,
+    }
+    cursor.execute(
+        "SELECT id FROM incident_reports WHERE incident_id = ? AND report_status = 'draft' ORDER BY created_at DESC LIMIT 1",
+        (incident_id,),
+    )
+    open_draft = cursor.fetchone()
+    if open_draft:
+        cursor.execute(
+            f"UPDATE incident_reports SET {', '.join(f'{k} = ?' for k in cols)}, updated_at = NOW() WHERE id = ?",
+            (*cols.values(), open_draft["id"]),
+        )
+        return open_draft["id"]
+    rid = str(uuid.uuid4())
+    cursor.execute(
+        f"INSERT INTO incident_reports (id, incident_id, {', '.join(cols)}, updated_at) "
+        f"VALUES (?, ?, {', '.join('?' for _ in cols)}, NOW())",
+        (rid, incident_id, *cols.values()),
+    )
+    return rid
+
+
+@app.get("/api/incidents/{incident_id}/report_draft")
+async def get_report_draft(incident_id: str, authorization: Optional[str] = Header(None)):
+    """The AI's draft for this incident, plus the latest officer report
+    (draft or confirmed) if one exists."""
+    payload = require_auth(authorization)
+    require_role(payload, POLICE_SIDE_ROLES)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        if not _incident_owned_by(cursor, incident_id, payload):
+            raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        ai = build_ai_report_draft(cursor, incident_id)
+        cursor.execute(
+            """SELECT r.*, u.username AS reported_by_username
+               FROM incident_reports r LEFT JOIN users u ON u.id = r.reported_by
+               WHERE r.incident_id = ?
+               ORDER BY CASE WHEN r.report_status = 'draft' THEN 0 ELSE 1 END,
+                        COALESCE(r.updated_at, r.created_at) DESC LIMIT 1""",
+            (incident_id,),
+        )
+        row = cursor.fetchone()
+        return {"ai_draft": ai, "report": _parse_report_row(row) if row else None}
+    finally:
+        conn.close()
+
+
+@app.put("/api/incidents/{incident_id}/report_draft")
+async def save_report_draft(incident_id: str, data: ReportDraftSchema, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, POLICE_SIDE_ROLES)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        require_permission(cursor, payload, "confirm_dismiss_alerts")
+        if not _incident_owned_by(cursor, incident_id, payload):
+            raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        rid = _upsert_incident_report(cursor, incident_id, payload, data.report_body, "draft")
+        conn.commit()
+        return {"status": "draft_saved", "id": rid}
+    finally:
+        conn.close()
+
+
 @app.post("/api/incidents/{incident_id}/confirm-and-report")
 async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -2319,25 +2693,39 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
     if not _incident_owned_by(cursor, incident_id, payload):
         conn.close()
         raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
-    officer = (data.report_details or {}).get("reporting_officer")
-    if officer:
-        cursor.execute("UPDATE incidents SET status = ?, officer = ? WHERE id = ?", (data.status, officer, incident_id))
-    else:
-        cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
+    # BUG FOUND 2026-09-29: the filing modal sent camelCase keys
+    # (reportingOfficer, badgeNumber, ...) while this read snake_case, so
+    # every field an officer typed was silently discarded -- only the status
+    # flip ever persisted. report_details is now the structured report body
+    # (see _REPORT_REQUIRED) and is stored whole in report_body.
+    details = data.report_details or {}
+    missing = [k for k in _REPORT_REQUIRED if not str(details.get(k) or "").strip()]
+    if missing:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Report is missing required fields: {', '.join(missing)}")
+    officer = details["reporting_officer"].strip()
+    # Snapshot the machine draft BEFORE applying the officer's corrections
+    # below, so ai_draft records what the AI actually said.
+    ai_draft = build_ai_report_draft(cursor, incident_id)
+
+    sets, params = ["status = ?", "officer = ?"], [data.status, officer]
+    corrected_type = str(details.get("incident_type") or "").strip().upper()
+    if corrected_type:
+        sets.append("type = ?")
+        params.append(corrected_type)
+    corrected_sev = str(details.get("severity") or "").strip().upper()
+    if corrected_sev in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+        sets.append("severity = ?")
+        params.append(corrected_sev)
+    cursor.execute(f"UPDATE incidents SET {', '.join(sets)} WHERE id = ?", (*params, incident_id))
     updated = cursor.rowcount
     if not updated:
         conn.close()
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    details = data.report_details or {}
-    cursor.execute(
-        """INSERT INTO incident_reports
-           (id, incident_id, reported_by, narrative, nature_of_call, arrival_reason, additional_officers)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (str(uuid.uuid4()), incident_id, payload["id"],
-         details.get("narrative"), details.get("nature_of_call"),
-         details.get("arrival_reason"), details.get("additional_officers")),
-    )
+    _upsert_incident_report(cursor, incident_id, payload, details, "confirmed", ai_draft)
+    log_audit(cursor, payload, "report_confirmed", "incident", incident_id,
+              {"reporting_officer": officer, "badge_number": details.get("badge_number")})
     # Re-fetch the row for the notification: the UPDATE above only touched
     # status/officer, and the message needs type/location/confidence/etc.,
     # which the request payload doesn't carry.
@@ -3004,16 +3392,53 @@ async def get_me(authorization: Optional[str] = Header(None)):
 # visibility lens (see docs/USER_HIERARCHY_PLAN.md). Editing a jurisdiction
 # therefore changes only who can see what; it never moves an asset.
 
+STATION_DETAIL_FIELDS = ("station_type", "parent_office", "regional_office", "commander",
+                         "address", "contact_number", "description")
+BARANGAY_DETAIL_FIELDS = ("psgc_code", "city_municipality", "province", "region", "captain_name",
+                          "hall_address", "contact_number", "description")
+
+
 class StationSchema(BaseModel):
     id: Optional[str] = None
     name: str
+    station_type: Optional[str] = None
+    parent_office: Optional[str] = None
+    regional_office: Optional[str] = None
+    commander: Optional[str] = None
+    address: Optional[str] = None
+    contact_number: Optional[str] = None
+    description: Optional[str] = None
 
 class StationJurisdictionSchema(BaseModel):
     barangay_ids: List[str]
 
 class StationBarangayCreate(BaseModel):
-    barangay_id: str
-    name: Optional[str] = None
+    name: str
+    barangay_id: Optional[str] = None
+    psgc_code: Optional[str] = None
+    city_municipality: Optional[str] = None
+    province: Optional[str] = None
+    region: Optional[str] = None
+    captain_name: Optional[str] = None
+    hall_address: Optional[str] = None
+    contact_number: Optional[str] = None
+    description: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+
+def _clean_optional(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    v = v.strip()
+    return v or None
+
+
+def _slugify_barangay(name: str) -> str:
+    import re
+    s = re.sub(r"^(brgy\.?|barangay)\s+", "", name.strip().lower())
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s
 
 
 @app.get("/api/devteam/stations")
@@ -3022,8 +3447,8 @@ async def list_stations(authorization: Optional[str] = Header(None)):
     require_role(payload, {"DEVTEAM"})
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM police_stations ORDER BY name")
-    stations = [{"id": r["id"], "name": r["name"]} for r in cursor.fetchall()]
+    cursor.execute(f"SELECT id, name, {', '.join(STATION_DETAIL_FIELDS)} FROM police_stations ORDER BY name")
+    stations = [dict(r) for r in cursor.fetchall()]
 
     # Batched, not one query per station.
     cursor.execute("SELECT station_id, barangay_id FROM station_barangays")
@@ -3053,8 +3478,18 @@ async def create_station(data: StationSchema, authorization: Optional[str] = Hea
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO police_stations (id, name) VALUES (?, ?)", (sid, name))
+        cursor.execute("SELECT 1 FROM police_stations WHERE LOWER(name) = LOWER(?)", (name,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail=f'A station named "{name}" already exists')
+        details = [_clean_optional(getattr(data, f)) for f in STATION_DETAIL_FIELDS]
+        cursor.execute(
+            f"INSERT INTO police_stations (id, name, {', '.join(STATION_DETAIL_FIELDS)}) "
+            f"VALUES (?, ?, {', '.join('?' for _ in STATION_DETAIL_FIELDS)})",
+            (sid, name, *details),
+        )
         conn.commit()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not create station: {e}")
     finally:
@@ -3126,22 +3561,43 @@ async def create_barangay_for_station(station_id: str, body: StationBarangayCrea
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="Station not found")
 
-        barangay_id = body.barangay_id.strip().lower()
+        import re
+        # Stored without a "Brgy."/"Barangay" prefix -- display sites add it.
+        name = re.sub(r"^(brgy\.?|barangay)\s+", "", body.name.strip(), flags=re.IGNORECASE)
+        if not name:
+            raise HTTPException(status_code=400, detail="Barangay name is required")
+        barangay_id = _slugify_barangay(body.barangay_id or name)
         if not barangay_id:
-            raise HTTPException(status_code=400, detail="Barangay id is required")
+            raise HTTPException(status_code=400, detail="Barangay name must contain letters or digits")
+
+        psgc = _clean_optional(body.psgc_code)
+        if psgc is not None:
+            psgc = psgc.replace(" ", "")
+            if not psgc.isdigit() or len(psgc) not in (9, 10):
+                raise HTTPException(status_code=400, detail="PSGC code must be 10 digits (or the older 9-digit form)")
+        details = {f: _clean_optional(getattr(body, f)) for f in BARANGAY_DETAIL_FIELDS}
+        details["psgc_code"] = psgc
+        set_clause = ", ".join(f"{f} = ?" for f in BARANGAY_DETAIL_FIELDS)
 
         cursor.execute("SELECT status FROM barangays WHERE id = ?", (barangay_id,))
         existing = cursor.fetchone()
         if existing:
-            if existing["status"] != "approved":
-                cursor.execute(
-                    "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
-                    (payload["id"], barangay_id),
-                )
+            if existing["status"] == "approved":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f'Barangay "{name}" is already registered -- tick it in this station\'s jurisdiction list instead.')
+            # A pending/rejected self-signup location: registering it here
+            # is DevTeam vouching for it, so approve and fill in its record.
+            cursor.execute(
+                f"UPDATE barangays SET name = ?, lat = ?, lng = ?, {set_clause}, "
+                "status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
+                (name, body.lat, body.lng, *[details[f] for f in BARANGAY_DETAIL_FIELDS], payload["id"], barangay_id),
+            )
         else:
             cursor.execute(
-                "INSERT INTO barangays (id, name, status, approved_by, approved_at) VALUES (?, ?, 'approved', ?, NOW())",
-                (barangay_id, (body.name or barangay_id).strip().title(), payload["id"]),
+                f"INSERT INTO barangays (id, name, lat, lng, {', '.join(BARANGAY_DETAIL_FIELDS)}, status, approved_by, approved_at) "
+                f"VALUES (?, ?, ?, ?, {', '.join('?' for _ in BARANGAY_DETAIL_FIELDS)}, 'approved', ?, NOW())",
+                (barangay_id, name, body.lat, body.lng, *[details[f] for f in BARANGAY_DETAIL_FIELDS], payload["id"]),
             )
 
         cursor.execute("SELECT 1 FROM station_barangays WHERE station_id = ? AND barangay_id = ?", (station_id, barangay_id))

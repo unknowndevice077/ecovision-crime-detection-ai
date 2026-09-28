@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
-  X, MapPin, ShieldCheck, Trash2, Plus,
+  X, ShieldCheck, Trash2, Plus,
   Info, AlertCircle, FileSignature, FileText,
-  Calendar, ListFilter, ShieldAlert, Radio, Check, Video, ArrowLeft, Globe, ImageIcon
+  Calendar, ListFilter, ShieldAlert, Radio, Check, ArrowLeft, Globe, ImageIcon,
+  Sparkles, RotateCcw, Save, Pencil
 } from 'lucide-react';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 import { useLiveChannel } from '../context/WebSocketContext';
@@ -90,6 +91,73 @@ type Incident = {
   map_hidden?: number | boolean;
 };
 
+// Officer's report body -- stored whole as incident_reports.report_body.
+// Keys are snake_case to match backend.py's confirm_and_report /
+// _REPORT_REQUIRED (the old camelCase form was silently discarded).
+type ReportBody = {
+  incident_type: string; severity: string; nature_of_incident: string; narrative: string;
+  complainant: string; victim_details: string; suspect_description: string; witnesses: string;
+  property_damaged: string; evidence_secured: string; scene_lighting: string;
+  action_taken: string; disposition: string; additional_officers: string;
+  reporting_officer: string; rank: string; badge_number: string; supervisor: string;
+};
+
+const EMPTY_REPORT: ReportBody = {
+  incident_type: '', severity: '', nature_of_incident: '', narrative: '',
+  complainant: '', victim_details: '', suspect_description: '', witnesses: '',
+  property_damaged: '', evidence_secured: '', scene_lighting: '',
+  action_taken: '', disposition: '', additional_officers: '',
+  reporting_officer: '', rank: '', badge_number: '', supervisor: '',
+};
+
+// Mirrors backend.py's build_ai_report_draft() return value.
+type AiDraft = {
+  incident_type: string; severity: string; occurred_date: string; occurred_time: string; time_of_day: string;
+  location: { camera_name?: string; barangay?: string; city_municipality?: string; province?: string; station?: string };
+  detection: {
+    source: string; detector?: string; confidence?: number; confidence_band: string;
+    people_in_frame?: number; attribution?: string; track_id?: number;
+    weapons: { name: string; conf: number }[];
+  };
+  scene: { lighting?: string; brightness?: number };
+  evidence: { snapshot?: string; snapshot_sha256?: string; clips: { filename: string; duration?: string; sha256?: string }[] };
+  narrative: string; suspect_description: string; recommended_action: string;
+};
+
+type FiledReport = {
+  id: string; report_status: string; report_body: Partial<ReportBody> | null;
+  reported_by_username?: string; created_at?: string; updated_at?: string;
+};
+
+const INCIDENT_TYPES = ['ASSAULT', 'ARMED THREAT', 'ROBBERY', 'THEFT', 'PHYSICAL VIOLENCE', 'VANDALISM', 'HARDWARE_PANIC_INTERRUPT'];
+const DISPOSITIONS = [
+  'Under investigation',
+  'Referred to prosecutor (inquest / regular filing)',
+  'Settled at barangay level (Katarungang Pambarangay)',
+  'Suspect apprehended — case filed',
+  'Unfounded / false alarm',
+];
+const POLICE_REPORT_ROLES = new Set(['PNP_ADMIN', 'PNP_OFFICER', 'DEVTEAM']);
+
+function aiToBody(ai: AiDraft): ReportBody {
+  const evidence: string[] = [];
+  if (ai.evidence.snapshot) {
+    evidence.push(`Evidence frame captured at detection${ai.evidence.snapshot_sha256 ? ` (SHA-256 ${ai.evidence.snapshot_sha256.slice(0, 16)}…)` : ''}`);
+  }
+  ai.evidence.clips.forEach(c => evidence.push(`Video clip ${c.filename}${c.duration ? ` (${c.duration})` : ''}`));
+  return {
+    ...EMPTY_REPORT,
+    incident_type: ai.incident_type || '',
+    severity: ai.severity || 'HIGH',
+    nature_of_incident: ai.detection.source === 'AI_AUTOMATION' ? 'AI surveillance alert'
+      : ai.detection.source === 'HARDWARE_PANIC' ? 'Panic button activation' : 'Operator-filed report',
+    narrative: ai.narrative,
+    suspect_description: ai.suspect_description,
+    evidence_secured: evidence.join('\n'),
+    scene_lighting: ai.scene.lighting || '',
+  };
+}
+
 interface CrimeReportsViewProps {
   onUpdate: () => void;
   onDeepLink?: (crimeId: string) => void;
@@ -143,19 +211,17 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
   const [manualType, setFormManualType] = useState("ASSAULT");
   const [manualSeverity, setFormManualSeverity] = useState("HIGH");
   const [manualNarrative, setFormManualNarrative] = useState("");
-  const [reportForm, setReportForm] = useState({
-    badgeNumber: '',
-    reportingOfficer: '',
-    precinctSector: 'Ormoc Station 1',
-    weatherCondition: 'Clear Night',
-    lightingCondition: 'Artificial Streetlights',
-    victimDetails: 'State Witnesses / Public Property',
-    suspectDetails: 'Unknown Subject (Fled Scene)',
-    propertyDamaged: 'None Reported',
-    evidenceRecovered: 'Digital AI Surveillance Recording Stream',
-    finalDisposition: 'Pending Criminal Case Referral to Prosecutors',
-    supervisorApproval: ''
-  });
+  const canFileReports = POLICE_REPORT_ROLES.has(currentUserRole || '');
+  const [aiDraft, setAiDraft] = useState<AiDraft | null>(null);
+  const [aiBaseline, setAiBaseline] = useState<ReportBody | null>(null);
+  const [filedReport, setFiledReport] = useState<FiledReport | null>(null);
+  const [reportBody, setReportBody] = useState<ReportBody>(EMPTY_REPORT);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportNotice, setReportNotice] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const [amending, setAmending] = useState(false);
+  const reportLocked = filedReport?.report_status === 'confirmed' && !amending;
+  const reportMissing = (['reporting_officer', 'badge_number', 'narrative'] as const).filter(k => !reportBody[k].trim());
   const mapRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const poleMarkersRef = useRef<Record<string, any>>({});
@@ -431,46 +497,91 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       setActionError(body.detail || 'Could not file that report.');
     }
   };
-  const handleOpenReportFiler = (target: Incident) => {
+  // Opens the report workspace: loads the AI's draft (built server-side from
+  // the detection metadata + evidence files) and the latest officer report,
+  // if any. An existing report wins over the AI draft for prefilling.
+  const handleOpenReportFiler = async (target: Incident) => {
     setFilingTarget(target);
-    setReportForm(prev => ({ ...prev, reportingOfficer: target.officer !== 'AI_SENTINEL' ? target.officer : '' }));
     setShowFilingModal(true);
+    setAiDraft(null);
+    setAiBaseline(null);
+    setFiledReport(null);
+    setReportBody(EMPTY_REPORT);
+    setAmending(false);
+    setReportNotice(null);
+    setReportLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/incidents/${target.id}/report_draft`, { headers: authHeaders() });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReportNotice({ tone: 'error', text: d.detail || 'Could not load the AI draft.' });
+        return;
+      }
+      const baseline = d.ai_draft ? aiToBody(d.ai_draft) : EMPTY_REPORT;
+      setAiDraft(d.ai_draft);
+      setAiBaseline(baseline);
+      setFiledReport(d.report);
+      setReportBody(d.report?.report_body ? { ...baseline, ...d.report.report_body } : baseline);
+    } catch {
+      setReportNotice({ tone: 'error', text: 'Backend connection failure.' });
+    } finally {
+      setReportLoading(false);
+    }
   };
 
-  // FIXED: Adjusted code parameters to seamlessly pipe form text assets, capture real-time system frames, and compile PDF logs instantly upon confirmation
+  const saveReportDraft = async () => {
+    if (!filingTarget) return;
+    setReportBusy(true);
+    setReportNotice(null);
+    try {
+      const res = await fetch(`${API_URL}/api/incidents/${filingTarget.id}/report_draft`, {
+        method: 'PUT', headers: authHeaders(), body: JSON.stringify({ report_body: reportBody }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReportNotice({ tone: 'error', text: d.detail || 'Draft was NOT saved.' });
+        return;
+      }
+      setFiledReport({ id: d.id, report_status: 'draft', report_body: reportBody, updated_at: new Date().toISOString() });
+      setAmending(false);
+      setReportNotice({ tone: 'ok', text: 'Draft saved. It is not an official report until confirmed.' });
+    } catch {
+      setReportNotice({ tone: 'error', text: 'Backend connection failure -- draft was NOT saved.' });
+    } finally {
+      setReportBusy(false);
+    }
+  };
+
   const handleSubmitOfficialReport = async () => {
-    if (!filingTarget || !reportForm.badgeNumber || !reportForm.reportingOfficer) return;
+    if (!filingTarget || reportMissing.length) return;
+    setReportBusy(true);
+    setReportNotice(null);
     try {
       const res = await fetch(`${API_URL}/api/incidents/${filingTarget.id}/confirm-and-report`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({
-          status: "Confirmed",
-          capture_snapshot: true,
-          report_details: reportForm
-        })
+        body: JSON.stringify({ status: "Confirmed", capture_snapshot: true, report_details: reportBody }),
       });
+      const d = await res.json().catch(() => ({}));
       if (!res.ok) {
-        // Previously ignored entirely -- the modal closed and claimed
-        // success on a 401/403 exactly the same as a real submission, so an
-        // officer had no way to know their official report never saved.
-        const body = await res.json().catch(() => ({}));
-        setActionError(body.detail || 'Could not submit that report -- it was NOT saved.');
+        setReportNotice({ tone: 'error', text: d.detail || 'Could not file that report -- it was NOT saved.' });
         return;
       }
-      setShowFilingModal(false);
-      setFilingTarget(null);
-      setActionError('');
+      setFiledReport({ id: filedReport?.id || '', report_status: 'confirmed', report_body: reportBody, updated_at: new Date().toISOString() });
+      setAmending(false);
+      setReportNotice({ tone: 'ok', text: 'Report confirmed and filed. The incident is now marked Confirmed.' });
       fetchIncidents();
       onUpdate();
-    } catch (e) {
-      console.error(e);
-      setActionError('Backend connection failure -- report was NOT saved.');
+    } catch {
+      setReportNotice({ tone: 'error', text: 'Backend connection failure -- report was NOT saved.' });
+    } finally {
+      setReportBusy(false);
     }
   };
 
-  const closeModal = () => { setShowFilingModal(false); setFilingTarget(null);
-  };
+  const setReportField = (key: keyof ReportBody, value: string) => setReportBody(prev => ({ ...prev, [key]: value }));
+
+  const closeModal = () => { setShowFilingModal(false); setFilingTarget(null); };
 
   const submitAddSmartpole = async () => {
     const name = newSmartpoleName.trim();
@@ -499,13 +610,10 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
   };
 
   const reportImageUrl = useMemo(() => {
-    if (!filingTarget) return '';
-    if (filingTarget.screenshot_path) {
-      return filingTarget.screenshot_path.startsWith('http')
-        ? filingTarget.screenshot_path
-        : `${API_URL}${filingTarget.screenshot_path}`;
-    }
-    return 'https://picsum.photos/seed/ai-crime-report/900/450';
+    if (!filingTarget?.screenshot_path) return '';
+    return filingTarget.screenshot_path.startsWith('http')
+      ? filingTarget.screenshot_path
+      : `${API_URL}${filingTarget.screenshot_path}`;
   }, [filingTarget, API_URL]);
   const handleBarangayJump = (lat: number, lng: number) => {
     if (mapRef.current) {
@@ -781,14 +889,16 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                       className="flex gap-2 pt-1.5 border-t justify-end items-center"
                       style={{ borderColor: 'var(--line)' }}
                     >
-                      <button
-                        title={`Generate official incident report form for case ${inc.case_id}`}
-                        onClick={() => handleOpenReportFiler(inc)}
-                        className="flex items-center gap-1.5 px-2 py-1 border text-[9px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
-                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
-                      >
-                        <FileSignature size={11} /> Police report
-                      </button>
+                      {canFileReports && (
+                        <button
+                          title={`Open the AI draft and officer report for case ${inc.case_id}`}
+                          onClick={() => handleOpenReportFiler(inc)}
+                          className="flex items-center gap-1.5 px-2 py-1 border text-[9px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
+                          style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                        >
+                          <FileSignature size={11} /> {(inc.status || '').toLowerCase() === 'confirmed' ? 'View report' : 'Police report'}
+                        </button>
+                      )}
 
                       <button
                         onClick={() => handleExpunge(inc.id)}
@@ -916,306 +1026,318 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
         </div>
       )}
 
-      {/* FILING MODAL */}
+      {/* REPORT WORKSPACE (2026-09-29). Left: what the AI actually recorded
+          (evidence frame, detector, confidence, people, weapons, measured
+          lighting, hashes). Right: the officer's report, prefilled from the
+          AI draft and fully editable -- fields the officer changed are
+          tagged EDITED so a reviewer can see what the AI said vs. what the
+          officer confirmed. Save draft keeps it unofficial; Confirm & file
+          makes it the official report and confirms the incident. */}
       {showFilingModal && filingTarget && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.82)' }}>
           <div
-            className="border w-full max-w-3xl max-h-[90vh] overflow-y-auto custom-scrollbar"
+            className="border w-full max-w-6xl max-h-[92vh] flex flex-col"
             style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}
           >
-            <div
-              className="sticky top-0 z-10 h-11 flex justify-between items-center px-3 border-b"
-              style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
-            >
-              <div className="flex items-center gap-2.5">
+            <div className="shrink-0 h-12 flex justify-between items-center px-4 border-b" style={{ borderColor: 'var(--line)' }}>
+              <div className="flex items-center gap-2.5 min-w-0">
                 <FileSignature size={15} style={{ color: 'var(--accent)' }} />
-                <div>
-                  <div className="text-[12px] font-bold uppercase tracking-wide text-[var(--text)] leading-none">Official Police Incident Report</div>
-                  <div className="label mt-1">Republic of the Philippines · Ormoc Police District</div>
+                <div className="min-w-0">
+                  <div className="text-[12px] font-bold uppercase tracking-wide text-[var(--text)] leading-none truncate">
+                    Incident Report · <span className="data" style={{ color: 'var(--accent)' }}>{filingTarget.case_id}</span>
+                  </div>
+                  <div className="label mt-1">
+                    {aiDraft?.location.station || 'Philippine National Police'}
+                    {aiDraft?.location.city_municipality ? ` · ${aiDraft.location.city_municipality}` : ''}
+                  </div>
                 </div>
+                {filedReport && (
+                  <span
+                    className="ml-2 shrink-0 px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider"
+                    style={filedReport.report_status === 'confirmed'
+                      ? { color: 'var(--ok)', borderColor: 'var(--ok)' }
+                      : { color: 'var(--warn)', borderColor: 'var(--warn)' }}
+                  >
+                    {filedReport.report_status === 'confirmed' ? 'Filed · confirmed' : 'Draft · not official'}
+                  </span>
+                )}
               </div>
-              <button
-                title="Close report filing form"
-                aria-label="Close report filing form"
-                onClick={closeModal}
-                className="transition-colors hover:text-[var(--text)]"
-                style={{ color: 'var(--text-3)' }}
-              >
+              <button title="Close" aria-label="Close" onClick={closeModal} className="transition-colors hover:text-[var(--text)]" style={{ color: 'var(--text-3)' }}>
                 <X size={16} />
               </button>
             </div>
 
-            <div className="p-4 space-y-4">
-              <div
-                className="grid grid-cols-3 gap-4 p-3 border"
-                style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
-              >
-                <div>
-                  <span className={labelClass}>Case ID</span>
-                  <span className="data text-[12px] font-bold" style={{ color: 'var(--accent)' }}>{filingTarget.case_id}</span>
-                </div>
-                <div>
-                  <span className={labelClass}>Type</span>
-                  <span className="text-[12px] font-bold uppercase text-[var(--text)]">{filingTarget.type}</span>
-                </div>
-                <div>
-                  <span className={labelClass}>Occurred</span>
-                  <span className="data text-[12px]" style={{ color: 'var(--text)' }}>
-                    {filingTarget.occurred_date} {formatTo12Hour(filingTarget.occurred_time)}
-                  </span>
-                </div>
+            {reportLoading ? (
+              <div className="flex-1 flex items-center justify-center py-24">
+                <span className="label">Building AI draft from detection data…</span>
               </div>
+            ) : (
+              <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,360px)_1fr] overflow-hidden">
 
-              <div className="space-y-2">
-                <h4 className="label flex items-center gap-1.5">
-                  <Video size={11} style={{ color: 'var(--text-3)' }} /> Scene evidence capture
-                </h4>
-                {!brokenImages[filingTarget.id] ? (
-                  <div
-                    className="w-full max-h-72 overflow-hidden border relative flex items-center justify-center"
-                    style={{ background: '#000', borderColor: 'var(--line)' }}
-                  >
-                    <img
-                      src={reportImageUrl}
-                      className="w-full h-full object-contain max-h-72"
-                      alt={`Evidence capture for case ${filingTarget.case_id}`}
-                      onError={() => setBrokenImages(prev => ({ ...prev, [filingTarget.id]: true }))}
-                    />
+                {/* LEFT — AI findings */}
+                <div className="min-h-0 overflow-y-auto custom-scrollbar border-r p-4 space-y-4" style={{ borderColor: 'var(--line)', background: 'var(--panel-2)' }}>
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles size={12} style={{ color: 'var(--accent)' }} />
+                    <span className="label" style={{ color: 'var(--text)' }}>AI findings</span>
                   </div>
-                ) : (
-                  <div
-                    className="w-full h-32 border border-dashed flex flex-col items-center justify-center gap-1.5"
-                    style={{ background: 'var(--bg)', borderColor: 'var(--line-2)' }}
-                  >
-                    <ImageIcon size={18} style={{ color: 'var(--text-3)' }} />
-                    <span className="label">Evidence capture not found</span>
-                  </div>
-                )}
-                {!filingTarget.screenshot_path && (
-                  <p className="label">Placeholder image — no AI evidence frame was attached to this case.</p>
-                )}
-              </div>
 
-              <div className="space-y-3">
-                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
-                  <ShieldCheck size={11} style={{ color: 'var(--text-3)' }} /> Officer credentials
-                </h4>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label htmlFor="officerName" className={labelClass}>Officer Name</label>
-                    <input
-                      id="officerName"
-                      type="text"
-                      title="Reporting officer full name"
-                      placeholder="Dela Cruz, Fritz"
-                      value={reportForm.reportingOfficer}
-                      onChange={(e) => setReportForm({...reportForm, reportingOfficer: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="badgeNumber" className={labelClass}>Badge Number</label>
-                    <input
-                      id="badgeNumber"
-                      type="text"
-                      title="Officer badge or serial number"
-                      placeholder="OCPD-2026-993"
-                      value={reportForm.badgeNumber}
-                      onChange={(e) => setReportForm({...reportForm, badgeNumber: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="precinctSector" className={labelClass}>Precinct</label>
-                    <input
-                      id="precinctSector"
-                      type="text"
-                      title="Precinct jurisdiction sector"
-                      placeholder="Ormoc Station 1"
-                      value={reportForm.precinctSector}
-                      onChange={(e) => setReportForm({...reportForm, precinctSector: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
-                  <MapPin size={11} style={{ color: 'var(--text-3)' }} /> Scene details
-                </h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="weatherCondition" className={labelClass}>Weather</label>
-                    <input
-                      id="weatherCondition"
-                      type="text"
-                      title="Weather conditions at scene intake"
-                      placeholder="Clear Night"
-                      value={reportForm.weatherCondition}
-                      onChange={(e) => setReportForm({...reportForm, weatherCondition: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="lightingCondition" className={labelClass}>Lighting</label>
-                    <input
-                      id="lightingCondition"
-                      type="text"
-                      title="Lighting visibility at scene"
-                      placeholder="Artificial Streetlights"
-                      value={reportForm.lightingCondition}
-                      onChange={(e) => setReportForm({...reportForm, lightingCondition: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
-                  <Info size={11} style={{ color: 'var(--text-3)' }} /> Involved parties
-                </h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="victimDetails" className={labelClass}>Victim / Complainant</label>
-                    <textarea
-                      id="victimDetails"
-                      title="Victim or complainant details"
-                      rows={2}
-                      value={reportForm.victimDetails}
-                      onChange={(e) => setReportForm({...reportForm, victimDetails: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="suspectDetails" className={labelClass}>Suspect Description</label>
-                    <textarea
-                      id="suspectDetails"
-                      title="Suspect description and demographics"
-                      rows={2}
-                      value={reportForm.suspectDetails}
-                      onChange={(e) => setReportForm({...reportForm, suspectDetails: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
-                  <FileText size={11} style={{ color: 'var(--text-3)' }} /> Evidence and damage
-                </h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="propertyDamaged" className={labelClass}>Property Damaged</label>
-                    <input
-                      id="propertyDamaged"
-                      type="text"
-                      title="Property damaged or value destroyed"
-                      placeholder="None Reported"
-                      value={reportForm.propertyDamaged}
-                      onChange={(e) => setReportForm({...reportForm, propertyDamaged: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="evidenceRecovered" className={labelClass}>Evidence Secured</label>
-                    <input
-                      id="evidenceRecovered"
-                      type="text"
-                      title="Physical or digital evidence chain secured"
-                      placeholder="Digital AI Surveillance Recording"
-                      value={reportForm.evidenceRecovered}
-                      onChange={(e) => setReportForm({...reportForm, evidenceRecovered: e.target.value})}
-                      className={inputClass}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)' }}>
-                  <ShieldAlert size={11} style={{ color: 'var(--text-3)' }} /> Disposition and signatures
-                </h4>
-                <div className="space-y-3">
-                  <div>
-                    <label htmlFor="narrativeReadOnly" className={labelClass}>Narrative (AI Generated — Read Only)</label>
-                    <textarea
-                      id="narrativeReadOnly"
-                      title="AI generated narrative — read only"
-                      rows={2}
-                      value={filingTarget.narrative}
-                      disabled
-                      className="w-full border p-2.5 text-[12px] cursor-not-allowed outline-none resize-none"
-                      style={{ background: 'var(--panel-2)', borderColor: 'var(--line)', color: 'var(--text-2)' }}
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label htmlFor="finalDisposition" className={labelClass}>Final Disposition</label>
-                      <input
-                        id="finalDisposition"
-                        type="text"
-                        title="Final case disposition or next investigative action"
-                        placeholder="Pending Criminal Case Referral"
-                        value={reportForm.finalDisposition}
-                        onChange={(e) => setReportForm({...reportForm, finalDisposition: e.target.value})}
-                        className={inputClass}
+                  {reportImageUrl && !brokenImages[filingTarget.id] ? (
+                    <div className="w-full border overflow-hidden flex items-center justify-center" style={{ background: '#000', borderColor: 'var(--line)' }}>
+                      <img
+                        src={reportImageUrl}
+                        className="w-full max-h-56 object-contain"
+                        alt={`Evidence capture for case ${filingTarget.case_id}`}
+                        onError={() => setBrokenImages(prev => ({ ...prev, [filingTarget.id]: true }))}
                       />
                     </div>
-                    <div>
-                      <label htmlFor="supervisorApproval" className={labelClass}>Supervisor Sign-off</label>
-                      <input
-                        id="supervisorApproval"
-                        type="text"
-                        title="Desk supervisor endorsement authorization"
-                        placeholder="P/Col. Del Mar, R."
-                        value={reportForm.supervisorApproval}
-                        onChange={(e) => setReportForm({...reportForm, supervisorApproval: e.target.value})}
-                        className={inputClass}
-                      />
+                  ) : (
+                    <div className="w-full h-28 border border-dashed flex flex-col items-center justify-center gap-1.5" style={{ background: 'var(--bg)', borderColor: 'var(--line-2)' }}>
+                      <ImageIcon size={18} style={{ color: 'var(--text-3)' }} />
+                      <span className="label">No evidence frame on file</span>
                     </div>
+                  )}
+
+                  {aiDraft ? (
+                    <>
+                      <div className="border p-3 space-y-2.5" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-[13px] font-bold uppercase tracking-wide text-[var(--text)]">{aiDraft.incident_type}</span>
+                          <span className="data text-[10px]" style={{ color: 'var(--text-3)' }}>
+                            {aiDraft.occurred_date} {formatTo12Hour(aiDraft.occurred_time)} · {aiDraft.time_of_day}
+                          </span>
+                        </div>
+                        {typeof aiDraft.detection.confidence === 'number' && aiDraft.detection.source === 'AI_AUTOMATION' && (
+                          <div>
+                            <div className="flex justify-between mb-1">
+                              <span className="label">Model confidence</span>
+                              <span className="data text-[10px] font-bold" style={{ color: aiDraft.detection.confidence_band === 'high' ? 'var(--critical)' : aiDraft.detection.confidence_band === 'moderate' ? 'var(--warn)' : 'var(--text-2)' }}>
+                                {Math.round(aiDraft.detection.confidence * 100)}% · {aiDraft.detection.confidence_band}
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full" style={{ background: 'var(--bg)' }}>
+                              <div className="h-full" style={{ width: `${Math.round(aiDraft.detection.confidence * 100)}%`, background: aiDraft.detection.confidence_band === 'high' ? 'var(--critical)' : aiDraft.detection.confidence_band === 'moderate' ? 'var(--warn)' : 'var(--text-3)' }} />
+                            </div>
+                          </div>
+                        )}
+                        <FactRow label="Source" value={aiDraft.detection.source === 'AI_AUTOMATION' ? 'AI surveillance' : aiDraft.detection.source === 'HARDWARE_PANIC' ? 'Panic button' : 'Manual filing'} />
+                        {aiDraft.detection.detector && <FactRow label="Detector" value={aiDraft.detection.detector} />}
+                        {typeof aiDraft.detection.people_in_frame === 'number' && <FactRow label="People in view" value={String(aiDraft.detection.people_in_frame)} />}
+                        {aiDraft.detection.attribution && (
+                          <FactRow label="Attributed to" value={aiDraft.detection.attribution === 'track' && aiDraft.detection.track_id != null ? `Tracked person #${aiDraft.detection.track_id}` : 'Whole scene'} />
+                        )}
+                        {aiDraft.detection.weapons.length > 0 && (
+                          <FactRow label="Weapons" value={aiDraft.detection.weapons.map(w => `${w.name} (${Math.round(w.conf * 100)}%)`).join(', ')} tone="var(--critical)" />
+                        )}
+                        {aiDraft.scene.lighting && (
+                          <FactRow label="Lighting" value={`${aiDraft.scene.lighting}${aiDraft.scene.brightness != null ? ` · ${aiDraft.scene.brightness}/255` : ''}`} />
+                        )}
+                        <FactRow label="Camera" value={aiDraft.location.camera_name || '—'} />
+                        <FactRow label="Barangay" value={[aiDraft.location.barangay, aiDraft.location.city_municipality].filter(Boolean).join(', ') || '—'} />
+                      </div>
+
+                      <div className="border p-3 space-y-1.5" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+                        <span className="label block">Evidence on file</span>
+                        {aiDraft.evidence.snapshot ? (
+                          <p className="data text-[10px] break-all" style={{ color: 'var(--text-2)' }}>
+                            Frame · SHA-256 {aiDraft.evidence.snapshot_sha256 ? `${aiDraft.evidence.snapshot_sha256.slice(0, 24)}…` : 'not hashed'}
+                          </p>
+                        ) : <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>No evidence frame.</p>}
+                        {aiDraft.evidence.clips.map(c => (
+                          <p key={c.filename} className="data text-[10px] break-all" style={{ color: 'var(--text-2)' }}>
+                            Clip {c.filename}{c.duration ? ` · ${c.duration}` : ''}
+                          </p>
+                        ))}
+                      </div>
+
+                      <div className="border p-3" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+                        <span className="label block mb-1">AI recommended action</span>
+                        <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-2)' }}>{aiDraft.recommended_action}</p>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>No AI draft available for this incident.</p>
+                  )}
+                </div>
+
+                {/* RIGHT — officer's report */}
+                <div className="min-h-0 overflow-y-auto custom-scrollbar p-4 space-y-5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <ShieldCheck size={12} style={{ color: 'var(--text-3)' }} />
+                      <span className="label" style={{ color: 'var(--text)' }}>Officer's report</span>
+                      <span className="label">— prefilled by AI, verify every field</span>
+                    </div>
+                    {!reportLocked && aiBaseline && (
+                      <button
+                        type="button"
+                        onClick={() => setReportBody(prev => ({ ...prev, ...aiBaseline, reporting_officer: prev.reporting_officer, rank: prev.rank, badge_number: prev.badge_number, supervisor: prev.supervisor }))}
+                        className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider hover:text-[var(--text)] transition-colors"
+                        style={{ color: 'var(--text-3)' }}
+                        title="Replace the AI-prefilled fields with the original AI draft"
+                      >
+                        <RotateCcw size={10} /> Reset to AI draft
+                      </button>
+                    )}
                   </div>
+
+                  <ReportSection icon={<AlertCircle size={11} />} title="Incident">
+                    <div className="grid grid-cols-3 gap-3">
+                      <ReportField label="Incident type" value={reportBody.incident_type} ai={aiBaseline?.incident_type} disabled={reportLocked}
+                        onChange={v => setReportField('incident_type', v)}
+                        options={Array.from(new Set([...INCIDENT_TYPES, reportBody.incident_type].filter(Boolean)))} />
+                      <ReportField label="Severity" value={reportBody.severity} ai={aiBaseline?.severity} disabled={reportLocked}
+                        onChange={v => setReportField('severity', v)} options={['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']} />
+                      <ReportField label="Nature of incident" value={reportBody.nature_of_incident} ai={aiBaseline?.nature_of_incident} disabled={reportLocked}
+                        onChange={v => setReportField('nature_of_incident', v)} />
+                    </div>
+                    <ReportField label="Narrative" required rows={9} value={reportBody.narrative} ai={aiBaseline?.narrative} disabled={reportLocked}
+                      onChange={v => setReportField('narrative', v)} />
+                    <ReportField label="Scene lighting (measured from evidence frame)" value={reportBody.scene_lighting} ai={aiBaseline?.scene_lighting} disabled={reportLocked}
+                      onChange={v => setReportField('scene_lighting', v)} placeholder="Not measurable — no evidence frame" />
+                  </ReportSection>
+
+                  <ReportSection icon={<Info size={11} />} title="Persons involved">
+                    <div className="grid grid-cols-2 gap-3">
+                      <ReportField label="Complainant" rows={2} value={reportBody.complainant} disabled={reportLocked}
+                        onChange={v => setReportField('complainant', v)} placeholder="Name, address, contact number" />
+                      <ReportField label="Victim(s)" rows={2} value={reportBody.victim_details} disabled={reportLocked}
+                        onChange={v => setReportField('victim_details', v)} placeholder="Name, age, injuries sustained" />
+                      <ReportField label="Suspect description" rows={3} value={reportBody.suspect_description} ai={aiBaseline?.suspect_description} disabled={reportLocked}
+                        onChange={v => setReportField('suspect_description', v)} />
+                      <ReportField label="Witnesses" rows={3} value={reportBody.witnesses} disabled={reportLocked}
+                        onChange={v => setReportField('witnesses', v)} placeholder="Names and contact details" />
+                    </div>
+                  </ReportSection>
+
+                  <ReportSection icon={<FileText size={11} />} title="Evidence and action">
+                    <div className="grid grid-cols-2 gap-3">
+                      <ReportField label="Evidence secured" rows={3} value={reportBody.evidence_secured} ai={aiBaseline?.evidence_secured} disabled={reportLocked}
+                        onChange={v => setReportField('evidence_secured', v)} />
+                      <ReportField label="Property damaged / stolen" rows={3} value={reportBody.property_damaged} disabled={reportLocked}
+                        onChange={v => setReportField('property_damaged', v)} placeholder="Item, estimated value, owner" />
+                      <ReportField label="Action taken" rows={3} value={reportBody.action_taken} disabled={reportLocked}
+                        onChange={v => setReportField('action_taken', v)} placeholder={aiDraft?.recommended_action || 'Responding unit, time of arrival, what was done'} />
+                      <ReportField label="Other responding officers" rows={3} value={reportBody.additional_officers} disabled={reportLocked}
+                        onChange={v => setReportField('additional_officers', v)} placeholder="Names and ranks" />
+                    </div>
+                    <ReportField label="Disposition" value={reportBody.disposition} disabled={reportLocked}
+                      onChange={v => setReportField('disposition', v)} options={['', ...DISPOSITIONS]} />
+                  </ReportSection>
+
+                  <ReportSection icon={<ShieldAlert size={11} />} title="Reporting officer">
+                    <div className="grid grid-cols-4 gap-3">
+                      <ReportField label="Rank" value={reportBody.rank} disabled={reportLocked}
+                        onChange={v => setReportField('rank', v)} placeholder="PCpl" />
+                      <ReportField label="Officer name" required value={reportBody.reporting_officer} disabled={reportLocked}
+                        onChange={v => setReportField('reporting_officer', v)} placeholder="Dela Cruz, Juan" />
+                      <ReportField label="Badge number" required value={reportBody.badge_number} disabled={reportLocked}
+                        onChange={v => setReportField('badge_number', v)} placeholder="OCPD-2026-993" />
+                      <ReportField label="Supervisor sign-off" value={reportBody.supervisor} disabled={reportLocked}
+                        onChange={v => setReportField('supervisor', v)} placeholder="PLt. Santos, R." />
+                    </div>
+                  </ReportSection>
                 </div>
               </div>
-            </div>
+            )}
 
-            <div
-              className="sticky bottom-0 border-t px-4 py-3 flex justify-between items-center gap-3"
-              style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
-            >
-              {/* Say WHY the submit is disabled -- an officer staring at a
-                  greyed-out button otherwise has to guess which of ~11 fields
-                  is the blocker. */}
-              <span className="label">
-                {(!reportForm.badgeNumber || !reportForm.reportingOfficer)
-                  ? 'Officer name and badge number are required'
-                  : 'Ready to file'}
+            <div className="shrink-0 border-t px-4 py-3 flex justify-between items-center gap-3" style={{ borderColor: 'var(--line)' }}>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: reportNotice?.tone === 'error' ? 'var(--critical)' : reportNotice?.tone === 'ok' ? 'var(--ok)' : 'var(--text-3)' }}>
+                {reportNotice?.text
+                  || (reportLocked ? 'This is the filed official report.'
+                    : reportMissing.length ? `Required: ${reportMissing.map(k => k.replace(/_/g, ' ')).join(', ')}`
+                    : 'Ready to confirm')}
               </span>
               <div className="flex gap-2 shrink-0">
-                <button
-                  title="Cancel and close report filing"
-                  onClick={closeModal}
-                  className="px-3.5 py-2 border text-[10px] uppercase font-bold tracking-wider transition-colors hover:bg-white/5"
-                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
-                >
-                  Cancel
+                <button onClick={closeModal} className="px-3.5 py-2 border text-[10px] uppercase font-bold tracking-wider transition-colors hover:bg-white/5" style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}>
+                  Close
                 </button>
-                <button
-                  title="Commit and sign the official police report"
-                  onClick={handleSubmitOfficialReport}
-                  disabled={!reportForm.badgeNumber || !reportForm.reportingOfficer}
-                  className="px-4 py-2 text-[10px] tracking-wider font-bold uppercase text-white transition-opacity hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-2"
-                  style={{ background: 'var(--accent)' }}
-                >
-                  <Check size={13} /> File report
-                </button>
+                {reportLocked ? (
+                  <button onClick={() => { setAmending(true); setReportNotice(null); }} className="px-3.5 py-2 border text-[10px] uppercase font-bold tracking-wider transition-colors hover:bg-white/5 flex items-center gap-1.5" style={{ borderColor: 'var(--line-2)', color: 'var(--text)' }}>
+                    <Pencil size={11} /> Amend report
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={saveReportDraft}
+                      disabled={reportBusy || reportLoading}
+                      className="px-3.5 py-2 border text-[10px] uppercase font-bold tracking-wider transition-colors hover:bg-white/5 disabled:opacity-30 flex items-center gap-1.5"
+                      style={{ borderColor: 'var(--line-2)', color: 'var(--text)' }}
+                    >
+                      <Save size={11} /> Save draft
+                    </button>
+                    <button
+                      onClick={handleSubmitOfficialReport}
+                      disabled={reportBusy || reportLoading || reportMissing.length > 0}
+                      className="px-4 py-2 text-[10px] tracking-wider font-bold uppercase text-white transition-opacity hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-2"
+                      style={{ background: 'var(--accent)' }}
+                    >
+                      <Check size={13} /> {reportBusy ? 'Filing…' : 'Confirm & file'}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
-
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function FactRow({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="label shrink-0">{label}</span>
+      <span className="text-[10px] text-right" style={{ color: tone || 'var(--text)' }}>{value}</span>
+    </div>
+  );
+}
+
+function ReportSection({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-3">
+      <h4 className="label flex items-center gap-1.5 pb-1.5 border-b" style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}>
+        <span style={{ color: 'var(--text-3)' }}>{icon}</span> {title}
+      </h4>
+      {children}
+    </div>
+  );
+}
+
+// `ai` is the AI draft's value for this field, when the AI prefilled it:
+// the label then shows AI while untouched and EDITED once the officer
+// changes it, so the filed report shows which statements were verified.
+function ReportField({ label, value, onChange, ai, disabled, rows, options, placeholder, required }: {
+  label: string; value: string; onChange: (v: string) => void; ai?: string; disabled?: boolean;
+  rows?: number; options?: string[]; placeholder?: string; required?: boolean;
+}) {
+  const style = {
+    background: disabled ? 'var(--panel-2)' : 'var(--bg)',
+    borderColor: required && !value.trim() && !disabled ? 'var(--warn)' : 'var(--line)',
+    color: disabled ? 'var(--text-2)' : 'var(--text)',
+  };
+  const cls = "w-full border p-2.5 text-[12px] outline-none focus:border-[var(--accent)] transition-colors disabled:cursor-not-allowed";
+  const aiTag = ai ? (value === ai ? 'AI' : 'EDITED') : null;
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="label">{label}{required && <span style={{ color: 'var(--warn)' }}> *</span>}</span>
+        {aiTag && (
+          <span className="text-[8px] font-bold uppercase tracking-wider" style={{ color: aiTag === 'AI' ? 'var(--accent)' : 'var(--warn)' }}>
+            {aiTag}
+          </span>
+        )}
+      </div>
+      {options ? (
+        <select value={value} disabled={disabled} onChange={e => onChange(e.target.value)} className={`${cls} data`} style={style}>
+          {options.map(o => <option key={o} value={o}>{o || 'Select…'}</option>)}
+        </select>
+      ) : rows ? (
+        <textarea value={value} disabled={disabled} rows={rows} placeholder={placeholder} onChange={e => onChange(e.target.value)}
+          className={`${cls} resize-y leading-relaxed`} style={style} />
+      ) : (
+        <input type="text" value={value} disabled={disabled} placeholder={placeholder} onChange={e => onChange(e.target.value)}
+          className={`${cls} data`} style={style} />
       )}
     </div>
   );

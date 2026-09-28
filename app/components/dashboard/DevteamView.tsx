@@ -5,7 +5,7 @@ import {
   ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
   Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
   Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus,
-  Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff, Gauge, Undo2
+  Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff, Gauge, Undo2, Plus
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketContext';
@@ -79,6 +79,14 @@ type PendingLocation = {
   requester_verification_status?: string | null;
   requester_has_document?: boolean;
   created_at: string;
+  psgc_code?: string | null;
+  city_municipality?: string | null;
+  province?: string | null;
+  region?: string | null;
+  captain_name?: string | null;
+  hall_address?: string | null;
+  contact_number?: string | null;
+  description?: string | null;
 };
 
 // 2026-09-23 bug fix: a self-signup PNP_ADMIN had no location object (a
@@ -185,7 +193,55 @@ type OptimizeState = {
   cancel_requested?: boolean;
 };
 
-type Station = { id: string; name: string; barangay_ids: string[]; staff_count: number };
+type Station = {
+  id: string; name: string; barangay_ids: string[]; staff_count: number;
+  station_type?: string | null; parent_office?: string | null; regional_office?: string | null;
+  commander?: string | null; address?: string | null; contact_number?: string | null; description?: string | null;
+};
+
+type StationForm = {
+  name: string; station_type: string; parent_office: string; regional_office: string;
+  commander: string; address: string; contact_number: string; description: string;
+};
+const EMPTY_STATION_FORM: StationForm = {
+  name: '', station_type: '', parent_office: '', regional_office: '',
+  commander: '', address: '', contact_number: '', description: '',
+};
+
+type BarangayForm = {
+  name: string; psgc_code: string; city_municipality: string; province: string; region: string;
+  captain_name: string; hall_address: string; contact_number: string; description: string;
+  lat: string; lng: string;
+};
+const EMPTY_BARANGAY_FORM: BarangayForm = {
+  name: '', psgc_code: '', city_municipality: '', province: '', region: '',
+  captain_name: '', hall_address: '', contact_number: '', description: '', lat: '', lng: '',
+};
+
+// PNP unit types below a City/Provincial Police Office.
+const STATION_TYPES = [
+  'City Police Station (CPS)',
+  'Municipal Police Station (MPS)',
+  'Police Community Precinct (PCP)',
+  'Police Sub-Station',
+];
+
+const PNP_REGIONAL_OFFICES = [
+  'NCRPO — National Capital Region', 'PRO-COR — Cordillera', 'PRO 1 — Ilocos Region', 'PRO 2 — Cagayan Valley',
+  'PRO 3 — Central Luzon', 'PRO 4A — CALABARZON', 'PRO 4B — MIMAROPA', 'PRO 5 — Bicol Region',
+  'PRO 6 — Western Visayas', 'PRO NIR — Negros Island Region', 'PRO 7 — Central Visayas', 'PRO 8 — Eastern Visayas',
+  'PRO 9 — Zamboanga Peninsula', 'PRO 10 — Northern Mindanao', 'PRO 11 — Davao Region', 'PRO 12 — SOCCSKSARGEN',
+  'PRO 13 — Caraga', 'PRO BAR — Bangsamoro',
+];
+
+const PH_REGIONS = [
+  'NCR — National Capital Region', 'CAR — Cordillera Administrative Region',
+  'Region I — Ilocos Region', 'Region II — Cagayan Valley', 'Region III — Central Luzon',
+  'Region IV-A — CALABARZON', 'MIMAROPA Region', 'Region V — Bicol Region',
+  'Region VI — Western Visayas', 'NIR — Negros Island Region', 'Region VII — Central Visayas',
+  'Region VIII — Eastern Visayas', 'Region IX — Zamboanga Peninsula', 'Region X — Northern Mindanao',
+  'Region XI — Davao Region', 'Region XII — SOCCSKSARGEN', 'Region XIII — Caraga', 'BARMM',
+];
 
 type CameraRow = { id: string; name: string; url: string; status: string; barangay_id: string };
 
@@ -315,51 +371,98 @@ export default function DevteamView() {
   // checkboxes stay responsive and the PUT only fires on Save -- toggling a
   // jurisdiction changes who can see a whole barangay's footage, which is
   // not something to commit on every stray click.
-  const [newStationName, setNewStationName] = useState('');
   const [stationBusy, setStationBusy] = useState(false);
   const [jurisDraft, setJurisDraft] = useState<Record<string, string[]>>({});
-  // 2026-09-29 user request: "make a barangay" moves here from Create User
-  // -- a new barangay is registered directly under the station covering it,
-  // in one step, instead of existing station-less until someone remembers
-  // to assign one later. Keyed by station id so each card's input is
-  // independent.
-  const [newBarangayDraft, setNewBarangayDraft] = useState<Record<string, string>>({});
-  const [addBarangayBusyId, setAddBarangayBusyId] = useState<string | null>(null);
+  const [stationSearch, setStationSearch] = useState('');
 
-  const handleAddBarangayToStation = async (stationId: string) => {
-    const raw = (newBarangayDraft[stationId] || '').trim();
-    if (!raw) return;
-    setAddBarangayBusyId(stationId);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/stations/${stationId}/barangays`, {
-        method: "POST", headers: authHeaders(), body: JSON.stringify({ barangay_id: raw }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        flash(`"${raw}" added to this station's jurisdiction.`);
-        setNewBarangayDraft(prev => ({ ...prev, [stationId]: '' }));
-        fetchOverview();
-      } else flash(d.detail || 'Could not add barangay.');
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setAddBarangayBusyId(null);
-    }
+  // 2026-09-29: stations and barangays are registered through full forms
+  // (modals) instead of a bare name/id box -- each carries a real record
+  // (PNP hierarchy for stations, PSGC code + LGU + punong barangay for
+  // barangays). A new barangay is still always created UNDER a station, so
+  // it can never exist without police coverage.
+  const [stationModalOpen, setStationModalOpen] = useState(false);
+  const [stationForm, setStationForm] = useState<StationForm>(EMPTY_STATION_FORM);
+  const [barangayModalStation, setBarangayModalStation] = useState<Station | null>(null);
+  const [barangayForm, setBarangayForm] = useState<BarangayForm>(EMPTY_BARANGAY_FORM);
+  const [orgFormError, setOrgFormError] = useState('');
+
+  const filteredStations = useMemo(() => {
+    const q = stationSearch.trim().toLowerCase();
+    if (!q) return stations;
+    const nameById = new Map(allLocations.map(l => [l.id, `${l.id} ${l.name || ''} ${l.city_municipality || ''}`.toLowerCase()]));
+    return stations.filter(st =>
+      [st.name, st.station_type, st.parent_office, st.regional_office, st.commander, st.address, st.contact_number, st.description]
+        .some(v => (v || '').toLowerCase().includes(q))
+      || st.barangay_ids.some(b => (nameById.get(b) || b).includes(q)));
+  }, [stationSearch, stations, allLocations]);
+
+  const openStationModal = () => {
+    setStationForm(EMPTY_STATION_FORM);
+    setOrgFormError('');
+    setStationModalOpen(true);
+  };
+
+  // Prefill the LGU fields from a barangay this station already covers --
+  // a station's barangays are nearly always in the same city/province.
+  const openBarangayModal = (st: Station) => {
+    const sibling = allLocations.find(l => st.barangay_ids.includes(l.id) && (l.city_municipality || l.province));
+    setBarangayForm({
+      ...EMPTY_BARANGAY_FORM,
+      city_municipality: sibling?.city_municipality || '',
+      province: sibling?.province || '',
+      region: sibling?.region || '',
+    });
+    setOrgFormError('');
+    setBarangayModalStation(st);
   };
 
   const handleCreateStation = async () => {
-    const name = newStationName.trim();
-    if (!name) return;
+    const name = stationForm.name.trim();
+    if (!name) { setOrgFormError('Station name is required.'); return; }
     setStationBusy(true);
+    setOrgFormError('');
     try {
       const res = await fetch(`${API_URL}/api/devteam/stations`, {
-        method: "POST", headers: authHeaders(), body: JSON.stringify({ name }),
+        method: "POST", headers: authHeaders(), body: JSON.stringify({ ...stationForm, name }),
       });
       const d = await res.json().catch(() => ({}));
-      if (res.ok) { setNewStationName(''); fetchOverview(); flash(`Station "${name}" created.`); }
-      else flash(d.detail || 'Could not create station.');
+      if (res.ok) { setStationModalOpen(false); fetchOverview(); flash(`Station "${name}" registered.`); }
+      else setOrgFormError(d.detail || 'Could not create station.');
     } catch {
-      flash('Backend connection failure.');
+      setOrgFormError('Backend connection failure.');
+    } finally {
+      setStationBusy(false);
+    }
+  };
+
+  const handleCreateBarangay = async () => {
+    const st = barangayModalStation;
+    if (!st) return;
+    const name = barangayForm.name.trim();
+    if (!name) { setOrgFormError('Barangay name is required.'); return; }
+    const psgc = barangayForm.psgc_code.replace(/\s/g, '');
+    if (psgc && !/^\d{9,10}$/.test(psgc)) { setOrgFormError('PSGC code must be 10 digits (e.g. 0837370015).'); return; }
+    const lat = barangayForm.lat.trim() ? Number(barangayForm.lat) : null;
+    const lng = barangayForm.lng.trim() ? Number(barangayForm.lng) : null;
+    if ((lat !== null && Number.isNaN(lat)) || (lng !== null && Number.isNaN(lng))) {
+      setOrgFormError('Latitude/longitude must be numbers.');
+      return;
+    }
+    setStationBusy(true);
+    setOrgFormError('');
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/stations/${st.id}/barangays`, {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ ...barangayForm, name, psgc_code: psgc, lat, lng }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setBarangayModalStation(null);
+        fetchOverview();
+        flash(`Barangay ${name} registered under ${st.name}.`);
+      } else setOrgFormError(d.detail || 'Could not register barangay.');
+    } catch {
+      setOrgFormError('Backend connection failure.');
     } finally {
       setStationBusy(false);
     }
@@ -1965,26 +2068,28 @@ export default function DevteamView() {
       )}
 
       {/* ================= CREATE USER TAB ================= */}
-      {/* 2026-09-29 user request: full-width two-column layout -- identity
-          and location on the left, role/access assignment (custom role,
-          base permissions, camera-level access) on the right, instead of a
-          single narrow centered column that left most of the tab's width
-          empty. Barangay is now a required pick from EXISTING barangays
-          only -- creating a new one moved to the Stations tab (see its own
-          2026-09-29 note) so a barangay can never again end up with no
-          police coverage the way typing a fresh id here used to risk. */}
+      {/* 2026-09-29 user request: two SEPARATE cards side by side, not one
+          box split in two. Left is a narrow, phone/booklet-shaped
+          credentials card (role, identity, location, create button) --
+          the original vertical form. Right is its own card holding the
+          diced permissions: custom role, base permissions, camera-level
+          access. Barangay is a required pick from EXISTING barangays only;
+          new ones are registered from the Stations tab. */}
       {tab === 'create' && (
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
-          <div className="border border-[var(--line)] p-6">
+          <div className="flex flex-col md:flex-row gap-6 items-start">
+
+          {/* LEFT CARD — credentials booklet */}
+          <div className="w-full md:w-[380px] shrink-0 border border-[var(--line)] p-6">
             <div className="flex items-center gap-2 mb-1">
               <UserPlus size={13} className="text-[var(--accent)]" />
-              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Create account — any role</h2>
+              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Create account</h2>
             </div>
             <p className="text-[9px] text-[var(--text-2)] tracking-wide mb-5">
-              Skips the self-signup approval queue. Connects the account to a location and grants permissions from the same tree admins use.
+              Skips the self-signup approval queue and connects the account to a location.
             </p>
 
-            <div className="grid grid-cols-4 gap-3 mb-6">
+            <div className="grid grid-cols-2 gap-2 mb-6">
               {CREATABLE_ROLES.map(r => {
                 const active = createForm.role === r.role;
                 const style = ROLE_STYLES[r.role];
@@ -2001,16 +2106,6 @@ export default function DevteamView() {
               })}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,22rem)_1fr] gap-8">
-
-              {/* LEFT — identity and location. One field per row (2026-09-29
-                  feedback: the paired 2-up sub-grid read as less "vertical"
-                  than the original form) in a fixed-width column, so the
-                  freed-up space goes to the right column instead of
-                  stretching identity itself edge-to-edge. md: breakpoint
-                  (not lg:) so the split actually engages at typical
-                  in-app widths instead of silently collapsing to one
-                  stacked column. */}
               <div>
                 <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-3">Identity</div>
                 <div className="mb-3">
@@ -2118,9 +2213,29 @@ export default function DevteamView() {
                 )}
               </div>
 
-              {/* RIGHT — role & access assignment */}
+            {createError && (
+              <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide mt-4">{createError}</p>
+            )}
+
+            <button
+              onClick={handleCreateUser}
+              disabled={createBusy}
+              className="w-full mt-5 py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+            >
+              <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
+            </button>
+          </div>
+
+          {/* RIGHT CARD — role & diced permissions */}
+          <div className="w-full flex-1 min-w-0 border border-[var(--line)] p-6">
               <div>
-                <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-3">Role &amp; access</div>
+                <div className="flex items-center gap-2 mb-1">
+                  <KeyRound size={13} className="text-[var(--accent)]" />
+                  <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Role &amp; access</h2>
+                </div>
+                <p className="text-[9px] text-[var(--text-2)] tracking-wide mb-5">
+                  What this {CREATABLE_ROLES.find(r => r.role === createForm.role)?.label || 'account'} can do, down to individual cameras.
+                </p>
 
                 {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
                   <div className="mb-4">
@@ -2226,19 +2341,96 @@ export default function DevteamView() {
                   )}
                 </div>
               </div>
+          </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD STATION MODAL (2026-09-29) */}
+      {stationModalOpen && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-2xl max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--panel-2)]">
+              <div>
+                <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">Register a police station</span>
+                <p className="text-[9px] text-[var(--text-3)] mt-1">PNP accounts are scoped to a station, so it has to exist before its commander or officers.</p>
+              </div>
+              <button onClick={() => setStationModalOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
+            <div className="p-5 space-y-3">
+              <FieldInput label="Station name *" value={stationForm.name} onChange={(v: string) => setStationForm({ ...stationForm, name: v })} placeholder="e.g. Ormoc City Police Station 1" />
+              <div className="grid grid-cols-2 gap-3">
+                <SelectInput label="Unit type" value={stationForm.station_type} onChange={v => setStationForm({ ...stationForm, station_type: v })} options={STATION_TYPES} />
+                <SelectInput label="Police Regional Office" value={stationForm.regional_office} onChange={v => setStationForm({ ...stationForm, regional_office: v })}
+                  options={PNP_REGIONAL_OFFICES} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FieldInput label="Parent office (City / Provincial Police Office)" value={stationForm.parent_office} onChange={(v: string) => setStationForm({ ...stationForm, parent_office: v })} placeholder="e.g. Ormoc City Police Office" />
+                <FieldInput label="Station commander / Chief of Police" value={stationForm.commander} onChange={(v: string) => setStationForm({ ...stationForm, commander: v })} placeholder="e.g. PLtCol. Juan Dela Cruz" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FieldInput label="Address" value={stationForm.address} onChange={(v: string) => setStationForm({ ...stationForm, address: v })} placeholder="Street, barangay, city" />
+                <FieldInput label="Hotline / contact number" value={stationForm.contact_number} onChange={(v: string) => setStationForm({ ...stationForm, contact_number: v })} placeholder="e.g. (053) 561-0000 / 0998-598-XXXX" />
+              </div>
+              <TextAreaInput label="Description" value={stationForm.description} onChange={v => setStationForm({ ...stationForm, description: v })}
+                placeholder="Coverage area, notable landmarks, operating notes…" />
+              {orgFormError && <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide">{orgFormError}</p>}
+              <div className="flex justify-end gap-2 pt-1">
+                <button onClick={() => setStationModalOpen(false)} className="px-4 py-2.5 border border-[var(--line)] text-[10px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--text)] transition-colors">Cancel</button>
+                <button onClick={handleCreateStation} disabled={stationBusy || !stationForm.name.trim()}
+                  className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90">
+                  {stationBusy ? 'Registering…' : 'Register station'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
-            {createError && (
-              <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide mt-5">{createError}</p>
-            )}
-
-            <button
-              onClick={handleCreateUser}
-              disabled={createBusy}
-              className="w-full mt-5 py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-            >
-              <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
-            </button>
+      {/* ADD BARANGAY MODAL (2026-09-29) -- always registered under a station */}
+      {barangayModalStation && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-2xl max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--panel-2)]">
+              <div>
+                <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">Register a barangay</span>
+                <p className="text-[9px] text-[var(--text-3)] mt-1">Covered by <span className="text-[var(--text-2)]">{barangayModalStation.name}</span> from the moment it's created.</p>
+              </div>
+              <button onClick={() => setBarangayModalStation(null)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
+            </div>
+            <div className="p-5 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <FieldInput label="Barangay name *" value={barangayForm.name} onChange={(v: string) => setBarangayForm({ ...barangayForm, name: v })} placeholder="e.g. Cogon" />
+                <FieldInput label="PSGC code (10 digits)" value={barangayForm.psgc_code} onChange={(v: string) => setBarangayForm({ ...barangayForm, psgc_code: v })} placeholder="e.g. 0837370015" />
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <FieldInput label="City / Municipality" value={barangayForm.city_municipality} onChange={(v: string) => setBarangayForm({ ...barangayForm, city_municipality: v })} placeholder="e.g. Ormoc City" />
+                <FieldInput label="Province" value={barangayForm.province} onChange={(v: string) => setBarangayForm({ ...barangayForm, province: v })} placeholder="e.g. Leyte" />
+                <SelectInput label="Region" value={barangayForm.region} onChange={v => setBarangayForm({ ...barangayForm, region: v })} options={PH_REGIONS} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FieldInput label="Punong Barangay (captain)" value={barangayForm.captain_name} onChange={(v: string) => setBarangayForm({ ...barangayForm, captain_name: v })} placeholder="e.g. Hon. Maria Santos" />
+                <FieldInput label="Barangay hall contact number" value={barangayForm.contact_number} onChange={(v: string) => setBarangayForm({ ...barangayForm, contact_number: v })} placeholder="e.g. 0917-XXX-XXXX" />
+              </div>
+              <FieldInput label="Barangay hall address" value={barangayForm.hall_address} onChange={(v: string) => setBarangayForm({ ...barangayForm, hall_address: v })} placeholder="Street / purok, barangay, city" />
+              <div className="grid grid-cols-2 gap-3">
+                <FieldInput label="Latitude (map center, optional)" value={barangayForm.lat} onChange={(v: string) => setBarangayForm({ ...barangayForm, lat: v })} placeholder="e.g. 11.0176" />
+                <FieldInput label="Longitude (map center, optional)" value={barangayForm.lng} onChange={(v: string) => setBarangayForm({ ...barangayForm, lng: v })} placeholder="e.g. 124.6031" />
+              </div>
+              <TextAreaInput label="Description" value={barangayForm.description} onChange={v => setBarangayForm({ ...barangayForm, description: v })}
+                placeholder="Puroks/sitios covered, population, known hotspots, landmarks…" />
+              <p className="text-[9px] leading-relaxed text-[var(--text-3)]">
+                Find the PSGC code on the Philippine Statistics Authority's PSGC listing (psa.gov.ph/classification/psgc). Already registered? Tick it in the station's jurisdiction list instead.
+              </p>
+              {orgFormError && <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide">{orgFormError}</p>}
+              <div className="flex justify-end gap-2 pt-1">
+                <button onClick={() => setBarangayModalStation(null)} className="px-4 py-2.5 border border-[var(--line)] text-[10px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--text)] transition-colors">Cancel</button>
+                <button onClick={handleCreateBarangay} disabled={stationBusy || !barangayForm.name.trim()}
+                  className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90">
+                  {stationBusy ? 'Registering…' : 'Register barangay'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -2324,83 +2516,74 @@ export default function DevteamView() {
             </p>
           </div>
 
-          <div className="border border-[var(--line)] p-4">
-            <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
-              Register a police station
+          <div className="flex items-center gap-2">
+            <div className="flex-1 flex items-center gap-2 border border-[var(--line)] bg-[var(--bg)] px-3 py-2.5 focus-within:border-[var(--accent)]/50 transition-colors">
+              <Search size={12} className="text-[var(--text-2)] shrink-0" />
+              <input
+                value={stationSearch}
+                onChange={e => setStationSearch(e.target.value)}
+                placeholder="search stations, commanders, addresses or barangays"
+                className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+              />
+              {stationSearch && (
+                <button onClick={() => setStationSearch('')} className="text-[var(--text-3)] hover:text-[var(--text)]" title="Clear search">
+                  <X size={12} />
+                </button>
+              )}
             </div>
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <input
-                  value={newStationName}
-                  onChange={e => setNewStationName(e.target.value)}
-                  placeholder="e.g. Ormoc City Police Station"
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                />
-              </div>
-              <button
-                onClick={handleCreateStation}
-                disabled={!newStationName.trim() || stationBusy}
-                className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90"
-              >
-                Create
-              </button>
-            </div>
-            <p className="text-[9px] leading-relaxed mt-2 text-[var(--text-3)]">
-              PNP accounts are scoped to a station's jurisdiction, so a station must
-              exist before its commander or officers can be created.
-            </p>
+            <button
+              onClick={openStationModal}
+              className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase transition-opacity hover:opacity-90 shrink-0"
+            >
+              <Plus size={12} /> Add station
+            </button>
           </div>
 
           {stations.length === 0 ? (
             <div className="border border-[var(--line)] py-14 text-center">
               <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No police stations registered</p>
+              <p className="text-[9px] mt-2 text-[var(--text-3)]">PNP accounts are scoped to a station, so register one before creating its commander or officers.</p>
             </div>
-          ) : stations.map(st => {
+          ) : filteredStations.length === 0 ? (
+            <div className="border border-[var(--line)] py-14 text-center">
+              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No stations match “{stationSearch}”</p>
+            </div>
+          ) : filteredStations.map(st => {
             const draft = jurisDraft[st.id] ?? st.barangay_ids;
             const dirty = draft.slice().sort().join(',') !== st.barangay_ids.slice().sort().join(',');
+            const meta = [st.station_type, st.parent_office, st.regional_office].filter(Boolean).join(' · ');
+            const contact = [st.commander && `Commander: ${st.commander}`, st.contact_number, st.address].filter(Boolean).join(' · ');
             return (
               <div key={st.id} className="border border-[var(--line)]">
-                <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
+                <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
                   <div className="min-w-0">
-                    <div className="text-[11px] text-[var(--text)] tracking-wide truncate">{st.name}</div>
-                    <div className="text-[9px] text-[var(--text-3)] mt-0.5">
-                      {st.id} · {st.staff_count} staff · {st.barangay_ids.length} barangay{st.barangay_ids.length === 1 ? '' : 's'}
+                    <div className="text-[12px] text-[var(--text)] tracking-wide truncate">{st.name}</div>
+                    {meta && <div className="text-[9px] text-[var(--text-2)] mt-0.5 truncate">{meta}</div>}
+                    {contact && <div className="text-[9px] text-[var(--text-3)] mt-0.5 truncate">{contact}</div>}
+                    {st.description && <p className="text-[10px] leading-relaxed text-[var(--text-2)] mt-1.5 max-w-3xl">{st.description}</p>}
+                    <div className="text-[9px] text-[var(--text-3)] mt-1">
+                      {st.staff_count} staff · {st.barangay_ids.length} barangay{st.barangay_ids.length === 1 ? '' : 's'}
                     </div>
                   </div>
-                  <button
-                    onClick={() => handleDeleteStation(st)}
-                    title={st.staff_count ? 'Reassign its staff first' : 'Delete station'}
-                    disabled={st.staff_count > 0}
-                    className="p-2 border border-[var(--critical)]/30 text-[var(--critical)] disabled:opacity-25 hover:bg-[var(--critical)]/10 transition-colors shrink-0"
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => openBarangayModal(st)}
+                      className="flex items-center gap-1.5 px-3 py-2 border border-[var(--accent)]/40 text-[var(--accent)] text-[9px] tracking-[0.12em] uppercase hover:bg-[var(--accent)]/10 transition-colors"
+                    >
+                      <Plus size={11} /> Add barangay
+                    </button>
+                    <button
+                      onClick={() => handleDeleteStation(st)}
+                      title={st.staff_count ? 'Reassign its staff first' : 'Delete station'}
+                      disabled={st.staff_count > 0}
+                      className="p-2 border border-[var(--critical)]/30 text-[var(--critical)] disabled:opacity-25 hover:bg-[var(--critical)]/10 transition-colors"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="p-4">
-                  {/* 2026-09-29: registering a NEW barangay happens here now,
-                      directly under the station that will cover it, instead
-                      of in Create User. */}
-                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
-                    Register a barangay under this station
-                  </div>
-                  <div className="flex items-end gap-2 mb-4">
-                    <input
-                      value={newBarangayDraft[st.id] || ''}
-                      onChange={e => setNewBarangayDraft(prev => ({ ...prev, [st.id]: e.target.value }))}
-                      onKeyDown={e => { if (e.key === 'Enter') handleAddBarangayToStation(st.id); }}
-                      placeholder="e.g. cogon"
-                      className="flex-1 bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                    />
-                    <button
-                      onClick={() => handleAddBarangayToStation(st.id)}
-                      disabled={!newBarangayDraft[st.id]?.trim() || addBarangayBusyId === st.id}
-                      className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90"
-                    >
-                      Add
-                    </button>
-                  </div>
-
                   <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
                     Jurisdiction — barangays this station can see
                   </div>
@@ -2415,8 +2598,9 @@ export default function DevteamView() {
                             key={loc.id}
                             className="flex items-center justify-between px-3 py-2 cursor-pointer bg-[var(--panel)] hover:bg-[var(--panel-2)] transition-colors"
                           >
-                            <span className="text-[10px] text-[var(--text)] truncate">
-                              {loc.id}
+                            <span className="text-[10px] text-[var(--text)] truncate" title={loc.description || undefined}>
+                              {loc.name || loc.id}
+                              {loc.city_municipality && <span className="text-[var(--text-3)] ml-1.5">{loc.city_municipality}</span>}
                               {loc.status !== 'approved' && (
                                 <span className="text-[var(--warn)] ml-1.5">({loc.status})</span>
                               )}
@@ -3170,6 +3354,37 @@ function SeatChip({ user, code }: { user?: ManagedUser; code: string }) {
     <span className={`flex items-center gap-1.5 text-[9px] px-2 py-1 border ${style.border} ${style.text}`}>
       {code} &middot; {user.username}
     </span>
+  );
+}
+
+function SelectInput({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[] }) {
+  return (
+    <div>
+      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
+      >
+        <option value="">select…</option>
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function TextAreaInput({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <div>
+      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
+      <textarea
+        value={value}
+        rows={3}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors resize-y"
+      />
+    </div>
   );
 }
 

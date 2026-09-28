@@ -1169,7 +1169,7 @@ def _vbox_overlap_ratio(p_box, vb):
     p_area = max((p_box[2]-p_box[0]) * (p_box[3]-p_box[1]), 1)
     return inter / p_area
 
-def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_path: str = None):
+def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_path: str = None, context: dict = None):
     print(f"🔥 [ALERT] Posting {event} event | case_id={incident_id} | conf={conf:.2f}")
     try:
         # BUG FOUND 2026-08-19: these were camelCase (barangayId,
@@ -1210,6 +1210,8 @@ def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_pat
         # real to render instead of falling back to the picsum placeholder.
         if screenshot_path:
             payload["screenshot_path"] = screenshot_path
+        if context:
+            payload["context"] = context
         r = requests.post(BACKEND_URL, json=payload, timeout=2.0)
         print(f"   ✅ Backend {r.status_code}: {r.text[:120]}")
     except Exception as e:
@@ -2340,10 +2342,14 @@ while _running:
 
     triggered_alerts_this_frame = []
     active_pip_crop = None
-    pip_border_color = (0, 255, 80) 
+    pip_border_color = (0, 255, 80)
+    # Sent with every alert as report-draft context (backend.py's
+    # build_ai_report_draft) -- 0 when YOLO held no tracks this frame.
+    people_in_frame = 0
 
     if (pose_res[0].boxes is not None and pose_res[0].boxes.id is not None and pose_res[0].keypoints is not None):
         ids = pose_res[0].boxes.id.int().cpu().tolist()
+        people_in_frame = len(ids)
         kpts = pose_res[0].keypoints.xy.cpu().numpy()
         boxes = pose_res[0].boxes.xyxy.cpu().numpy()
 
@@ -2498,7 +2504,13 @@ while _running:
                 scene_last_alert_frame = frame_count
 
                 event_type = "ARMED THREAT" if state == "ARMED" else "ASSAULT"
-                triggered_alerts_this_frame.append({"id": incident_id, "conf": conf, "event": event_type})
+                track_weapons = [{"name": w["name"], "conf": round(float(w.get("conf", 0)), 3)}
+                                 for w in weapon_assigns.get(tid, []) if w.get("name")]
+                triggered_alerts_this_frame.append({"id": incident_id, "conf": conf, "event": event_type, "ctx": {
+                    "detector": "weapon detector + pose tracking" if state == "ARMED" else "X3D violence-recognition model",
+                    "attribution": "track", "track_id": int(tid),
+                    "people_in_frame": people_in_frame, "weapons": track_weapons,
+                }})
 
             _draw_overlay(frame, p_box, tid, state, weapon_assigns.get(tid))
 
@@ -2518,7 +2530,9 @@ while _running:
                 if incident_id:
                     triggered_alerts_this_frame.append({"id": incident_id,
                                                         "conf": RULE_ROBBERY_PLACEHOLDER_CONF,
-                                                        "event": "ROBBERY"})
+                                                        "event": "ROBBERY",
+                                                        "ctx": {"detector": "rule-based robbery heuristic (armed person near another person)",
+                                                                "attribution": "scene", "people_in_frame": people_in_frame}})
 
         # ─── VANDALISM FILTER ANALYSIS ───
         # Was permanently dead: static_targets came from weapon_signs.pt's
@@ -2562,7 +2576,10 @@ while _running:
             if incident_id:
                 triggered_alerts_this_frame.append({"id": incident_id,
                                                     "conf": RULE_VANDALISM_PLACEHOLDER_CONF,
-                                                    "event": "VANDALISM"})
+                                                    "event": "VANDALISM",
+                                                    "ctx": {"detector": "rule-based vandalism heuristic (pose + marked surface)",
+                                                            "attribution": "track", "track_id": int(tid),
+                                                            "people_in_frame": people_in_frame}})
 
     # ─── ROBBERY MODEL ALERT ───
     # Outside the pose block, for the same reason scene-mode violence is: the
@@ -2574,7 +2591,9 @@ while _running:
         if incident_id:
             triggered_alerts_this_frame.append({"id": incident_id,
                                                 "conf": float(robbery_conf),
-                                                "event": "ROBBERY"})
+                                                "event": "ROBBERY",
+                                                "ctx": {"detector": "robbery video-classification model",
+                                                        "attribution": "scene", "people_in_frame": people_in_frame}})
 
     # ─── VANDALISM MODEL ALERT ───
     # Outside the pose block for the same reason as robbery: property damage is
@@ -2587,7 +2606,9 @@ while _running:
         if incident_id:
             triggered_alerts_this_frame.append({"id": incident_id,
                                                 "conf": float(vandal_conf),
-                                                "event": "VANDALISM"})
+                                                "event": "VANDALISM",
+                                                "ctx": {"detector": "vandalism video-classification model",
+                                                        "attribution": "scene", "people_in_frame": people_in_frame}})
 
     # ─── SCENE-MODE FALLBACK: alert with nobody tracked ───
     # Deliberately OUTSIDE the pose block. This is the whole point of scene
@@ -2614,7 +2635,9 @@ while _running:
         if incident_id and not already_alerted:
             scene_last_alert_frame = frame_count
             triggered_alerts_this_frame.append(
-                {"id": incident_id, "conf": scene_conf, "event": "ASSAULT"}
+                {"id": incident_id, "conf": scene_conf, "event": "ASSAULT",
+                 "ctx": {"detector": "X3D scene-level violence model", "attribution": "scene",
+                         "people_in_frame": people_in_frame}}
             )
 
     now = time.perf_counter()
@@ -2656,7 +2679,7 @@ while _running:
         snap_frame = _draw_alert_banner(frame.copy(), alert["event"], alert["conf"])
         cv2.imwrite(snap_path, snap_frame)
         screenshot_url_path = f"/static/screenshots/{snap_filename}"
-        _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path)
+        _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path, alert.get('ctx'))
         _start_pending_clip(alert['id'], alert['event'], alert['conf'])
 
     # Keep the raw-frame ring buffer topped up every frame (not just alert
