@@ -222,6 +222,10 @@ export default function DevteamView() {
   // preference, not something that needs to follow the account across
   // devices. Loaded lazily (useState initializer, not an effect) so the
   // tab bar never flashes the default order before snapping to a saved one.
+  // Reordering only engages behind an explicit Edit button (not "always
+  // draggable" or a long-press gesture) so an ordinary click on a tab
+  // never risks starting a drag.
+  const [configEditMode, setConfigEditMode] = useState(false);
   const [configTabOrder, setConfigTabOrder] = useState<Tab[]>(() => {
     if (typeof window === "undefined") return CONFIG_TAIL_DEFAULT_ORDER;
     try {
@@ -1405,10 +1409,10 @@ export default function DevteamView() {
             <TabButton icon={<Users2 size={12} />} label="Manage Users" active={tab === 'manage_users'} onClick={() => setTab('manage_users')} badge={data.users.length} />
             <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
 
-            {/* Drag-and-drop reorderable tail (2026-09-29). Native HTML5 DnD
-                directly on each tab button -- no added handle/icon, no
-                separate "customize order" control, just the arrangement
-                itself. Order persists per-browser (configTabOrder). */}
+            {/* Drag-and-drop reorderable tail (2026-09-29), gated behind an
+                explicit Edit button rather than being always-draggable --
+                keeps a plain click on a tab from ever being mistaken for a
+                drag. Order persists per-browser (configTabOrder). */}
             {configTabOrder.map(t => {
               const def: { icon: React.ReactNode; label: string; onClick: () => void; badge?: number } | null =
                 t === 'permissions' ? {
@@ -1430,18 +1434,27 @@ export default function DevteamView() {
               return (
                 <div
                   key={t}
-                  draggable
-                  onDragStart={() => setDraggedConfigTab(t)}
-                  onDragOver={e => e.preventDefault()}
-                  onDrop={() => reorderConfigTab(t)}
+                  draggable={configEditMode}
+                  onDragStart={() => configEditMode && setDraggedConfigTab(t)}
+                  onDragOver={e => { if (configEditMode) e.preventDefault(); }}
+                  onDrop={() => configEditMode && reorderConfigTab(t)}
                   onDragEnd={() => setDraggedConfigTab(null)}
-                  className={`cursor-move transition-opacity ${draggedConfigTab === t ? 'opacity-30' : ''}`}
-                  title="Drag to reorder"
+                  className={configEditMode ? `cursor-move transition-opacity ${draggedConfigTab === t ? 'opacity-30' : ''}` : undefined}
+                  title={configEditMode ? 'Drag to reorder' : undefined}
                 >
-                  <TabButton icon={def.icon} label={def.label} active={tab === t} onClick={def.onClick} badge={def.badge} />
+                  <TabButton icon={def.icon} label={def.label} active={tab === t} onClick={configEditMode ? () => {} : def.onClick} badge={def.badge} />
                 </div>
               );
             })}
+
+            <button
+              onClick={() => { setConfigEditMode(v => !v); setDraggedConfigTab(null); }}
+              title={configEditMode ? 'Done reordering tabs' : 'Edit tab order'}
+              className="ml-auto flex items-center gap-1.5 px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-colors"
+              style={{ color: configEditMode ? 'var(--accent)' : 'var(--text-3)' }}
+            >
+              {configEditMode ? <><Save size={11} /> Done</> : <><Pencil size={11} /> Edit order</>}
+            </button>
           </>
         )}
       </div>
