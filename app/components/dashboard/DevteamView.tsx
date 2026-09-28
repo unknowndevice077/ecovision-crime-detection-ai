@@ -248,8 +248,13 @@ export default function DevteamView() {
   const reorderConfigTab = (target: Tab) => {
     if (!draggedConfigTab || draggedConfigTab === target) return;
     setConfigTabOrder(prev => {
+      // targetIdx must come from `prev` (before the dragged tab is removed).
+      // Computing it from the post-removal array instead (the earlier bug)
+      // shifts every index after the dragged tab's old spot down by one,
+      // so a forward drag always landed one slot short of the drop target
+      // -- an adjacent forward drag silently did nothing at all.
+      const targetIdx = prev.indexOf(target);
       const next = prev.filter(t => t !== draggedConfigTab);
-      const targetIdx = next.indexOf(target);
       next.splice(targetIdx, 0, draggedConfigTab);
       try { localStorage.setItem(CONFIG_TAB_ORDER_STORAGE_KEY, JSON.stringify(next)); } catch { /* per-device convenience only */ }
       return next;
@@ -1996,17 +2001,28 @@ export default function DevteamView() {
               })}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,22rem)_1fr] gap-8">
 
-              {/* LEFT — identity and location */}
+              {/* LEFT — identity and location. One field per row (2026-09-29
+                  feedback: the paired 2-up sub-grid read as less "vertical"
+                  than the original form) in a fixed-width column, so the
+                  freed-up space goes to the right column instead of
+                  stretching identity itself edge-to-edge. md: breakpoint
+                  (not lg:) so the split actually engages at typical
+                  in-app widths instead of silently collapsing to one
+                  stacked column. */}
               <div>
                 <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-3">Identity</div>
-                <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="mb-3">
                   <FieldInput label="Username" value={createForm.username} onChange={(v: string) => setCreateForm({ ...createForm, username: v })} />
+                </div>
+                <div className="mb-3">
                   <FieldInput label="Password" type="password" value={createForm.password} onChange={(v: string) => setCreateForm({ ...createForm, password: v })} />
                 </div>
-                <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="mb-3">
                   <FieldInput label="Assignment" value={createForm.assignment} onChange={(v: string) => setCreateForm({ ...createForm, assignment: v })} placeholder="e.g. Patrol Unit 3" />
+                </div>
+                <div className="mb-3">
                   <FieldInput label="Display title (optional)" value={createForm.display_title} onChange={(v: string) => setCreateForm({ ...createForm, display_title: v })} placeholder="e.g. Assistant Captain" />
                 </div>
 
