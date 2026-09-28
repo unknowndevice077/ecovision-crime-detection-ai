@@ -623,7 +623,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
 
   const finalLogsDisplay = filteredIncidents;
   const fieldStyle = { background: 'var(--bg)', borderColor: 'var(--line)' };
-  const inputClass = "data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors";
   const labelClass = "label block mb-1";
 
   return (

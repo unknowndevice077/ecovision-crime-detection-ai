@@ -1,111 +1,24 @@
 "use client";
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
-  ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX, UserCheck,
-  Pencil, Trash2, X, Save, Search, LogOut, KeyRound, Users2, MapPinned,
+  ShieldAlert, Wifi, WifiOff, ShieldCheck, ShieldX,
+  Search, LogOut, KeyRound, Users2, MapPinned,
   Activity, Video, Film, Radio, LayoutGrid, ClipboardList, UserPlus,
-  Brain, AlertTriangle, Info, RotateCw, Eye, EyeOff, Gauge, Undo2, Plus
+  Brain, AlertTriangle, Info, RotateCw, Gauge, Undo2
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
-import { permissionRowsFor, permissionNoteFor, onlyEditablePermissions } from '../../lib/permissions';
-
-const CREATABLE_ROLES = [
-  { role: 'PNP_ADMIN', code: 'PD', label: 'PNP Admin', scope: 'station' },
-  { role: 'PNP_OFFICER', code: 'PD', label: 'PNP Officer', scope: 'station' },
-  { role: 'BARANGAY_ADMIN', code: 'BG', label: 'Barangay Admin', scope: 'barangay' },
-  { role: 'BARANGAY_STAFF', code: 'BG', label: 'Barangay Staff', scope: 'barangay' },
-];
-
-const PNP_ROLES = ['PNP_ADMIN', 'PNP_OFFICER'];
-
-// Two operating branches, distinguished the way a dispatch board would:
-// a callsign-style two-letter code and a single accent, nothing more.
-const ROLE_STYLES: Record<string, { code: string; text: string; border: string; bg: string; barText: string }> = {
-  PNP_ADMIN: { code: 'PD', text: 'text-[var(--accent)]', border: 'border-[var(--accent)]/25', bg: 'bg-[var(--accent)]/[0.07]', barText: 'text-[var(--accent)]' },
-  BARANGAY_ADMIN: { code: 'BG', text: 'text-[var(--ok)]', border: 'border-[var(--ok)]/25', bg: 'bg-[var(--ok)]/[0.07]', barText: 'text-[var(--ok)]' },
-  PNP_OFFICER: { code: 'PD', text: 'text-[var(--accent)]/70', border: 'border-[var(--accent)]/15', bg: 'bg-[var(--accent)]/[0.04]', barText: 'text-[var(--accent)]/70' },
-  BARANGAY_STAFF: { code: 'BG', text: 'text-[var(--ok)]/70', border: 'border-[var(--ok)]/15', bg: 'bg-[var(--ok)]/[0.04]', barText: 'text-[var(--ok)]/70' },
-  // DEVTEAM accounts are real rows in data.users (the Users tab lists every
-  // account, itself included) but have no "branch" -- neutral styling.
-  DEVTEAM: { code: 'DT', text: 'text-[var(--text)]', border: 'border-[var(--line-2)]', bg: 'bg-[var(--panel-2)]', barText: 'text-[var(--text)]' },
-};
-
-// BUG FOUND 2026-09-04: every ROLE_STYLES[role]-with-fallback call site in
-// this file used `|| ROLE_STYLES.POLICE` as the "unknown role" fallback --
-// but ROLE_STYLES has never had a POLICE key (see above: PNP_ADMIN,
-// PNP_OFFICER, BARANGAY_ADMIN, BARANGAY_STAFF, DEVTEAM). That fallback was
-// itself undefined, so any row whose role didn't hit the map directly
-// still crashed on `.border` a line later -- the "safety net" caught
-// nothing. Harmless as long as every role rendered this way happened to
-// already be a real key (true everywhere ROLE_STYLES had been reached
-// before), until the new Users tab below rendered DEVTEAM rows, which
-// hadn't been added to the map yet, and the crash finally fired for real.
-const DEFAULT_ROLE_STYLE = { code: '??', text: 'text-[var(--text-2)]', border: 'border-[var(--line-2)]', bg: 'bg-[var(--panel-2)]', barText: 'text-[var(--text-2)]' };
-
-function authHeaders() {
-  const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
-  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
-}
-
-function initials(name: string) {
-  return name.slice(0, 2).toUpperCase();
-}
-
-type ManagedUser = {
-  id: number;
-  username: string;
-  role: string;
-  barangay_id: string;
-  station_id: string;
-  assignment: string;
-  parent_admin_id: number | null;
-  permissions: string;
-  last_login: string | null;
-  custom_permissions: boolean;
-  verification_status?: string;
-};
-
-type PendingLocation = {
-  id: string;
-  name: string;
-  status?: string;
-  requester_id?: number | null;
-  requester_username: string | null;
-  requester_role: string | null;
-  requester_assignment: string | null;
-  requester_verification_status?: string | null;
-  requester_has_document?: boolean;
-  created_at: string;
-  psgc_code?: string | null;
-  city_municipality?: string | null;
-  province?: string | null;
-  region?: string | null;
-  captain_name?: string | null;
-  hall_address?: string | null;
-  contact_number?: string | null;
-  description?: string | null;
-};
-
-// 2026-09-23 bug fix: a self-signup PNP_ADMIN had no location object (a
-// station is DevTeam-created and already permanently approved) to hang a
-// pending status on the way a barangay applicant does -- so it never
-// showed up here at all, and there was nothing for DevTeam to accept.
-// This is that missing queue, driven by the applicant's own account
-// (signup_status) instead of a location.
-type PendingSignup = {
-  id: number;
-  username: string;
-  role: string;
-  assignment: string;
-  station_id: string | null;
-  station_name: string | null;
-  created_at: string;
-  verification_status: string;
-  has_document: boolean;
-};
+import {
+  DEFAULT_ROLE_STYLE, ROLE_STYLES, CameraRow, CustomRole, EmptyPane, InfoRow, ManagedUser, PaneHeader,
+  PendingLocation, PendingSignup, Station, authHeaders,
+} from './devteam/shared';
+import ManageUsersPane from './devteam/ManageUsersPane';
+import CreateUserPane from './devteam/CreateUserPane';
+import ApprovalsPane from './devteam/ApprovalsPane';
+import StationsPane from './devteam/StationsPane';
+import RolesPane from './devteam/RolesPane';
 
 // Split 2026-09-23 (explicit teacher requirement: separate configuration/
 // CRUD from monitoring in the DevTeam console). Monitoring is read-only --
@@ -193,58 +106,6 @@ type OptimizeState = {
   cancel_requested?: boolean;
 };
 
-type Station = {
-  id: string; name: string; barangay_ids: string[]; staff_count: number;
-  station_type?: string | null; parent_office?: string | null; regional_office?: string | null;
-  commander?: string | null; address?: string | null; contact_number?: string | null; description?: string | null;
-};
-
-type StationForm = {
-  name: string; station_type: string; parent_office: string; regional_office: string;
-  commander: string; address: string; contact_number: string; description: string;
-};
-const EMPTY_STATION_FORM: StationForm = {
-  name: '', station_type: '', parent_office: '', regional_office: '',
-  commander: '', address: '', contact_number: '', description: '',
-};
-
-type BarangayForm = {
-  name: string; psgc_code: string; city_municipality: string; province: string; region: string;
-  captain_name: string; hall_address: string; contact_number: string; description: string;
-  lat: string; lng: string;
-};
-const EMPTY_BARANGAY_FORM: BarangayForm = {
-  name: '', psgc_code: '', city_municipality: '', province: '', region: '',
-  captain_name: '', hall_address: '', contact_number: '', description: '', lat: '', lng: '',
-};
-
-// PNP unit types below a City/Provincial Police Office.
-const STATION_TYPES = [
-  'City Police Station (CPS)',
-  'Municipal Police Station (MPS)',
-  'Police Community Precinct (PCP)',
-  'Police Sub-Station',
-];
-
-const PNP_REGIONAL_OFFICES = [
-  'NCRPO — National Capital Region', 'PRO-COR — Cordillera', 'PRO 1 — Ilocos Region', 'PRO 2 — Cagayan Valley',
-  'PRO 3 — Central Luzon', 'PRO 4A — CALABARZON', 'PRO 4B — MIMAROPA', 'PRO 5 — Bicol Region',
-  'PRO 6 — Western Visayas', 'PRO NIR — Negros Island Region', 'PRO 7 — Central Visayas', 'PRO 8 — Eastern Visayas',
-  'PRO 9 — Zamboanga Peninsula', 'PRO 10 — Northern Mindanao', 'PRO 11 — Davao Region', 'PRO 12 — SOCCSKSARGEN',
-  'PRO 13 — Caraga', 'PRO BAR — Bangsamoro',
-];
-
-const PH_REGIONS = [
-  'NCR — National Capital Region', 'CAR — Cordillera Administrative Region',
-  'Region I — Ilocos Region', 'Region II — Cagayan Valley', 'Region III — Central Luzon',
-  'Region IV-A — CALABARZON', 'MIMAROPA Region', 'Region V — Bicol Region',
-  'Region VI — Western Visayas', 'NIR — Negros Island Region', 'Region VII — Central Visayas',
-  'Region VIII — Eastern Visayas', 'Region IX — Zamboanga Peninsula', 'Region X — Northern Mindanao',
-  'Region XI — Davao Region', 'Region XII — SOCCSKSARGEN', 'Region XIII — Caraga', 'BARMM',
-];
-
-type CameraRow = { id: string; name: string; url: string; status: string; barangay_id: string };
-
 type AuditEntry = {
   id: string;
   actor_user_id: number | null;
@@ -301,6 +162,41 @@ export default function DevteamView() {
   });
   const [draggedConfigTab, setDraggedConfigTab] = useState<Tab | null>(null);
 
+  // Long-press (~500ms without moving) on a reorderable tab enters reorder
+  // mode; Esc or a pointer-down outside the tabs leaves it.
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressFiredRef = useRef(false);
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+    longPressOriginRef.current = null;
+  };
+  const startLongPress = (x: number, y: number) => {
+    if (configEditMode) return;
+    cancelLongPress();
+    longPressOriginRef.current = { x, y };
+    longPressTimerRef.current = setTimeout(() => {
+      longPressFiredRef.current = true;
+      setConfigEditMode(true);
+      longPressTimerRef.current = null;
+    }, 500);
+  };
+  const moveLongPress = (x: number, y: number) => {
+    const o = longPressOriginRef.current;
+    if (o && Math.hypot(x - o.x, y - o.y) > 8) cancelLongPress();
+  };
+  useEffect(() => {
+    if (!configEditMode) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setConfigEditMode(false); };
+    const onDown = (e: PointerEvent) => {
+      if (!(e.target as HTMLElement | null)?.closest('[data-config-tab]')) setConfigEditMode(false);
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onDown);
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('pointerdown', onDown); };
+  }, [configEditMode]);
+
   const reorderConfigTab = (target: Tab) => {
     if (!draggedConfigTab || draggedConfigTab === target) return;
     setConfigTabOrder(prev => {
@@ -328,193 +224,9 @@ export default function DevteamView() {
   // disappearing from a purely per-barangay view).
   const [selectedLocationKey, setSelectedLocationKey] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
-  const [editDraft, setEditDraft] = useState({ username: '', assignment: '', password: '', barangay_id: '', station_id: '' });
-  const [showEditPassword, setShowEditPassword] = useState(false);
-  const [permsDraft, setPermsDraft] = useState<Record<string, boolean>>({});
-  // Admin permission override (2026-09-04): PNP_ADMIN/BARANGAY_ADMIN
-  // permissions are normally automatic and shown locked -- overrideMode is
-  // whether THIS edit session has that admin's permissions unlocked into
-  // real, editable checkboxes (seeded from whether they're already
-  // customized when the modal opens; toggling it is what turns the "always"
-  // rows in permissionRowsFor() into "editable" ones). overridePassword is
-  // the DevTeam re-auth required to actually apply that -- see
-  // backend.py's AdminPermissionOverride for why it's the caller's own real
-  // password rather than a fixed code.
-  const [overrideMode, setOverrideMode] = useState(false);
-  const [overridePassword, setOverridePassword] = useState('');
-  const [showOverridePassword, setShowOverridePassword] = useState(false);
   const [pendingActionIds, setPendingActionIds] = useState<Set<string | number>>(new Set());
   const [toast, setToast] = useState('');
   const { connected } = useWebSocketContext();
-
-  // CREATE USER TAB — DevTeam can mint any role directly (PNP_ADMIN,
-  // BARANGAY_ADMIN, POLICE, BARANGAY), skip the pending-approval signup
-  // flow entirely, and grant permissions from the same tree admins use for
-  // their own sub-accounts.
-  const [createForm, setCreateForm] = useState({
-    username: '', password: '', assignment: '', display_title: '',
-    role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '' as string,
-    custom_role_id: '' as string,
-  });
-  const [createPerms, setCreatePerms] = useState<Record<string, boolean>>({});
-  const [createBusy, setCreateBusy] = useState(false);
-  const [createError, setCreateError] = useState('');
-  // 2026-09-29 user request: which cameras this account should see, picked
-  // at creation time instead of a separate trip to the Permissions tab
-  // afterward. Applied as resource_permissions grants once the account
-  // actually exists (there's no user id to grant against until then).
-  const [createCameraGrants, setCreateCameraGrants] = useState<string[]>([]);
-  const [showAddRoleModal, setShowAddRoleModal] = useState(false);
-
-  // STATIONS TAB. jurisDraft holds pending edits keyed by station id, so the
-  // checkboxes stay responsive and the PUT only fires on Save -- toggling a
-  // jurisdiction changes who can see a whole barangay's footage, which is
-  // not something to commit on every stray click.
-  const [stationBusy, setStationBusy] = useState(false);
-  const [jurisDraft, setJurisDraft] = useState<Record<string, string[]>>({});
-  const [stationSearch, setStationSearch] = useState('');
-
-  // 2026-09-29: stations and barangays are registered through full forms
-  // (modals) instead of a bare name/id box -- each carries a real record
-  // (PNP hierarchy for stations, PSGC code + LGU + punong barangay for
-  // barangays). A new barangay is still always created UNDER a station, so
-  // it can never exist without police coverage.
-  const [stationModalOpen, setStationModalOpen] = useState(false);
-  const [stationForm, setStationForm] = useState<StationForm>(EMPTY_STATION_FORM);
-  const [barangayModalStation, setBarangayModalStation] = useState<Station | null>(null);
-  const [barangayForm, setBarangayForm] = useState<BarangayForm>(EMPTY_BARANGAY_FORM);
-  const [orgFormError, setOrgFormError] = useState('');
-
-  const filteredStations = useMemo(() => {
-    const q = stationSearch.trim().toLowerCase();
-    if (!q) return stations;
-    const nameById = new Map(allLocations.map(l => [l.id, `${l.id} ${l.name || ''} ${l.city_municipality || ''}`.toLowerCase()]));
-    return stations.filter(st =>
-      [st.name, st.station_type, st.parent_office, st.regional_office, st.commander, st.address, st.contact_number, st.description]
-        .some(v => (v || '').toLowerCase().includes(q))
-      || st.barangay_ids.some(b => (nameById.get(b) || b).includes(q)));
-  }, [stationSearch, stations, allLocations]);
-
-  const openStationModal = () => {
-    setStationForm(EMPTY_STATION_FORM);
-    setOrgFormError('');
-    setStationModalOpen(true);
-  };
-
-  // Prefill the LGU fields from a barangay this station already covers --
-  // a station's barangays are nearly always in the same city/province.
-  const openBarangayModal = (st: Station) => {
-    const sibling = allLocations.find(l => st.barangay_ids.includes(l.id) && (l.city_municipality || l.province));
-    setBarangayForm({
-      ...EMPTY_BARANGAY_FORM,
-      city_municipality: sibling?.city_municipality || '',
-      province: sibling?.province || '',
-      region: sibling?.region || '',
-    });
-    setOrgFormError('');
-    setBarangayModalStation(st);
-  };
-
-  const handleCreateStation = async () => {
-    const name = stationForm.name.trim();
-    if (!name) { setOrgFormError('Station name is required.'); return; }
-    setStationBusy(true);
-    setOrgFormError('');
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/stations`, {
-        method: "POST", headers: authHeaders(), body: JSON.stringify({ ...stationForm, name }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) { setStationModalOpen(false); fetchOverview(); flash(`Station "${name}" registered.`); }
-      else setOrgFormError(d.detail || 'Could not create station.');
-    } catch {
-      setOrgFormError('Backend connection failure.');
-    } finally {
-      setStationBusy(false);
-    }
-  };
-
-  const handleCreateBarangay = async () => {
-    const st = barangayModalStation;
-    if (!st) return;
-    const name = barangayForm.name.trim();
-    if (!name) { setOrgFormError('Barangay name is required.'); return; }
-    const psgc = barangayForm.psgc_code.replace(/\s/g, '');
-    if (psgc && !/^\d{9,10}$/.test(psgc)) { setOrgFormError('PSGC code must be 10 digits (e.g. 0837370015).'); return; }
-    const lat = barangayForm.lat.trim() ? Number(barangayForm.lat) : null;
-    const lng = barangayForm.lng.trim() ? Number(barangayForm.lng) : null;
-    if ((lat !== null && Number.isNaN(lat)) || (lng !== null && Number.isNaN(lng))) {
-      setOrgFormError('Latitude/longitude must be numbers.');
-      return;
-    }
-    setStationBusy(true);
-    setOrgFormError('');
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/stations/${st.id}/barangays`, {
-        method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ ...barangayForm, name, psgc_code: psgc, lat, lng }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setBarangayModalStation(null);
-        fetchOverview();
-        flash(`Barangay ${name} registered under ${st.name}.`);
-      } else setOrgFormError(d.detail || 'Could not register barangay.');
-    } catch {
-      setOrgFormError('Backend connection failure.');
-    } finally {
-      setStationBusy(false);
-    }
-  };
-
-  const toggleJurisdiction = (st: Station, barangayId: string) => {
-    setJurisDraft(prev => {
-      const current = prev[st.id] ?? st.barangay_ids;
-      const next = current.includes(barangayId)
-        ? current.filter(b => b !== barangayId)
-        : [...current, barangayId];
-      return { ...prev, [st.id]: next };
-    });
-  };
-
-  const saveJurisdiction = async (st: Station) => {
-    const draft = jurisDraft[st.id];
-    if (!draft) return;
-    setStationBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/stations/${st.id}/jurisdiction`, {
-        method: "PUT", headers: authHeaders(), body: JSON.stringify({ barangay_ids: draft }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setJurisDraft(prev => { const n = { ...prev }; delete n[st.id]; return n; });
-        fetchOverview();
-        flash(`${st.name} now covers ${draft.length} barangay${draft.length === 1 ? '' : 's'}.`);
-      } else flash(d.detail || 'Could not update jurisdiction.');
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setStationBusy(false);
-    }
-  };
-
-  const handleDeleteStation = async (st: Station) => {
-    if (st.staff_count > 0) return; // button is disabled too; belt and braces
-    setStationBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/stations/${st.id}`, {
-        method: "DELETE", headers: authHeaders(),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) { fetchOverview(); flash(`${st.name} deleted.`); }
-      else flash(d.detail || 'Could not delete station.');
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setStationBusy(false);
-    }
-  };
 
   const fetchOverview = async () => {
     try {
@@ -606,6 +318,7 @@ export default function DevteamView() {
   const [auditLoaded, setAuditLoaded] = useState(false);
   const [auditActionFilter, setAuditActionFilter] = useState('');
   const [auditBusyIds, setAuditBusyIds] = useState<Set<string>>(new Set());
+  const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
 
   const fetchAuditLog = async (action?: string) => {
     try {
@@ -625,118 +338,14 @@ export default function DevteamView() {
   // here would create grant rows nothing ever consults, the same "looks
   // like a promise the app doesn't keep" problem lib/permissions.ts's own
   // top comment warns about.
-  const [customRoles, setCustomRoles] = useState<any[]>([]);
+  const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
   const [rolesLoaded, setRolesLoaded] = useState(false);
-  const [newRoleForm, setNewRoleForm] = useState<{ name: string; org_type: 'barangay' | 'police' }>({ name: '', org_type: 'barangay' });
-  const [newRolePerms, setNewRolePerms] = useState<Record<string, boolean>>({});
-  const [roleBusy, setRoleBusy] = useState(false);
-
-  const [grantUserId, setGrantUserId] = useState('');
-  const [grantCameraId, setGrantCameraId] = useState('');
-  const [grantBusy, setGrantBusy] = useState(false);
-  const [grantCameras, setGrantCameras] = useState<{ id: string; name: string; barangay_id: string }[]>([]);
-  const [userGrants, setUserGrants] = useState<any[]>([]);
-
   const fetchCustomRoles = async () => {
     try {
       const res = await fetch(`${API_URL}/api/custom_roles`, { headers: authHeaders() });
       if (res.ok) setCustomRoles(await res.json());
     } catch { /* leave whatever was last shown */ }
     finally { setRolesLoaded(true); }
-  };
-
-  // onCreated lets a caller (the Create User tab's "+ Add Role" modal) react
-  // to the new role's id -- e.g. auto-selecting it -- without this function
-  // needing to know who's calling it. Optional so the Permissions tab's own
-  // plain "Create role" button is unaffected.
-  const createCustomRole = async (onCreated?: (id: string, name: string) => void) => {
-    const name = newRoleForm.name.trim();
-    if (!name) return;
-    setRoleBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/custom_roles`, {
-        method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ name, org_type: newRoleForm.org_type, permissions: newRolePerms }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        flash(`Role "${name}" created.`);
-        setNewRoleForm({ name: '', org_type: newRoleForm.org_type });
-        setNewRolePerms({});
-        fetchCustomRoles();
-        if (onCreated && d.id) onCreated(d.id, name);
-      } else {
-        flash(d.detail || 'Could not create role.');
-      }
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setRoleBusy(false);
-    }
-  };
-
-  const deleteCustomRole = async (id: string, name: string) => {
-    setRoleBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/custom_roles/${id}`, { method: 'DELETE', headers: authHeaders() });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) { flash(`Role "${name}" deleted.`); fetchCustomRoles(); }
-      else flash(d.detail || 'Could not delete role.');
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setRoleBusy(false);
-    }
-  };
-
-  const fetchGrantCameras = async () => {
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/cameras/list_for_grants`, { headers: authHeaders() });
-      if (res.ok) setGrantCameras(await res.json());
-    } catch { /* leave whatever was last shown */ }
-  };
-
-  const fetchUserGrants = async (userId: string) => {
-    if (!userId) { setUserGrants([]); return; }
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/users/${userId}/resource_permissions`, { headers: authHeaders() });
-      if (res.ok) setUserGrants(await res.json());
-    } catch { /* leave whatever was last shown */ }
-  };
-
-  const grantResourcePermission = async () => {
-    if (!grantUserId || !grantCameraId) return;
-    setGrantBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/users/${grantUserId}/resource_permissions`, {
-        method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ permission_key: 'view_map', resource_type: 'camera', resource_id: grantCameraId }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) { flash('Camera access granted.'); fetchUserGrants(grantUserId); }
-      else flash(d.detail || 'Could not grant.');
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setGrantBusy(false);
-    }
-  };
-
-  const revokeResourcePermission = async (grant: any) => {
-    setGrantBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/users/${grant.user_id}/resource_permissions`, {
-        method: 'DELETE', headers: authHeaders(),
-        body: JSON.stringify({ permission_key: grant.permission_key, resource_type: grant.resource_type, resource_id: grant.resource_id }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) { flash('Revoked.'); fetchUserGrants(String(grant.user_id)); }
-      else flash(d.detail || 'Could not revoke.');
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setGrantBusy(false);
-    }
   };
 
   const restoreAuditEntry = async (entry: AuditEntry) => {
@@ -964,196 +573,6 @@ export default function DevteamView() {
     }
   };
 
-  const openEdit = (u: ManagedUser) => {
-    setEditingUser(u);
-    setEditDraft({
-      username: u.username, assignment: u.assignment, password: '',
-      barangay_id: u.barangay_id || '', station_id: u.station_id || '',
-    });
-    try { setPermsDraft(JSON.parse(u.permissions || "{}")); } catch { setPermsDraft({}); }
-    // Seeded from this admin's actual current state, not always false --
-    // opening the editor on an already-overridden admin should show their
-    // real checkboxes immediately, not the locked "automatic" view.
-    setOverrideMode(!!u.custom_permissions);
-    setOverridePassword('');
-    setShowOverridePassword(false);
-  };
-
-  const saveEdit = async () => {
-    if (!editingUser) return;
-    const id = editingUser.id;
-    const body: any = { username: editDraft.username, assignment: editDraft.assignment };
-    if (editDraft.password.trim()) body.password = editDraft.password.trim();
-    // Which scope field to send follows the account's own organization, same
-    // as account creation -- chk_user_scope rejects a PNP account with a
-    // barangay_id (or vice versa), so only the one this role actually uses
-    // gets sent, never both.
-    if (PNP_ROLES.includes(editingUser.role)) {
-      if (editDraft.station_id.trim()) body.station_id = editDraft.station_id.trim();
-    } else {
-      if (editDraft.barangay_id.trim()) body.barangay_id = editDraft.barangay_id.trim();
-    }
-    // True whenever this save would actually change the override state --
-    // going custom (overrideMode on), staying custom (still on), or coming
-    // back off from an already-customized admin (resetting). Only in those
-    // cases does the password-gated endpoint get called at all; an admin
-    // that was never touched keeps going through the ordinary permissions
-    // PATCH exactly as before (which is always a no-op for them, same as
-    // pre-2026-09-04, since every one of their keys was "always"/"banned").
-    const isAdminTier = editingUser.role === 'PNP_ADMIN' || editingUser.role === 'BARANGAY_ADMIN';
-    const changingOverride = isAdminTier && (overrideMode || editingUser.custom_permissions);
-    setEditingUser(null);
-    try {
-      const calls = [
-        fetch(`${API_URL}/api/devteam/users/${id}`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify(body) }),
-        changingOverride
-          ? fetch(`${API_URL}/api/devteam/users/${id}/override_permissions`, {
-              method: "POST", headers: authHeaders(),
-              body: JSON.stringify({
-                confirm_password: overridePassword,
-                permissions: overrideMode ? onlyEditablePermissions(editingUser.role, permsDraft, true) : null,
-              }),
-            })
-          : fetch(`${API_URL}/api/admin/users/${id}/permissions`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ permissions: onlyEditablePermissions(editingUser.role, permsDraft) }) }),
-      ];
-      const [editRes, permsRes] = await Promise.all(calls);
-      if (editRes.ok && permsRes.ok) { fetchOverview(); flash('Account updated.'); }
-      else {
-        // The override endpoint's own error (wrong password, wrong target
-        // role) is specific and worth showing verbatim rather than the
-        // generic fallback -- "Incorrect DevTeam password." tells DevTeam
-        // exactly what to fix; "Some changes failed to save" doesn't.
-        const failed = !editRes.ok ? editRes : permsRes;
-        const detail = await failed.json().catch(() => ({} as any));
-        flash(detail.detail || 'Some changes failed to save.');
-      }
-    } catch {
-      flash('Backend connection failure.');
-    }
-  };
-
-  const handleDelete = async (u: ManagedUser) => {
-    setPendingActionIds(prev => new Set(prev).add(u.id));
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/users/${u.id}`, { method: "DELETE", headers: authHeaders() });
-      if (res.ok) { fetchOverview(); flash(`${u.username} removed.`); }
-      else { const d = await res.json().catch(() => ({})); flash(d.detail || 'Delete failed.'); }
-    } catch {
-      flash('Backend connection failure.');
-    } finally {
-      setPendingActionIds(prev => { const n = new Set(prev); n.delete(u.id); return n; });
-    }
-  };
-
-  const resetCreateForm = () => {
-    setCreateForm({ username: '', password: '', assignment: '', display_title: '', role: 'PNP_ADMIN', barangay_id: '', station_id: '', parent_admin_id: '', custom_role_id: '' });
-    setCreatePerms({});
-    setCreateError('');
-    setCreateCameraGrants([]);
-  };
-
-  // 2026-09-24 user request: a barangay with no covering station is
-  // invisible to every PNP account, and since Phase 3 any report request
-  // from it has nowhere to route -- but jurisdiction was only ever set
-  // later, separately, in the Stations tab, so it was easy to forget
-  // entirely for a barangay created here. Auto-resolves from the existing
-  // relationship when one exists (nothing to ask); only a barangay with no
-  // station at all needs one picked as part of this same creation.
-  const coveringStationFor = (barangayId: string) => {
-    const id = barangayId.trim().toLowerCase();
-    if (!id) return undefined;
-    return stations.find(st => st.barangay_ids.includes(id));
-  };
-
-  // 2026-09-29 user request: "which camera they should be able to see when
-  // the account is created" -- scoped to what the account being created
-  // could plausibly need: its own barangay's cameras, or every camera in
-  // the selected station's jurisdiction for a PNP role. Empty until enough
-  // of the form is filled in to know which cameras are even relevant.
-  const relevantCamerasForCreate = useMemo(() => {
-    const isPnp = PNP_ROLES.includes(createForm.role);
-    if (isPnp) {
-      const st = stations.find(s => s.id === createForm.station_id);
-      if (!st) return [];
-      const covered = new Set(st.barangay_ids);
-      return cameras.filter(c => covered.has(c.barangay_id));
-    }
-    const bid = createForm.barangay_id.trim().toLowerCase();
-    if (!bid) return [];
-    return cameras.filter(c => c.barangay_id === bid);
-  }, [createForm.role, createForm.station_id, createForm.barangay_id, stations, cameras]);
-
-  const handleCreateUser = async () => {
-    setCreateError('');
-    if (!createForm.username.trim() || !createForm.password.trim() || !createForm.assignment.trim()) {
-      setCreateError('Username, password, and assignment are required.');
-      return;
-    }
-    const isPnp = PNP_ROLES.includes(createForm.role);
-    if (isPnp && !createForm.station_id) {
-      setCreateError('A police station is required for PNP roles.');
-      return;
-    }
-    if (!isPnp && !createForm.barangay_id.trim()) {
-      setCreateError('A barangay is required for barangay roles.');
-      return;
-    }
-    if (!isPnp && !coveringStationFor(createForm.barangay_id) && !createForm.station_id) {
-      setCreateError('This barangay has no police station covering it yet -- pick one to assign its jurisdiction.');
-      return;
-    }
-    setCreateBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/users`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({
-          username: createForm.username.trim(),
-          password: createForm.password,
-          role: createForm.role,
-          barangay_id: isPnp ? null : (createForm.barangay_id.trim().toLowerCase() || null),
-          // For a barangay role this is jurisdiction, not the account's own
-          // station (see DevteamCreateUser's own comment) -- sent whenever
-          // present; the backend only actually uses it when the barangay
-          // has no covering station yet, and ignores it otherwise.
-          station_id: isPnp ? createForm.station_id : (createForm.station_id || null),
-          assignment: createForm.assignment.trim(),
-          display_title: createForm.display_title.trim() || null,
-          parent_admin_id: createForm.parent_admin_id ? Number(createForm.parent_admin_id) : null,
-          permissions: onlyEditablePermissions(createForm.role, createPerms),
-          custom_role_id: createForm.custom_role_id || null,
-        }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        // Camera grants (2026-09-29): there's no user id to grant against
-        // until creation actually succeeds, so these fire as a follow-up
-        // batch rather than in the same request. Best-effort -- the account
-        // itself is already created either way; a failed grant here is
-        // fixable from the Permissions tab, not worth rolling back the
-        // whole account creation over.
-        if (createCameraGrants.length > 0 && d.id) {
-          await Promise.all(createCameraGrants.map(camId =>
-            fetch(`${API_URL}/api/devteam/users/${d.id}/resource_permissions`, {
-              method: "POST", headers: authHeaders(),
-              body: JSON.stringify({ permission_key: 'view_map', resource_type: 'camera', resource_id: camId }),
-            })
-          ));
-        }
-        flash(`${createForm.username} created (${isPnp ? stations.find(st => st.id === createForm.station_id)?.name ?? createForm.station_id : createForm.barangay_id}).`);
-        resetCreateForm();
-        fetchOverview();
-        switchSection('monitoring');
-      } else {
-        setCreateError(d.detail || 'Could not create account.');
-      }
-    } catch {
-      setCreateError('Backend connection failure.');
-    } finally {
-      setCreateBusy(false);
-    }
-  };
-
   // Per-LOCATION directory (replaces the old per-admin flat list). A
   // barangay is a location; a location has at most one connected police
   // station (found via that station's own jurisdiction list, stations.
@@ -1331,17 +750,7 @@ export default function DevteamView() {
     return Array.from(map.entries()).map(([loc, v]) => ({ loc, ...v }));
   }, [cameras, locationPairs]);
 
-  const knownLocationIds = useMemo(() => {
-    const set = new Set<string>();
-    allLocations.forEach(l => set.add(l.id));
-    (data?.users || []).forEach((u: ManagedUser) => u.barangay_id && set.add(u.barangay_id));
-    return Array.from(set).sort();
-  }, [allLocations, data]);
-
-  // Shared between the Monitoring "Users" tab (read-only) and Configuration's
-  // "Manage Users" tab (adds Edit/Delete) -- same sorted/filtered list, same
-  // row markup, so the two views can't quietly drift apart. Only the action
-  // column differs, gated by the `withActions` flag on renderUserListRow.
+  // Monitoring "Users" tab (read-only). Editing lives in ManageUsersPane.
   const userOrgName = (u: ManagedUser) => {
     if (u.role === 'DEVTEAM') return 'DevTeam HQ';
     if (u.station_id) return stations.find(st => st.id === u.station_id)?.name ?? u.station_id;
@@ -1360,7 +769,7 @@ export default function DevteamView() {
         userOrgName(u).toLowerCase().includes(q));
   }, [data, userSearch, stations, allLocations]);
 
-  const renderUserListRow = (u: ManagedUser, withActions: boolean) => {
+  const renderUserListRow = (u: ManagedUser) => {
     const rowStyle = ROLE_STYLES[u.role] || DEFAULT_ROLE_STYLE;
     return (
       <div key={u.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${pendingActionIds.has(u.id) ? 'opacity-40' : ''}`}>
@@ -1400,23 +809,9 @@ export default function DevteamView() {
             </span>
           ) : null}
         </div>
-        {withActions && u.role !== 'DEVTEAM' && (
-          <div className="flex items-center gap-1 shrink-0">
-            <button onClick={() => openEdit(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"><Pencil size={12} /></button>
-            <button onClick={() => handleDelete(u)} className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><Trash2 size={12} /></button>
-          </div>
-        )}
       </div>
     );
   };
-
-  const eligibleParents = useMemo(() => {
-    if (!data) return [];
-    const roleMeta = CREATABLE_ROLES.find(r => r.role === createForm.role);
-    if (!roleMeta || roleMeta.role === 'PNP_ADMIN' || roleMeta.role === 'BARANGAY_ADMIN') return [];
-    const wantCaptainRole = roleMeta.role === 'PNP_OFFICER' ? 'PNP_ADMIN' : 'BARANGAY_ADMIN';
-    return (data.users as ManagedUser[]).filter(u => u.role === wantCaptainRole && (!createForm.barangay_id || u.barangay_id === createForm.barangay_id.trim().toLowerCase()));
-  }, [data, createForm.role, createForm.barangay_id]);
 
   if (isLoading) {
     return (
@@ -1517,15 +912,15 @@ export default function DevteamView() {
             <TabButton icon={<Users2 size={12} />} label="Manage Users" active={tab === 'manage_users'} onClick={() => setTab('manage_users')} badge={data.users.length} />
             <TabButton icon={<UserPlus size={12} />} label="Create User" active={tab === 'create'} onClick={() => setTab('create')} />
 
-            {/* Drag-and-drop reorderable tail (2026-09-29), gated behind an
-                explicit Edit button rather than being always-draggable --
-                keeps a plain click on a tab from ever being mistaken for a
-                drag. Order persists per-browser (configTabOrder). */}
+            {/* Reorderable tail (2026-09-29). Long-press any of these tabs
+                (~0.5s) to enter reorder mode, then drag; Esc or a click
+                anywhere else finishes. A plain click still just opens the
+                tab. Order persists per-browser (configTabOrder). */}
             {configTabOrder.map(t => {
               const def: { icon: React.ReactNode; label: string; onClick: () => void; badge?: number } | null =
                 t === 'permissions' ? {
                   icon: <KeyRound size={12} />, label: 'Permissions',
-                  onClick: () => { setTab('permissions'); if (!rolesLoaded) fetchCustomRoles(); fetchGrantCameras(); },
+                  onClick: () => { setTab('permissions'); if (!rolesLoaded) fetchCustomRoles(); },
                 } : t === 'approvals' ? {
                   icon: <ClipboardList size={12} />, label: 'Approvals',
                   onClick: () => setTab('approvals'),
@@ -1542,27 +937,38 @@ export default function DevteamView() {
               return (
                 <div
                   key={t}
+                  data-config-tab
                   draggable={configEditMode}
+                  onPointerDown={e => startLongPress(e.clientX, e.clientY)}
+                  onPointerMove={e => moveLongPress(e.clientX, e.clientY)}
+                  onPointerUp={cancelLongPress}
+                  onPointerLeave={cancelLongPress}
                   onDragStart={() => configEditMode && setDraggedConfigTab(t)}
                   onDragOver={e => { if (configEditMode) e.preventDefault(); }}
                   onDrop={() => configEditMode && reorderConfigTab(t)}
                   onDragEnd={() => setDraggedConfigTab(null)}
-                  className={configEditMode ? `cursor-move transition-opacity ${draggedConfigTab === t ? 'opacity-30' : ''}` : undefined}
+                  className={configEditMode
+                    ? `cursor-move border border-dashed border-[var(--accent)]/50 transition-opacity ${draggedConfigTab === t ? 'opacity-30' : ''}`
+                    : 'select-none'}
                   title={configEditMode ? 'Drag to reorder' : undefined}
                 >
-                  <TabButton icon={def.icon} label={def.label} active={tab === t} onClick={configEditMode ? () => {} : def.onClick} badge={def.badge} />
+                  <TabButton
+                    icon={def.icon} label={def.label} active={tab === t} badge={def.badge}
+                    onClick={() => {
+                      // The click that ends a long-press must not also open the tab.
+                      if (longPressFiredRef.current) { longPressFiredRef.current = false; return; }
+                      if (!configEditMode) def.onClick();
+                    }}
+                  />
                 </div>
               );
             })}
 
-            <button
-              onClick={() => { setConfigEditMode(v => !v); setDraggedConfigTab(null); }}
-              title={configEditMode ? 'Done reordering tabs' : 'Edit tab order'}
-              className="ml-auto flex items-center gap-1.5 px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-colors"
-              style={{ color: configEditMode ? 'var(--accent)' : 'var(--text-3)' }}
-            >
-              {configEditMode ? <><Save size={11} /> Done</> : <><Pencil size={11} /> Edit order</>}
-            </button>
+            {configEditMode && (
+              <span className="ml-auto text-[9px] tracking-[0.1em] uppercase text-[var(--accent)]">
+                Drag to reorder · Esc or click elsewhere to finish
+              </span>
+            )}
           </>
         )}
       </div>
@@ -1710,936 +1116,48 @@ export default function DevteamView() {
               <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching accounts</p>
             ) : (
               <div className="divide-y divide-[var(--panel-2)]">
-                {visibleUsers.map(u => renderUserListRow(u, false))}
+                {visibleUsers.map(u => renderUserListRow(u))}
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* ================= MANAGE USERS TAB (Configuration) ================= */}
-      {/* Same list as Monitoring's "Users" tab (visibleUsers/renderUserListRow
-          shared above), but this is the one place Edit/Delete actually
-          render -- per the 2026-09-23 config/monitoring split, every
-          mutating control lives under Configuration only. */}
+      {/* ================= CONFIGURATION PANES =================
+          2026-09-29 redesign: every Configuration tab is two halves -- the
+          list on the left, the selected item's details on the right --
+          instead of full-width rows the eye has to sweep across. Each pane
+          lives in ./devteam/ to keep this file from growing further. */}
       {tab === 'manage_users' && (
-        <div className="flex-1 min-h-0 flex flex-col px-7 pb-7 pt-4">
-          <div className="shrink-0 flex items-center gap-2 border border-[var(--line)] border-b-0 px-3 py-2.5">
-            <Search size={12} className="text-[var(--text-2)] shrink-0" />
-            <input
-              value={userSearch}
-              onChange={e => setUserSearch(e.target.value)}
-              placeholder="search username, role, or organization"
-              className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
-            />
-            <span className="text-[9px] shrink-0" style={{ color: 'var(--text-3)' }}>
-              {visibleUsers.length} account{visibleUsers.length === 1 ? '' : 's'}
-            </span>
-          </div>
-          <div className="flex-1 overflow-y-auto custom-scrollbar border border-[var(--line)]">
-            {visibleUsers.length === 0 ? (
-              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No matching accounts</p>
-            ) : (
-              <div className="divide-y divide-[var(--panel-2)]">
-                {visibleUsers.map(u => renderUserListRow(u, true))}
-              </div>
-            )}
-          </div>
-        </div>
+        <ManageUsersPane
+          apiUrl={API_URL} users={data.users} stations={stations} cameras={cameras}
+          allLocations={allLocations} customRoles={customRoles} flash={flash} refresh={fetchOverview}
+          reviewVerification={reviewVerification}
+        />
       )}
 
-      {/* ================= PERMISSIONS TAB (Configuration) ================= */}
-      {/* Phase 2, 2026-09-23: "dice every permission down to the smallest
-          unit" (#3) + custom roles (#2). Two independent panels -- roles are
-          a creation-time template, resource grants are a live per-user
-          restriction -- kept on one tab since both are DevTeam's master
-          permission tooling, per the user's own answer ("it should also be
-          in devteam wherein all roles must be diced up to the smallest
-          things"). A barangay/PNP admin gets the equivalent resource-grant
-          panel, scoped to their own subordinates, inside their own admin
-          view (AdminUsersView.tsx) -- not duplicated here. */}
       {tab === 'permissions' && (
-        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-6">
-
-          {/* CAMERA-LEVEL ACCESS GRANTS */}
-          <div className="border border-[var(--line)]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
-              <Video size={12} className="text-[var(--accent)]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text)]">Camera-level access</span>
-            </div>
-            <div className="p-4">
-              <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-3">
-                Restricts a user to specific cameras only. Leave a user with no grants here and
-                nothing changes -- they see every camera their role/org already allows. Add one
-                or more grants and they see ONLY those cameras, nothing else.
-              </p>
-              <div className="grid grid-cols-3 gap-2 mb-3">
-                <select
-                  value={grantUserId}
-                  onChange={e => { setGrantUserId(e.target.value); fetchUserGrants(e.target.value); }}
-                  className="bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                >
-                  <option value="">select a user…</option>
-                  {visibleUsers.filter(u => u.role !== 'DEVTEAM').map(u => (
-                    <option key={u.id} value={u.id}>{u.username} ({u.role.replace(/_/g, ' ')})</option>
-                  ))}
-                </select>
-                <select
-                  value={grantCameraId}
-                  onChange={e => setGrantCameraId(e.target.value)}
-                  className="bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                >
-                  <option value="">select a camera…</option>
-                  {grantCameras.map(c => (
-                    <option key={c.id} value={c.id}>{c.name} ({c.barangay_id})</option>
-                  ))}
-                </select>
-                <button
-                  onClick={grantResourcePermission}
-                  disabled={grantBusy || !grantUserId || !grantCameraId}
-                  className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90"
-                >
-                  Grant
-                </button>
-              </div>
-
-              {grantUserId && (
-                userGrants.length === 0 ? (
-                  <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] py-4 text-center border border-[var(--panel-2)]">
-                    No camera-level grants for this user -- they see everything their role/org allows.
-                  </p>
-                ) : (
-                  <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                    {userGrants.map(g => {
-                      const cam = grantCameras.find(c => c.id === g.resource_id);
-                      return (
-                        <div key={g.id} className="flex items-center justify-between px-3 py-2">
-                          <span className="text-[10px] text-[var(--text)]">
-                            {g.permission_key} <span className="text-[var(--text-2)]">on</span> {cam ? cam.name : g.resource_id}
-                          </span>
-                          <button
-                            onClick={() => revokeResourcePermission(g)}
-                            disabled={grantBusy}
-                            className="text-[9px] tracking-[0.1em] uppercase text-[var(--critical)]/80 hover:text-[var(--critical)] disabled:opacity-40"
-                          >
-                            Revoke
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )
-              )}
-            </div>
-          </div>
-
-          {/* CUSTOM ROLES */}
-          <div className="border border-[var(--line)]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
-              <KeyRound size={12} className="text-[var(--accent)]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text)]">Custom roles</span>
-              <span className="ml-auto text-[9px] text-[var(--text-2)]">
-                {customRoles.length} role{customRoles.length === 1 ? '' : 's'}
-              </span>
-            </div>
-            <div className="p-4">
-              <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-3">
-                A named permission preset layered on a real Barangay Staff or PNP Officer account --
-                the account itself is unaffected everywhere else (org, scope, login). Creating a user
-                with this role sets their display title and pre-applies these permissions.
-              </p>
-
-              {customRoles.length > 0 && (
-                <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] mb-4">
-                  {customRoles.map(r => (
-                    <div key={r.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                      <div className="min-w-0">
-                        <p className="text-[11px] text-[var(--text)] truncate">
-                          {r.name} <span className="text-[9px] text-[var(--text-2)] uppercase tracking-wide ml-1">{r.org_type}</span>
-                        </p>
-                        <p className="text-[9px] text-[var(--text-2)] truncate">
-                          {(r.permission_defaults || []).map((d: any) => d.permission_key).join(', ') || 'no permissions'}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => deleteCustomRole(r.id, r.name)}
-                        disabled={roleBusy}
-                        className="p-1.5 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors shrink-0"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <FieldInput label="Role name" value={newRoleForm.name} onChange={(v: string) => setNewRoleForm({ ...newRoleForm, name: v })} placeholder="e.g. Gate Monitor" />
-                <div>
-                  <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Applies to</label>
-                  <select
-                    value={newRoleForm.org_type}
-                    onChange={e => { setNewRoleForm({ ...newRoleForm, org_type: e.target.value as 'barangay' | 'police' }); setNewRolePerms({}); }}
-                    className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                  >
-                    <option value="barangay">Barangay Staff</option>
-                    <option value="police">PNP Officer</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] mb-3">
-                {permissionRowsFor(newRoleForm.org_type === 'police' ? 'PNP_OFFICER' : 'BARANGAY_STAFF').map(p => (
-                  <label
-                    key={p.key}
-                    className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
-                  >
-                    <span className="text-[10px] text-[var(--text)]">
-                      {p.label}
-                      {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={p.status === 'editable' ? !!newRolePerms[p.key] : false}
-                      disabled={p.status !== 'editable'}
-                      onChange={e => setNewRolePerms({ ...newRolePerms, [p.key]: e.target.checked })}
-                      className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
-                    />
-                  </label>
-                ))}
-              </div>
-
-              <button
-                onClick={() => createCustomRole()}
-                disabled={roleBusy || !newRoleForm.name.trim()}
-                className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-              >
-                <Save size={12} /> {roleBusy ? 'Saving…' : 'Create role'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <RolesPane apiUrl={API_URL} customRoles={customRoles} users={data.users} fetchCustomRoles={fetchCustomRoles} flash={flash} />
       )}
 
-      {/* ================= APPROVALS TAB ================= */}
       {tab === 'approvals' && (
-        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
-          <div className="border border-[var(--line)]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
-              <UserCheck size={12} className="text-[var(--accent)]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--accent)]">Awaiting verification</span>
-              <span className="ml-auto text-[9px] text-[var(--accent)]/70">{pendingLocations.length} pending</span>
-            </div>
-            {pendingLocations.length === 0 ? (
-              <div className="py-14 text-center">
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No captain signups waiting on review</p>
-              </div>
-            ) : (
-              <div className="divide-y divide-[var(--panel-2)]">
-                {pendingLocations.map(loc => {
-                  const busy = pendingActionIds.has(loc.id);
-                  const roleMeta = ROLE_STYLES[loc.requester_role || ''] || DEFAULT_ROLE_STYLE;
-                  return (
-                    <div key={loc.id} className={`flex items-center justify-between gap-4 px-4 py-3.5 transition-opacity ${busy ? 'opacity-40' : ''}`}>
-                      <div className="flex items-center gap-3 min-w-0">
-                        <span className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${roleMeta.border} ${roleMeta.text}`}>{roleMeta.code}</span>
-                        <div className="min-w-0">
-                          <p className="text-[11px] text-[var(--text)] truncate">{loc.requester_username} <span className="text-[var(--text-2)]">requests</span> {loc.name}</p>
-                          <p className="text-[9px] text-[var(--text-2)] flex items-center gap-1">
-                            <MapPinned size={9} /> {loc.requester_role} &middot; {loc.requester_assignment} &middot; {new Date(loc.created_at).toLocaleDateString()}
-                          </p>
-                          {/* Identity verification (#9, 2026-09-23) -- a
-                              visible signal + a way to actually look, not a
-                              hard block on approval (see backend.py's
-                              upload_signup_verification/review comments for
-                              why: this app coordinates real barangay/PNP
-                              emergency response, and a technical hiccup in
-                              an ID scan should not be able to brick the only
-                              admin account for a location). */}
-                          <p className="text-[9px] mt-0.5 flex items-center gap-1.5">
-                            {loc.requester_has_document ? (
-                              <span style={{ color: loc.requester_verification_status === 'verified' ? 'var(--ok)' : 'var(--warn)' }}>
-                                ID {loc.requester_verification_status || 'pending'}
-                              </span>
-                            ) : (
-                              <span style={{ color: 'var(--critical)' }}>No ID submitted</span>
-                            )}
-                            {loc.requester_has_document && loc.requester_id != null && (
-                              <button
-                                onClick={() => viewVerificationDocument(loc.requester_id!)}
-                                className="underline text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"
-                              >
-                                View ID
-                              </button>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button onClick={() => handleApproval(loc.id, 'reject')} className="p-1.5 border border-transparent hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={13} /></button>
-                        <button onClick={() => handleApproval(loc.id, 'approve')} className="p-1.5 border border-transparent hover:border-[var(--ok)]/40 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={13} /></button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* 2026-09-23 bug fix: PNP admin self-signups used to skip
-              DevTeam entirely (see backend.py's login() comment for the
-              full report) -- this is the queue that was missing. Same
-              visual shape as the barangay one above on purpose, so the two
-              read as one review surface, not two unrelated features. */}
-          <div className="mt-6 border border-[var(--line)]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
-              <UserCheck size={12} className="text-[var(--accent)]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--accent)]">PNP admin applications</span>
-              <span className="ml-auto text-[9px] text-[var(--accent)]/70">{pendingSignups.length} pending</span>
-            </div>
-            {pendingSignups.length === 0 ? (
-              <div className="py-14 text-center">
-                <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No PNP admin signups waiting on review</p>
-              </div>
-            ) : (
-              <div className="divide-y divide-[var(--panel-2)]">
-                {pendingSignups.map(s => {
-                  const busy = pendingActionIds.has(s.id);
-                  const roleMeta = ROLE_STYLES[s.role] || DEFAULT_ROLE_STYLE;
-                  return (
-                    <div key={s.id} className={`flex items-center justify-between gap-4 px-4 py-3.5 transition-opacity ${busy ? 'opacity-40' : ''}`}>
-                      <div className="flex items-center gap-3 min-w-0">
-                        <span className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${roleMeta.border} ${roleMeta.text}`}>{roleMeta.code}</span>
-                        <div className="min-w-0">
-                          <p className="text-[11px] text-[var(--text)] truncate">{s.username} <span className="text-[var(--text-2)]">requests</span> {s.station_name || s.station_id}</p>
-                          <p className="text-[9px] text-[var(--text-2)] flex items-center gap-1">
-                            <MapPinned size={9} /> {s.role} &middot; {s.assignment} &middot; {new Date(s.created_at).toLocaleDateString()}
-                          </p>
-                          <p className="text-[9px] mt-0.5 flex items-center gap-1.5">
-                            {s.has_document ? (
-                              <span style={{ color: s.verification_status === 'verified' ? 'var(--ok)' : 'var(--warn)' }}>
-                                ID {s.verification_status || 'pending'}
-                              </span>
-                            ) : (
-                              <span style={{ color: 'var(--critical)' }}>No ID submitted</span>
-                            )}
-                            {s.has_document && (
-                              <button
-                                onClick={() => viewVerificationDocument(s.id)}
-                                className="underline text-[var(--text-2)] hover:text-[var(--accent)] transition-colors"
-                              >
-                                View ID
-                              </button>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button onClick={() => reviewSignup(s.id, 'reject')} className="p-1.5 border border-transparent hover:border-[var(--critical)]/40 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={13} /></button>
-                        <button onClick={() => reviewSignup(s.id, 'approve')} className="p-1.5 border border-transparent hover:border-[var(--ok)]/40 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={13} /></button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-6 border border-[var(--line)]">
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--line)]">
-              <MapPinned size={12} className="text-[var(--text-2)]" />
-              <span className="text-[9px] tracking-[0.2em] uppercase text-[var(--text-2)]">Locations &amp; their two captain seats</span>
-            </div>
-            <div className="divide-y divide-[var(--panel-2)]">
-              {locationPairs.length === 0 ? (
-                <div className="py-10 text-center">
-                  <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No locations with captains yet</p>
-                </div>
-              ) : locationPairs.map(p => (
-                <div key={p.loc} className="flex items-center gap-4 px-4 py-3">
-                  <span className="text-[10px] text-[var(--text)] w-28 shrink-0 truncate uppercase tracking-wide">{p.loc}</span>
-                  <SeatChip user={p.precinct} code="PD" />
-                  <SeatChip user={p.barangay} code="BG" />
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+        <ApprovalsPane
+          apiUrl={API_URL} pendingLocations={pendingLocations} pendingSignups={pendingSignups}
+          busyIds={pendingActionIds} onDecideLocation={handleApproval} onDecideSignup={reviewSignup}
+          reviewVerification={reviewVerification} flash={flash}
+        />
       )}
 
-      {/* ================= CREATE USER TAB ================= */}
-      {/* 2026-09-29 user request: two SEPARATE cards side by side, not one
-          box split in two. Left is a narrow, phone/booklet-shaped
-          credentials card (role, identity, location, create button) --
-          the original vertical form. Right is its own card holding the
-          diced permissions: custom role, base permissions, camera-level
-          access. Barangay is a required pick from EXISTING barangays only;
-          new ones are registered from the Stations tab. */}
       {tab === 'create' && (
-        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4">
-          <div className="flex flex-col md:flex-row gap-6 items-start">
-
-          {/* LEFT CARD — credentials booklet */}
-          <div className="w-full md:w-[380px] shrink-0 border border-[var(--line)] p-6">
-            <div className="flex items-center gap-2 mb-1">
-              <UserPlus size={13} className="text-[var(--accent)]" />
-              <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Create account</h2>
-            </div>
-            <p className="text-[9px] text-[var(--text-2)] tracking-wide mb-5">
-              Skips the self-signup approval queue and connects the account to a location.
-            </p>
-
-            <div className="grid grid-cols-2 gap-2 mb-6">
-              {CREATABLE_ROLES.map(r => {
-                const active = createForm.role === r.role;
-                const style = ROLE_STYLES[r.role];
-                return (
-                  <button
-                    key={r.role}
-                    onClick={() => setCreateForm({ ...createForm, role: r.role, parent_admin_id: '' })}
-                    className={`flex items-center gap-2.5 px-3 py-2.5 border text-left transition-colors ${active ? `${style.border} ${style.bg}` : 'border-[var(--line)] hover:border-[var(--line-2)]'}`}
-                  >
-                    <span className={`text-[8px] font-bold px-1.5 py-1 border ${style.border} ${style.text}`}>{r.code}</span>
-                    <span className={`text-[10px] tracking-wide uppercase ${active ? style.text : 'text-[var(--text)]'}`}>{r.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-              <div>
-                <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-3">Identity</div>
-                <div className="mb-3">
-                  <FieldInput label="Username" value={createForm.username} onChange={(v: string) => setCreateForm({ ...createForm, username: v })} />
-                </div>
-                <div className="mb-3">
-                  <FieldInput label="Password" type="password" value={createForm.password} onChange={(v: string) => setCreateForm({ ...createForm, password: v })} />
-                </div>
-                <div className="mb-3">
-                  <FieldInput label="Assignment" value={createForm.assignment} onChange={(v: string) => setCreateForm({ ...createForm, assignment: v })} placeholder="e.g. Patrol Unit 3" />
-                </div>
-                <div className="mb-3">
-                  <FieldInput label="Display title (optional)" value={createForm.display_title} onChange={(v: string) => setCreateForm({ ...createForm, display_title: v })} placeholder="e.g. Assistant Captain" />
-                </div>
-
-                {/* Scope field follows the role's organization. PNP accounts
-                    are scoped to a station's jurisdiction, barangay
-                    accounts to a single barangay -- the DB's chk_user_scope
-                    rejects the wrong combination, so offering both at once
-                    would just produce a confusing 400. */}
-                {PNP_ROLES.includes(createForm.role) ? (
-                  <div className="mb-3">
-                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                      Police station — this account sees every barangay in its jurisdiction
-                    </label>
-                    <select
-                      value={createForm.station_id}
-                      onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                    >
-                      <option value="">
-                        {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
-                      </option>
-                      {stations.map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.barangay_ids.length} barangay{s.barangay_ids.length === 1 ? '' : 's'})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div className="mb-3">
-                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Barangay — this account is scoped to exactly this one</label>
-                    <select
-                      value={createForm.barangay_id}
-                      onChange={e => setCreateForm({ ...createForm, barangay_id: e.target.value })}
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                    >
-                      <option value="">
-                        {knownLocationIds.length ? 'select a barangay…' : 'no barangays yet — register one in the Stations tab'}
-                      </option>
-                      {knownLocationIds.map(loc => (
-                        <option key={loc} value={loc}>{loc}</option>
-                      ))}
-                    </select>
-
-                    {/* Police jurisdiction (2026-09-24) -- auto-resolved and
-                        shown read-only when this barangay already has a
-                        covering station; a required picker only when it
-                        doesn't (a self-signup barangay awaiting review,
-                        typically), so this barangay never silently ends up
-                        with no police coverage. */}
-                    {createForm.barangay_id.trim() && (
-                      coveringStationFor(createForm.barangay_id) ? (
-                        <p className="mt-2 text-[9px] leading-relaxed text-[var(--text-3)]">
-                          Covered by <span className="text-[var(--text-2)]">{coveringStationFor(createForm.barangay_id)!.name}</span> — already assigned, nothing to pick.
-                        </p>
-                      ) : (
-                        <div className="mt-2">
-                          <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                            Police station — this barangay has no jurisdiction assigned yet, pick one
-                          </label>
-                          <select
-                            value={createForm.station_id}
-                            onChange={e => setCreateForm({ ...createForm, station_id: e.target.value })}
-                            className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                          >
-                            <option value="">
-                              {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
-                            </option>
-                            {stations.map(s => (
-                              <option key={s.id} value={s.id}>{s.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                      )
-                    )}
-                  </div>
-                )}
-
-                {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
-                  <div className="mb-3">
-                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Reports to (optional — auto-attaches to the location's captain if left blank)</label>
-                    <select
-                      value={createForm.parent_admin_id}
-                      onChange={e => setCreateForm({ ...createForm, parent_admin_id: e.target.value })}
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                    >
-                      <option value="">Auto-attach to location captain</option>
-                      {eligibleParents.map(p => (
-                        <option key={p.id} value={p.id}>{p.username} ({p.role})</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </div>
-
-            {createError && (
-              <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide mt-4">{createError}</p>
-            )}
-
-            <button
-              onClick={handleCreateUser}
-              disabled={createBusy}
-              className="w-full mt-5 py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-            >
-              <Save size={12} /> {createBusy ? 'Creating…' : 'Create account'}
-            </button>
-          </div>
-
-          {/* RIGHT CARD — role & diced permissions */}
-          <div className="w-full flex-1 min-w-0 border border-[var(--line)] p-6">
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <KeyRound size={13} className="text-[var(--accent)]" />
-                  <h2 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Role &amp; access</h2>
-                </div>
-                <p className="text-[9px] text-[var(--text-2)] tracking-wide mb-5">
-                  What this {CREATABLE_ROLES.find(r => r.role === createForm.role)?.label || 'account'} can do, down to individual cameras.
-                </p>
-
-                {(createForm.role === 'PNP_OFFICER' || createForm.role === 'BARANGAY_STAFF') && (
-                  <div className="mb-4">
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] block">
-                        Custom role (optional — sets a display title and pre-applies its permissions)
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setNewRoleForm({ name: '', org_type: createForm.role === 'PNP_OFFICER' ? 'police' : 'barangay' });
-                          setNewRolePerms({});
-                          setShowAddRoleModal(true);
-                        }}
-                        className="text-[9px] tracking-[0.1em] uppercase text-[var(--accent)] hover:opacity-80 transition-opacity shrink-0"
-                      >
-                        + Add role
-                      </button>
-                    </div>
-                    <select
-                      value={createForm.custom_role_id}
-                      onChange={e => setCreateForm({ ...createForm, custom_role_id: e.target.value })}
-                      onFocus={() => { if (!rolesLoaded) fetchCustomRoles(); }}
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                    >
-                      <option value="">No custom role — plain {createForm.role === 'PNP_OFFICER' ? 'PNP Officer' : 'Barangay Staff'}</option>
-                      {customRoles
-                        .filter(r => r.org_type === (createForm.role === 'PNP_OFFICER' ? 'police' : 'barangay'))
-                        .map(r => (
-                          <option key={r.id} value={r.id}>{r.name}</option>
-                        ))}
-                    </select>
-                  </div>
-                )}
-
-                <div className="mb-4">
-                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
-                    <KeyRound size={10} /> Permissions — same tree used everywhere else
-                  </div>
-                  {permissionNoteFor(createForm.role) && (
-                    <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(createForm.role)}</p>
-                  )}
-                  <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                    {permissionRowsFor(createForm.role).map(p => (
-                      <label
-                        key={p.key}
-                        title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
-                        className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
-                      >
-                        <span className="text-[10px] text-[var(--text)]">
-                          {p.label}
-                          {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
-                          {p.status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!createPerms[p.key]}
-                          disabled={p.status !== 'editable'}
-                          onChange={e => setCreatePerms({ ...createPerms, [p.key]: e.target.checked })}
-                          className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
-                        />
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Camera-level access (2026-09-29): picked here instead of
-                    a separate trip to the Permissions tab after creation.
-                    Only shows once enough of the left column is filled in
-                    to know which cameras are even relevant -- see
-                    relevantCamerasForCreate. Leaving nothing checked means
-                    the account sees every camera its role/org already
-                    allows, same "opt-in only" rule as the Permissions tab. */}
-                <div>
-                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
-                    <Video size={10} /> Camera-level access (optional)
-                  </div>
-                  {relevantCamerasForCreate.length === 0 ? (
-                    <p className="text-[9px] leading-relaxed text-[var(--text-3)] border border-[var(--panel-2)] px-3 py-2.5">
-                      {PNP_ROLES.includes(createForm.role)
-                        ? 'Pick a station to see its cameras here.'
-                        : 'Pick a barangay to see its cameras here.'}
-                    </p>
-                  ) : (
-                    <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] max-h-40 overflow-y-auto custom-scrollbar">
-                      {relevantCamerasForCreate.map(c => (
-                        <label key={c.id} className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel)] transition-colors">
-                          <span className="text-[10px] text-[var(--text)] truncate">{c.name} <span className="text-[var(--text-3)]">({c.barangay_id})</span></span>
-                          <input
-                            type="checkbox"
-                            checked={createCameraGrants.includes(c.id)}
-                            onChange={e => setCreateCameraGrants(prev => e.target.checked ? [...prev, c.id] : prev.filter(id => id !== c.id))}
-                            className="w-3.5 h-3.5 accent-[var(--accent)] shrink-0"
-                          />
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                  {createCameraGrants.length > 0 && (
-                    <p className="text-[9px] mt-1.5 text-[var(--text-3)]">
-                      Restricted to {createCameraGrants.length} camera{createCameraGrants.length === 1 ? '' : 's'} — nothing else.
-                    </p>
-                  )}
-                </div>
-              </div>
-          </div>
-          </div>
-        </div>
+        <CreateUserPane
+          apiUrl={API_URL} users={data.users} stations={stations} cameras={cameras}
+          allLocations={allLocations} customRoles={customRoles} fetchCustomRoles={fetchCustomRoles} flash={flash}
+          onCreated={() => { fetchOverview(); setTab('manage_users'); }}
+        />
       )}
 
-      {/* ADD STATION MODAL (2026-09-29) */}
-      {stationModalOpen && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
-          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-2xl max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--panel-2)]">
-              <div>
-                <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">Register a police station</span>
-                <p className="text-[9px] text-[var(--text-3)] mt-1">PNP accounts are scoped to a station, so it has to exist before its commander or officers.</p>
-              </div>
-              <button onClick={() => setStationModalOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
-            </div>
-            <div className="p-5 space-y-3">
-              <FieldInput label="Station name *" value={stationForm.name} onChange={(v: string) => setStationForm({ ...stationForm, name: v })} placeholder="e.g. Ormoc City Police Station 1" />
-              <div className="grid grid-cols-2 gap-3">
-                <SelectInput label="Unit type" value={stationForm.station_type} onChange={v => setStationForm({ ...stationForm, station_type: v })} options={STATION_TYPES} />
-                <SelectInput label="Police Regional Office" value={stationForm.regional_office} onChange={v => setStationForm({ ...stationForm, regional_office: v })}
-                  options={PNP_REGIONAL_OFFICES} />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <FieldInput label="Parent office (City / Provincial Police Office)" value={stationForm.parent_office} onChange={(v: string) => setStationForm({ ...stationForm, parent_office: v })} placeholder="e.g. Ormoc City Police Office" />
-                <FieldInput label="Station commander / Chief of Police" value={stationForm.commander} onChange={(v: string) => setStationForm({ ...stationForm, commander: v })} placeholder="e.g. PLtCol. Juan Dela Cruz" />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <FieldInput label="Address" value={stationForm.address} onChange={(v: string) => setStationForm({ ...stationForm, address: v })} placeholder="Street, barangay, city" />
-                <FieldInput label="Hotline / contact number" value={stationForm.contact_number} onChange={(v: string) => setStationForm({ ...stationForm, contact_number: v })} placeholder="e.g. (053) 561-0000 / 0998-598-XXXX" />
-              </div>
-              <TextAreaInput label="Description" value={stationForm.description} onChange={v => setStationForm({ ...stationForm, description: v })}
-                placeholder="Coverage area, notable landmarks, operating notes…" />
-              {orgFormError && <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide">{orgFormError}</p>}
-              <div className="flex justify-end gap-2 pt-1">
-                <button onClick={() => setStationModalOpen(false)} className="px-4 py-2.5 border border-[var(--line)] text-[10px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--text)] transition-colors">Cancel</button>
-                <button onClick={handleCreateStation} disabled={stationBusy || !stationForm.name.trim()}
-                  className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90">
-                  {stationBusy ? 'Registering…' : 'Register station'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ADD BARANGAY MODAL (2026-09-29) -- always registered under a station */}
-      {barangayModalStation && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
-          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-2xl max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--panel-2)]">
-              <div>
-                <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">Register a barangay</span>
-                <p className="text-[9px] text-[var(--text-3)] mt-1">Covered by <span className="text-[var(--text-2)]">{barangayModalStation.name}</span> from the moment it's created.</p>
-              </div>
-              <button onClick={() => setBarangayModalStation(null)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
-            </div>
-            <div className="p-5 space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <FieldInput label="Barangay name *" value={barangayForm.name} onChange={(v: string) => setBarangayForm({ ...barangayForm, name: v })} placeholder="e.g. Cogon" />
-                <FieldInput label="PSGC code (10 digits)" value={barangayForm.psgc_code} onChange={(v: string) => setBarangayForm({ ...barangayForm, psgc_code: v })} placeholder="e.g. 0837370015" />
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <FieldInput label="City / Municipality" value={barangayForm.city_municipality} onChange={(v: string) => setBarangayForm({ ...barangayForm, city_municipality: v })} placeholder="e.g. Ormoc City" />
-                <FieldInput label="Province" value={barangayForm.province} onChange={(v: string) => setBarangayForm({ ...barangayForm, province: v })} placeholder="e.g. Leyte" />
-                <SelectInput label="Region" value={barangayForm.region} onChange={v => setBarangayForm({ ...barangayForm, region: v })} options={PH_REGIONS} />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <FieldInput label="Punong Barangay (captain)" value={barangayForm.captain_name} onChange={(v: string) => setBarangayForm({ ...barangayForm, captain_name: v })} placeholder="e.g. Hon. Maria Santos" />
-                <FieldInput label="Barangay hall contact number" value={barangayForm.contact_number} onChange={(v: string) => setBarangayForm({ ...barangayForm, contact_number: v })} placeholder="e.g. 0917-XXX-XXXX" />
-              </div>
-              <FieldInput label="Barangay hall address" value={barangayForm.hall_address} onChange={(v: string) => setBarangayForm({ ...barangayForm, hall_address: v })} placeholder="Street / purok, barangay, city" />
-              <div className="grid grid-cols-2 gap-3">
-                <FieldInput label="Latitude (map center, optional)" value={barangayForm.lat} onChange={(v: string) => setBarangayForm({ ...barangayForm, lat: v })} placeholder="e.g. 11.0176" />
-                <FieldInput label="Longitude (map center, optional)" value={barangayForm.lng} onChange={(v: string) => setBarangayForm({ ...barangayForm, lng: v })} placeholder="e.g. 124.6031" />
-              </div>
-              <TextAreaInput label="Description" value={barangayForm.description} onChange={v => setBarangayForm({ ...barangayForm, description: v })}
-                placeholder="Puroks/sitios covered, population, known hotspots, landmarks…" />
-              <p className="text-[9px] leading-relaxed text-[var(--text-3)]">
-                Find the PSGC code on the Philippine Statistics Authority's PSGC listing (psa.gov.ph/classification/psgc). Already registered? Tick it in the station's jurisdiction list instead.
-              </p>
-              {orgFormError && <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide">{orgFormError}</p>}
-              <div className="flex justify-end gap-2 pt-1">
-                <button onClick={() => setBarangayModalStation(null)} className="px-4 py-2.5 border border-[var(--line)] text-[10px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--text)] transition-colors">Cancel</button>
-                <button onClick={handleCreateBarangay} disabled={stationBusy || !barangayForm.name.trim()}
-                  className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90">
-                  {stationBusy ? 'Registering…' : 'Register barangay'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* "+ ADD ROLE" MODAL -- opened from the Create User tab's custom-role
-          picker so a new role can be defined without leaving the account-
-          creation flow. Same fields as the Permissions tab's own role
-          form, reusing the same state (newRoleForm/newRolePerms) and
-          createCustomRole -- just auto-selects the result into createForm
-          on success instead of leaving it for a separate pick later. */}
-      {showAddRoleModal && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
-          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-sm p-5 max-h-[85vh] overflow-y-auto custom-scrollbar font-mono">
-            <div className="flex items-center justify-between mb-4 pb-3 border-b border-[var(--panel-2)]">
-              <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">New custom role</span>
-              <button onClick={() => setShowAddRoleModal(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
-            </div>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <FieldInput label="Role name" value={newRoleForm.name} onChange={(v: string) => setNewRoleForm({ ...newRoleForm, name: v })} placeholder="e.g. Gate Monitor" />
-              <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Applies to</label>
-                <select
-                  value={newRoleForm.org_type}
-                  onChange={e => { setNewRoleForm({ ...newRoleForm, org_type: e.target.value as 'barangay' | 'police' }); setNewRolePerms({}); }}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                >
-                  <option value="barangay">Barangay Staff</option>
-                  <option value="police">PNP Officer</option>
-                </select>
-              </div>
-            </div>
-            <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] mb-4">
-              {permissionRowsFor(newRoleForm.org_type === 'police' ? 'PNP_OFFICER' : 'BARANGAY_STAFF').map(p => (
-                <label
-                  key={p.key}
-                  className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
-                >
-                  <span className="text-[10px] text-[var(--text)]">
-                    {p.label}
-                    {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={p.status === 'editable' ? !!newRolePerms[p.key] : false}
-                    disabled={p.status !== 'editable'}
-                    onChange={e => setNewRolePerms({ ...newRolePerms, [p.key]: e.target.checked })}
-                    className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
-                  />
-                </label>
-              ))}
-            </div>
-            <button
-              onClick={() => createCustomRole((id) => { setCreateForm(prev => ({ ...prev, custom_role_id: id })); setShowAddRoleModal(false); })}
-              disabled={roleBusy || !newRoleForm.name.trim()}
-              className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-            >
-              <Save size={12} /> {roleBusy ? 'Saving…' : 'Create & select'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ================= STATIONS TAB ================= */}
-      {/* A station COVERS barangays; it owns nothing. Editing a jurisdiction
-          only changes who can see what -- no camera, incident or recording
-          ever moves, because none of them hang off a station. That's why
-          shrinking a jurisdiction here is safe. */}
       {tab === 'stations' && (
-        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-7 pb-7 pt-4 space-y-4">
-
-          <div className="flex items-start gap-2.5 border border-[var(--accent)]/25 bg-[var(--accent)]/[0.05] px-4 py-3">
-            <Info size={13} className="text-[var(--accent)] mt-0.5 shrink-0" />
-            <p className="text-[10.5px] leading-relaxed text-[var(--text)]">
-              <span className="text-[var(--accent)] font-bold">Why a station exists:</span>{' '}
-              a barangay account only ever sees its own barangay. A police account
-              covers more than one — a precinct's jurisdiction usually spans
-              several — so a PNP login can't be scoped to a single barangay the
-              way a barangay login is. A station is that grouping: pick which
-              barangays it covers below, and every PNP account attached to it sees
-              cameras and incidents across all of them. A station owns nothing
-              itself — no camera, incident, or recording ever moves when you
-              change its jurisdiction, so widening or narrowing one is always safe.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="flex-1 flex items-center gap-2 border border-[var(--line)] bg-[var(--bg)] px-3 py-2.5 focus-within:border-[var(--accent)]/50 transition-colors">
-              <Search size={12} className="text-[var(--text-2)] shrink-0" />
-              <input
-                value={stationSearch}
-                onChange={e => setStationSearch(e.target.value)}
-                placeholder="search stations, commanders, addresses or barangays"
-                className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
-              />
-              {stationSearch && (
-                <button onClick={() => setStationSearch('')} className="text-[var(--text-3)] hover:text-[var(--text)]" title="Clear search">
-                  <X size={12} />
-                </button>
-              )}
-            </div>
-            <button
-              onClick={openStationModal}
-              className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase transition-opacity hover:opacity-90 shrink-0"
-            >
-              <Plus size={12} /> Add station
-            </button>
-          </div>
-
-          {stations.length === 0 ? (
-            <div className="border border-[var(--line)] py-14 text-center">
-              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No police stations registered</p>
-              <p className="text-[9px] mt-2 text-[var(--text-3)]">PNP accounts are scoped to a station, so register one before creating its commander or officers.</p>
-            </div>
-          ) : filteredStations.length === 0 ? (
-            <div className="border border-[var(--line)] py-14 text-center">
-              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">No stations match “{stationSearch}”</p>
-            </div>
-          ) : filteredStations.map(st => {
-            const draft = jurisDraft[st.id] ?? st.barangay_ids;
-            const dirty = draft.slice().sort().join(',') !== st.barangay_ids.slice().sort().join(',');
-            const meta = [st.station_type, st.parent_office, st.regional_office].filter(Boolean).join(' · ');
-            const contact = [st.commander && `Commander: ${st.commander}`, st.contact_number, st.address].filter(Boolean).join(' · ');
-            return (
-              <div key={st.id} className="border border-[var(--line)]">
-                <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-[var(--line)] bg-[var(--accent)]/[0.03]">
-                  <div className="min-w-0">
-                    <div className="text-[12px] text-[var(--text)] tracking-wide truncate">{st.name}</div>
-                    {meta && <div className="text-[9px] text-[var(--text-2)] mt-0.5 truncate">{meta}</div>}
-                    {contact && <div className="text-[9px] text-[var(--text-3)] mt-0.5 truncate">{contact}</div>}
-                    {st.description && <p className="text-[10px] leading-relaxed text-[var(--text-2)] mt-1.5 max-w-3xl">{st.description}</p>}
-                    <div className="text-[9px] text-[var(--text-3)] mt-1">
-                      {st.staff_count} staff · {st.barangay_ids.length} barangay{st.barangay_ids.length === 1 ? '' : 's'}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => openBarangayModal(st)}
-                      className="flex items-center gap-1.5 px-3 py-2 border border-[var(--accent)]/40 text-[var(--accent)] text-[9px] tracking-[0.12em] uppercase hover:bg-[var(--accent)]/10 transition-colors"
-                    >
-                      <Plus size={11} /> Add barangay
-                    </button>
-                    <button
-                      onClick={() => handleDeleteStation(st)}
-                      title={st.staff_count ? 'Reassign its staff first' : 'Delete station'}
-                      disabled={st.staff_count > 0}
-                      className="p-2 border border-[var(--critical)]/30 text-[var(--critical)] disabled:opacity-25 hover:bg-[var(--critical)]/10 transition-colors"
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="p-4">
-                  <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">
-                    Jurisdiction — barangays this station can see
-                  </div>
-                  {allLocations.length === 0 ? (
-                    <p className="text-[10px] text-[var(--text-3)]">No barangays registered yet.</p>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-px border border-[var(--panel-2)]">
-                      {allLocations.map(loc => {
-                        const on = draft.includes(loc.id);
-                        return (
-                          <label
-                            key={loc.id}
-                            className="flex items-center justify-between px-3 py-2 cursor-pointer bg-[var(--panel)] hover:bg-[var(--panel-2)] transition-colors"
-                          >
-                            <span className="text-[10px] text-[var(--text)] truncate" title={loc.description || undefined}>
-                              {loc.name || loc.id}
-                              {loc.city_municipality && <span className="text-[var(--text-3)] ml-1.5">{loc.city_municipality}</span>}
-                              {loc.status !== 'approved' && (
-                                <span className="text-[var(--warn)] ml-1.5">({loc.status})</span>
-                              )}
-                            </span>
-                            <input
-                              type="checkbox"
-                              checked={on}
-                              onChange={() => toggleJurisdiction(st, loc.id)}
-                              className="w-3.5 h-3.5"
-                              style={{ accentColor: 'var(--accent)' }}
-                            />
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {dirty && (
-                    <div className="flex items-center justify-end gap-2 mt-3">
-                      <button
-                        onClick={() => setJurisDraft(d => { const n = { ...d }; delete n[st.id]; return n; })}
-                        className="px-3 py-1.5 border border-[var(--line)] text-[9px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:bg-[var(--panel-2)] transition-colors"
-                      >
-                        Discard
-                      </button>
-                      <button
-                        onClick={() => saveJurisdiction(st)}
-                        disabled={stationBusy}
-                        className="px-3 py-1.5 bg-[var(--accent)] text-[#fff] text-[9px] tracking-[0.15em] uppercase disabled:opacity-30 transition-opacity hover:opacity-90 flex items-center gap-1.5"
-                      >
-                        <Save size={10} /> Save jurisdiction
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <StationsPane apiUrl={API_URL} stations={stations} allLocations={allLocations} users={data.users} flash={flash} refresh={fetchOverview} />
       )}
 
       {/* ================= CAMERAS TAB ================= */}
@@ -2682,81 +1200,118 @@ export default function DevteamView() {
       )}
 
       {/* ================= AUDIT LOG TAB (Configuration) ================= */}
-      {/* 2026-09-23: who-did-what + recover, not a generic undo button (see
-          backend.py's log_audit docstring for why). Only delete-type entries
-          (action ending in ".deleted") whose target is still soft-deleted
-          are restorable -- the backend enforces that with a specific 400,
-          this just disables the button for anything else so DevTeam isn't
-          clicking Restore on a row that can never do anything. */}
+      {/* Who-did-what + recover. Only delete-type entries whose target is
+          still soft-deleted can be restored -- the backend enforces that,
+          the button just isn't offered for anything else. */}
       {tab === 'audit' && (
-        <div className="flex-1 min-h-0 flex flex-col px-7 pb-7 pt-4">
-          <div className="shrink-0 flex items-center gap-2 border border-[var(--line)] border-b-0 px-3 py-2.5">
-            <Search size={12} className="text-[var(--text-2)] shrink-0" />
-            <input
-              value={auditActionFilter}
-              onChange={e => setAuditActionFilter(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') fetchAuditLog(auditActionFilter.trim() || undefined); }}
-              placeholder="filter by action, e.g. user.deleted (enter to apply)"
-              className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+        <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-2 gap-6 px-7 pb-7 pt-4">
+          <div className="min-h-0 flex flex-col border border-[var(--line)]">
+            <PaneHeader
+              icon={<Undo2 size={12} />}
+              title="Audit log"
+              right={<span className="text-[9px] text-[var(--text-3)]">{auditEntries.length} entr{auditEntries.length === 1 ? 'y' : 'ies'}</span>}
             />
-            {auditActionFilter && (
-              <button
-                onClick={() => { setAuditActionFilter(''); fetchAuditLog(); }}
-                className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)] hover:text-[var(--text)] shrink-0"
-              >
-                Clear
-              </button>
-            )}
-            <span className="text-[9px] shrink-0" style={{ color: 'var(--text-3)' }}>
-              {auditEntries.length} entr{auditEntries.length === 1 ? 'y' : 'ies'}
-            </span>
-          </div>
-          <div className="flex-1 overflow-y-auto custom-scrollbar border border-[var(--line)]">
-            {!auditLoaded ? (
-              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">Loading…</p>
-            ) : auditEntries.length === 0 ? (
-              <p className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] text-center py-10">No audit entries yet</p>
-            ) : (
-              <div className="divide-y divide-[var(--panel-2)]">
-                {auditEntries.map(entry => {
-                  const restorable = entry.action.endsWith('.deleted');
-                  const busy = auditBusyIds.has(entry.id);
-                  const label = entry.target_snapshot?.username || entry.target_snapshot?.title || entry.target_id;
-                  return (
-                    <div key={entry.id} className={`flex items-center gap-3 px-3 py-2.5 transition-opacity ${busy ? 'opacity-40' : ''}`}>
-                      <span
-                        className={`text-[8px] font-bold px-1.5 py-1 border shrink-0 ${
-                          entry.action.endsWith('.deleted')
-                            ? 'border-[var(--critical)]/30 text-[var(--critical)]'
-                            : entry.action.endsWith('.restored')
-                            ? 'border-[var(--ok)]/30 text-[var(--ok)]'
-                            : 'border-[var(--line-2)] text-[var(--text-2)]'
-                        }`}
-                      >
-                        {entry.action}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[11px] text-[var(--text)] truncate">
-                          {entry.target_type} <span className="text-[var(--text-2)]">{label}</span>
-                        </p>
-                        <p className="text-[9px] text-[var(--text-2)] truncate">
-                          by {entry.actor_username} &middot; {new Date(entry.created_at).toLocaleString()}
-                        </p>
-                      </div>
-                      {restorable && (
-                        <button
-                          onClick={() => restoreAuditEntry(entry)}
-                          disabled={busy}
-                          className="flex items-center gap-1.5 px-2.5 py-1.5 text-[9px] tracking-[0.1em] uppercase border border-[var(--ok)]/30 text-[var(--ok)] hover:bg-[var(--ok)]/10 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                        >
-                          <Undo2 size={11} /> {busy ? 'Restoring…' : 'Restore'}
-                        </button>
-                      )}
+            <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--line)]">
+              <Search size={12} className="text-[var(--text-2)] shrink-0" />
+              <input
+                value={auditActionFilter}
+                onChange={e => setAuditActionFilter(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') fetchAuditLog(auditActionFilter.trim() || undefined); }}
+                placeholder="filter by action, e.g. user.deleted (enter to apply)"
+                className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+              />
+              {auditActionFilter && (
+                <button
+                  onClick={() => { setAuditActionFilter(''); fetchAuditLog(); }}
+                  className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)] hover:text-[var(--text)] shrink-0"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar divide-y divide-[var(--panel-2)]">
+              {!auditLoaded ? (
+                <EmptyPane text="Loading…" />
+              ) : auditEntries.length === 0 ? (
+                <EmptyPane text="No audit entries yet" />
+              ) : auditEntries.map(entry => {
+                const label = entry.target_snapshot?.full_name || entry.target_snapshot?.username || entry.target_snapshot?.name || entry.target_id;
+                const tone = entry.action.endsWith('.deleted') ? 'text-[var(--critical)]'
+                  : entry.action.endsWith('.restored') || entry.action.endsWith('.created') ? 'text-[var(--ok)]' : 'text-[var(--text-2)]';
+                return (
+                  <button
+                    key={entry.id}
+                    onClick={() => setSelectedAuditId(entry.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors ${entry.id === selectedAuditId ? 'bg-[var(--accent)]/[0.08]' : 'hover:bg-[var(--panel)]'}`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] text-[var(--text)] truncate">
+                        <span className={tone}>{entry.action}</span> <span className="text-[var(--text-2)]">{label}</span>
+                      </p>
+                      <p className="text-[9px] text-[var(--text-3)] truncate">by {entry.actor_username} · {new Date(entry.created_at).toLocaleString()}</p>
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="min-h-0 flex flex-col border border-[var(--line)]">
+            {(() => {
+              const entry = auditEntries.find(e => e.id === selectedAuditId);
+              if (!entry) {
+                return (
+                  <>
+                    <PaneHeader icon={<Info size={12} />} title="Entry details" />
+                    <EmptyPane text="Select an entry" sub="Who did it, when, the reason they gave, and a snapshot of what changed." />
+                  </>
+                );
+              }
+              const busy = auditBusyIds.has(entry.id);
+              const snapshot = Object.entries(entry.target_snapshot || {})
+                .filter(([k, v]) => k !== 'password' && k !== 'reason' && v !== null && v !== '');
+              return (
+                <>
+                  <PaneHeader icon={<Info size={12} />} title={entry.action} />
+                  <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-5 space-y-5">
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                      <InfoRow label="Target" value={`${entry.target_type} ${entry.target_id}`} />
+                      <InfoRow label="By" value={entry.actor_username} />
+                      <InfoRow label="When" value={new Date(entry.created_at).toLocaleString()} />
+                      <InfoRow label="Action" value={entry.action} />
+                    </div>
+                    {entry.target_snapshot?.reason && (
+                      <div className="border border-[var(--warn)]/30 bg-[var(--warn)]/[0.04] px-3 py-2.5">
+                        <span className="text-[8px] tracking-[0.15em] uppercase text-[var(--warn)] block mb-1">Reason given</span>
+                        <p className="text-[11px] text-[var(--text)]">{entry.target_snapshot.reason}</p>
+                      </div>
+                    )}
+                    {snapshot.length > 0 && (
+                      <div>
+                        <span className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] block mb-2">Snapshot</span>
+                        <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
+                          {snapshot.map(([k, v]) => (
+                            <div key={k} className="flex gap-3 px-3 py-1.5">
+                              <span className="text-[9px] text-[var(--text-3)] w-36 shrink-0 truncate">{k}</span>
+                              <span className="text-[10px] text-[var(--text)] break-all">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {entry.action.endsWith('.deleted') && (
+                      <button
+                        onClick={() => restoreAuditEntry(entry)}
+                        disabled={busy}
+                        className="flex items-center gap-1.5 px-3 py-2 text-[9px] tracking-[0.1em] uppercase border border-[var(--ok)]/30 text-[var(--ok)] hover:bg-[var(--ok)]/10 disabled:opacity-40"
+                      >
+                        <Undo2 size={11} /> {busy ? 'Restoring…' : 'Restore'}
+                      </button>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -3090,210 +1645,6 @@ export default function DevteamView() {
       )}
 
       {/* EDIT + PERMISSIONS MODAL */}
-      {editingUser && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-[var(--bg)]/85">
-          <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-sm p-6 max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
-            <div className="flex items-center justify-between mb-5 pb-4 border-b border-[var(--panel-2)]">
-              <div className="flex items-center gap-2">
-                <span className={`text-[8px] font-bold px-1.5 py-1 border ${(ROLE_STYLES[editingUser.role] || DEFAULT_ROLE_STYLE).border} ${(ROLE_STYLES[editingUser.role] || DEFAULT_ROLE_STYLE).text}`}>
-                  {(ROLE_STYLES[editingUser.role] || DEFAULT_ROLE_STYLE).code}
-                </span>
-                <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">{editingUser.role.replace('_', ' ')}</span>
-              </div>
-              <button onClick={() => setEditingUser(null)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Username</label>
-                <input
-                  value={editDraft.username}
-                  onChange={e => setEditDraft({ ...editDraft, username: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                />
-              </div>
-              <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">Assignment</label>
-                <input
-                  value={editDraft.assignment}
-                  onChange={e => setEditDraft({ ...editDraft, assignment: e.target.value })}
-                  className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                />
-              </div>
-
-              {/* BUG FOUND 2026-08-23: an account's location could be set at
-                  creation but never changed afterward -- this editor and the
-                  station_id field it PATCHes were both simply missing. DEVTEAM
-                  accounts have no org of their own (chk_user_scope requires
-                  both NULL), so there's nothing to show them here. */}
-              {editingUser.role !== 'DEVTEAM' && (
-                PNP_ROLES.includes(editingUser.role) ? (
-                  <div>
-                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                      Police station
-                    </label>
-                    <select
-                      value={editDraft.station_id}
-                      onChange={e => setEditDraft({ ...editDraft, station_id: e.target.value })}
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-                    >
-                      <option value="">
-                        {stations.length ? 'select a station…' : 'no stations yet — create one in the Stations tab'}
-                      </option>
-                      {stations.map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.barangay_ids.length} barangay{s.barangay_ids.length === 1 ? '' : 's'})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                      Barangay
-                    </label>
-                    <input
-                      value={editDraft.barangay_id}
-                      onChange={e => setEditDraft({ ...editDraft, barangay_id: e.target.value })}
-                      placeholder="barangay id"
-                      className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                    />
-                  </div>
-                )
-              )}
-
-              <div>
-                <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">New password</label>
-                <div className="relative">
-                  <input
-                    type={showEditPassword ? 'text' : 'password'}
-                    value={editDraft.password}
-                    onChange={e => setEditDraft({ ...editDraft, password: e.target.value })}
-                    placeholder="leave blank to keep current"
-                    className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 pr-8 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowEditPassword(s => !s)}
-                    title={showEditPassword ? 'Hide password' : 'Show password'}
-                    tabIndex={-1}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors"
-                  >
-                    {showEditPassword ? <EyeOff size={12} /> : <Eye size={12} />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-[var(--panel-2)]">
-                <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] flex items-center gap-1.5 mb-2">
-                  <KeyRound size={10} /> Permissions
-                </div>
-
-                {/* Admin permission override (2026-09-04): PNP_ADMIN/
-                    BARANGAY_ADMIN permissions are normally automatic --
-                    this is the only place that can change, and only after
-                    DevTeam re-confirms their own password. Not shown for
-                    DEVTEAM/staff/officer rows: DEVTEAM has no permissions
-                    concept, and staff/officer permissions were already
-                    directly editable with no override needed. */}
-                {(editingUser.role === 'PNP_ADMIN' || editingUser.role === 'BARANGAY_ADMIN') && (
-                  <div className="mb-2 border border-[var(--panel-2)]">
-                    <label className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel-2)]/50 transition-colors">
-                      <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)]">
-                        Override automatic permissions
-                      </span>
-                      <input
-                        type="checkbox"
-                        checked={overrideMode}
-                        onChange={e => {
-                          const on = e.target.checked;
-                          setOverrideMode(on);
-                          // Seed the checkboxes with what this admin ALREADY
-                          // effectively has (full access, since they've never
-                          // been overridden) the first time override is
-                          // switched on for them -- permsDraft came from
-                          // their real (empty) user_permissions rows, which
-                          // an admin never needed before now. Saving with
-                          // that empty draft as-is would silently strip every
-                          // permission the moment override is turned on,
-                          // before DevTeam has unchecked anything on purpose.
-                          // Seeding to "everything this role can hold, minus
-                          // whatever's permanently banned for it" instead
-                          // means turning override on and saving with no
-                          // other changes is a no-op, and only an explicit
-                          // uncheck actually restricts anything.
-                          if (on && !editingUser.custom_permissions) {
-                            const seeded: Record<string, boolean> = {};
-                            permissionRowsFor(editingUser.role, true).forEach(p => {
-                              if (p.status !== 'banned') seeded[p.key] = true;
-                            });
-                            setPermsDraft(seeded);
-                          }
-                        }}
-                        className="w-3.5 h-3.5 accent-[var(--accent)]"
-                      />
-                    </label>
-                    {(overrideMode || editingUser.custom_permissions) && (
-                      <div className="px-3 pb-3 pt-1 border-t border-[var(--panel-2)]">
-                        <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">
-                          Confirm DevTeam password
-                        </label>
-                        <div className="relative">
-                          <input
-                            type={showOverridePassword ? 'text' : 'password'}
-                            value={overridePassword}
-                            onChange={e => setOverridePassword(e.target.value)}
-                            placeholder={overrideMode ? 'required to apply this override' : 'required to reset to automatic'}
-                            className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 pr-8 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowOverridePassword(s => !s)}
-                            title={showOverridePassword ? 'Hide password' : 'Show password'}
-                            tabIndex={-1}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors"
-                          >
-                            {showOverridePassword ? <EyeOff size={12} /> : <Eye size={12} />}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {permissionNoteFor(editingUser.role, overrideMode) && (
-                  <p className="text-[9px] leading-relaxed text-[var(--text-3)] mb-2">{permissionNoteFor(editingUser.role, overrideMode)}</p>
-                )}
-                <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
-                  {permissionRowsFor(editingUser.role, overrideMode).map(p => (
-                    <label
-                      key={p.key}
-                      title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
-                      className={`flex items-center justify-between px-3 py-2 ${p.status === 'editable' ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed opacity-40'} transition-colors`}
-                    >
-                      <span className="text-[10px] text-[var(--text)]">
-                        {p.label}
-                        {p.status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">locked</span>}
-                        {p.status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
-                      </span>
-                      <input
-                        type="checkbox"
-                        checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!permsDraft[p.key]}
-                        disabled={p.status !== 'editable'}
-                        onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
-                        className="w-3.5 h-3.5 accent-[var(--accent)] disabled:cursor-not-allowed"
-                      />
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <button onClick={saveEdit} className="w-full py-2.5 bg-[var(--accent)] text-[var(--bg)] text-[10px] font-bold tracking-[0.15em] uppercase hover:bg-[var(--accent)] transition-colors flex items-center justify-center gap-2 mt-2">
-                <Save size={12} /> Save changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -3354,66 +1705,5 @@ function SeatChip({ user, code }: { user?: ManagedUser; code: string }) {
     <span className={`flex items-center gap-1.5 text-[9px] px-2 py-1 border ${style.border} ${style.text}`}>
       {code} &middot; {user.username}
     </span>
-  );
-}
-
-function SelectInput({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[] }) {
-  return (
-    <div>
-      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
-      <select
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none transition-colors"
-      >
-        <option value="">select…</option>
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
-    </div>
-  );
-}
-
-function TextAreaInput({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
-  return (
-    <div>
-      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
-      <textarea
-        value={value}
-        rows={3}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors resize-y"
-      />
-    </div>
-  );
-}
-
-function FieldInput({ label, value, onChange, type = 'text', placeholder }: any) {
-  const [show, setShow] = useState(false);
-  const isPassword = type === 'password';
-  return (
-    <div>
-      <label className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-1 block">{label}</label>
-      <div className={isPassword ? 'relative' : undefined}>
-        <input
-          type={isPassword ? (show ? 'text' : 'password') : type}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          placeholder={placeholder}
-          className={`w-full bg-[var(--bg)] border border-[var(--line)] focus:border-[var(--accent)]/50 p-2.5 text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-3)] transition-colors ${isPassword ? 'pr-8' : ''}`}
-        />
-        {isPassword && (
-          <button
-            type="button"
-            onClick={() => setShow(s => !s)}
-            title={show ? 'Hide password' : 'Show password'}
-            tabIndex={-1}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-2)] hover:text-[var(--text)] transition-colors"
-          >
-            {show ? <EyeOff size={12} /> : <Eye size={12} />}
-          </button>
-        )}
-      </div>
-    </div>
   );
 }

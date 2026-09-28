@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle, Eye, EyeOff, IdCard, Check } from 'lucide-react';
+import { Shield, ArrowRight, Building, Lock, User, MapPin, AlertTriangle, Eye, EyeOff, IdCard, Check, Camera, Phone, Home, Calendar, Briefcase } from 'lucide-react';
 import Link from 'next/link';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
+import { positionsForRole } from '../../lib/positions';
 
 type Station = { id: string; name: string };
 
@@ -12,6 +13,8 @@ export default function SignupPage() {
   const [formData, setFormData] = useState({
     username: '', password: '', role: 'BARANGAY_ADMIN',
     barangay_id: '', station_id: '', assignment: '',
+    // Personal record DevTeam reviews the application against.
+    full_name: '', birthdate: '', home_address: '', contact_number: '', position: '',
   });
   const [showPassword, setShowPassword] = useState(false);
   const [stations, setStations] = useState<Station[]>([]);
@@ -26,6 +29,7 @@ export default function SignupPage() {
   // in immediately but this keeps one consistent step for both branches.
   const [createdUserId, setCreatedUserId] = useState<number | null>(null);
   const [idFile, setIdFile] = useState<File | null>(null);
+  const [faceFile, setFaceFile] = useState<File | null>(null);
   const [idUploadBusy, setIdUploadBusy] = useState(false);
   const [idUploadDone, setIdUploadDone] = useState(false);
   const [idUploadError, setIdUploadError] = useState('');
@@ -64,6 +68,10 @@ export default function SignupPage() {
       setError('Enter your barangay');
       return;
     }
+    if (!formData.full_name.trim() || !formData.birthdate || !formData.home_address.trim() || !formData.position) {
+      setError('Full name, birthdate, residence and position are required');
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -80,6 +88,11 @@ export default function SignupPage() {
           assignment: formData.assignment,
           barangay_id: isPnp ? null : formData.barangay_id.trim(),
           station_id: isPnp ? formData.station_id : null,
+          full_name: formData.full_name.trim(),
+          birthdate: formData.birthdate,
+          home_address: formData.home_address.trim(),
+          contact_number: formData.contact_number.trim() || null,
+          position: formData.position,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -93,14 +106,15 @@ export default function SignupPage() {
   };
 
   const submitIdDocument = async () => {
-    if (!createdUserId || !idFile) return;
+    if (!createdUserId || (!idFile && !faceFile)) return;
     setIdUploadBusy(true);
     setIdUploadError('');
     try {
       const body = new FormData();
       body.append('username', formData.username);
       body.append('password', formData.password);
-      body.append('id_document', idFile);
+      if (idFile) body.append('id_document', idFile);
+      if (faceFile) body.append('face_photo', faceFile);
       const res = await fetch(`${API_URL}/api/signup/${createdUserId}/verification`, { method: 'POST', body });
       const d = await res.json().catch(() => ({}));
       if (res.ok) setIdUploadDone(true);
@@ -142,14 +156,14 @@ export default function SignupPage() {
                 <div className="flex items-start gap-2 px-2.5 py-2.5 border" style={{ background: 'rgba(0,180,120,0.08)', borderColor: 'var(--ok)' }}>
                   <Check size={13} style={{ color: 'var(--ok)' }} className="shrink-0 mt-px" />
                   <span className="text-[11px] leading-snug" style={{ color: 'var(--text)' }}>
-                    ID submitted. It'll be confirmed alongside your account review.
+                    Submitted. It&apos;ll be checked alongside your account review.
                   </span>
                 </div>
               ) : (
                 <>
                   <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
-                    Account created. Upload a government ID now so DevTeam can confirm your identity
-                    alongside your location approval — optional, but speeds up review.
+                    Account created. Upload a government ID and a clear photo of your face so DevTeam can
+                    confirm you are who you say you are — applications without them are hard to approve.
                   </p>
                   <div>
                     <label htmlFor="su-id-doc" className="label flex items-center gap-1.5 mb-1.5">
@@ -165,6 +179,23 @@ export default function SignupPage() {
                       style={fieldStyle}
                     />
                   </div>
+                  <div>
+                    <label htmlFor="su-face" className="label flex items-center gap-1.5 mb-1.5">
+                      <Camera size={11} /> Face photo (JPG, PNG, or WEBP)
+                    </label>
+                    {/* capture="user" opens the front camera on phones/tablets;
+                        desktops fall back to a normal file picker. */}
+                    <input
+                      id="su-face"
+                      type="file"
+                      accept=".jpg,.jpeg,.png,.webp"
+                      capture="user"
+                      onChange={e => setFaceFile(e.target.files?.[0] || null)}
+                      disabled={idUploadBusy}
+                      className={fieldClass}
+                      style={fieldStyle}
+                    />
+                  </div>
                   {idUploadError && (
                     <div className="flex items-start gap-2 px-2.5 py-2 border" style={{ background: 'rgba(229,52,47,0.10)', borderColor: 'var(--critical)' }} role="alert">
                       <AlertTriangle size={13} style={{ color: 'var(--critical)' }} className="shrink-0 mt-px" />
@@ -173,11 +204,11 @@ export default function SignupPage() {
                   )}
                   <button
                     onClick={submitIdDocument}
-                    disabled={idUploadBusy || !idFile}
+                    disabled={idUploadBusy || (!idFile && !faceFile)}
                     className="w-full py-2.5 text-[11px] font-bold uppercase tracking-[0.15em] text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                     style={{ background: 'var(--accent)' }}
                   >
-                    {idUploadBusy ? 'Uploading…' : 'Submit ID'}
+                    {idUploadBusy ? 'Uploading…' : 'Submit'}
                   </button>
                 </>
               )}
@@ -245,7 +276,7 @@ export default function SignupPage() {
                 id="su-role"
                 title="Administrator role"
                 value={formData.role}
-                onChange={e => setFormData({ ...formData, role: e.target.value })}
+                onChange={e => setFormData({ ...formData, role: e.target.value, position: '' })}
                 disabled={isSubmitting}
                 className={`${fieldClass} cursor-pointer`}
                 style={fieldStyle}
@@ -319,6 +350,49 @@ export default function SignupPage() {
                 style={fieldStyle}
                 required
               />
+            </div>
+
+            {/* Personal record -- what DevTeam checks this application against
+                (and matches to the ID and face photo on the next step). */}
+            <div className="pt-1 border-t" style={{ borderColor: 'var(--line)' }}>
+              <p className="label mt-2.5 mb-2.5" style={{ color: 'var(--text)' }}>About you</p>
+              <div className="space-y-3.5">
+                <div>
+                  <label htmlFor="su-name" className="label flex items-center gap-1.5 mb-1.5"><User size={11} /> Full name</label>
+                  <input id="su-name" title="Full name" autoComplete="name" placeholder="e.g. Juan Dela Cruz"
+                    value={formData.full_name} onChange={e => setFormData({ ...formData, full_name: e.target.value })}
+                    disabled={isSubmitting} className={fieldClass} style={fieldStyle} required />
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label htmlFor="su-birth" className="label flex items-center gap-1.5 mb-1.5"><Calendar size={11} /> Birthdate</label>
+                    <input id="su-birth" type="date" title="Birthdate"
+                      value={formData.birthdate} onChange={e => setFormData({ ...formData, birthdate: e.target.value })}
+                      disabled={isSubmitting} className={fieldClass} style={fieldStyle} required />
+                  </div>
+                  <div>
+                    <label htmlFor="su-phone" className="label flex items-center gap-1.5 mb-1.5"><Phone size={11} /> Contact no.</label>
+                    <input id="su-phone" title="Contact number" autoComplete="tel" placeholder="09XX-XXX-XXXX"
+                      value={formData.contact_number} onChange={e => setFormData({ ...formData, contact_number: e.target.value })}
+                      disabled={isSubmitting} className={fieldClass} style={fieldStyle} />
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="su-home" className="label flex items-center gap-1.5 mb-1.5"><Home size={11} /> Residence</label>
+                  <input id="su-home" title="Residential address" autoComplete="street-address" placeholder="House no., street, barangay, city"
+                    value={formData.home_address} onChange={e => setFormData({ ...formData, home_address: e.target.value })}
+                    disabled={isSubmitting} className={fieldClass} style={fieldStyle} required />
+                </div>
+                <div>
+                  <label htmlFor="su-position" className="label flex items-center gap-1.5 mb-1.5"><Briefcase size={11} /> Your position there</label>
+                  <select id="su-position" title="Position"
+                    value={formData.position} onChange={e => setFormData({ ...formData, position: e.target.value })}
+                    disabled={isSubmitting} className={`${fieldClass} cursor-pointer`} style={fieldStyle} required>
+                    <option value="">Select your position…</option>
+                    {positionsForRole(formData.role).map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+              </div>
             </div>
 
             {error && (

@@ -394,17 +394,21 @@ def _safe_recordings_path(filename: str) -> str:
 
 MAX_VERIFICATION_DOC_BYTES = 10 * 1024 * 1024
 
-def _save_verification_document(user_id: int, upload: UploadFile) -> str:
-    """Saves an uploaded ID under a SERVER-GENERATED filename -- unlike
-    _safe_recordings_path above, this never even considers the client's
-    own filename for the on-disk path, only its extension, so there's no
-    traversal surface to defend here at all. Returns just the filename
-    (matches SCREENSHOTS_DIR's own convention of storing a basename, not a
-    full path, in the DB -- portable across installs/machines)."""
+def _save_verification_document(user_id: int, upload: UploadFile, kind: str = "id") -> str:
+    """Saves an uploaded ID (kind="id") or face photo (kind="face") under a
+    SERVER-GENERATED filename -- unlike _safe_recordings_path above, this
+    never even considers the client's own filename for the on-disk path,
+    only its extension, so there's no traversal surface to defend here at
+    all. Returns just the filename (matches SCREENSHOTS_DIR's own convention
+    of storing a basename, not a full path, in the DB -- portable across
+    installs/machines)."""
     ext = os.path.splitext(upload.filename or "")[1].lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
+    if kind == "face":
+        if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+            raise HTTPException(status_code=400, detail="Face photo must be a JPG, PNG, or WEBP image")
+    elif ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
         raise HTTPException(status_code=400, detail="Accepted formats: JPG, PNG, WEBP, or PDF")
-    filename = f"user{user_id}_{uuid.uuid4().hex}{ext}"
+    filename = f"user{user_id}_{kind}_{uuid.uuid4().hex}{ext}"
     dest = os.path.join(VERIFICATION_DOCS_DIR, filename)
     total = 0
     try:
@@ -715,7 +719,7 @@ def _migrate_schema(conn, cursor):
             CREATE TABLE IF NOT EXISTS custom_roles (
                 id           TEXT PRIMARY KEY,
                 name         TEXT NOT NULL,
-                org_type     TEXT NOT NULL CHECK (org_type IN ('barangay', 'police')),
+                org_type     TEXT,
                 created_by   INTEGER,
                 created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -813,6 +817,45 @@ def _migrate_schema(conn, cursor):
     _ensure_column(conn, cursor, "incident_reports", "report_body", "TEXT")
     _ensure_column(conn, cursor, "incident_reports", "report_status", "TEXT DEFAULT 'confirmed'")
     _ensure_column(conn, cursor, "incident_reports", "updated_at", "TEXT")
+
+    # Personal record for every account (2026-09-29): who the person is,
+    # separate from the login. Collected at self-signup so DevTeam can judge
+    # an application, and editable from Manage Users. face_photo_path sits in
+    # VERIFICATION_DOCS_DIR next to the ID and is served the same guarded way.
+    for col in ("full_name", "birthdate", "home_address", "contact_number", "position", "face_photo_path"):
+        _ensure_column(conn, cursor, "users", col, "TEXT")
+
+    # Custom roles are no longer tied to one side (2026-09-29): a role is a
+    # permission preset, and whatever a given account's side can't hold is
+    # dropped when the role is applied. Older databases created the table
+    # with CHECK (org_type IN ('barangay','police')) NOT NULL -- relax it.
+    try:
+        if DB_KIND == "postgres":
+            cursor.execute("ALTER TABLE custom_roles DROP CONSTRAINT IF EXISTS custom_roles_org_type_check")
+            cursor.execute("ALTER TABLE custom_roles ALTER COLUMN org_type DROP NOT NULL")
+            conn.commit()
+        else:
+            cursor.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'custom_roles'")
+            row = cursor.fetchone()
+            if row and "CHECK" in (row["sql"] or ""):
+                cursor.execute("ALTER TABLE custom_roles RENAME TO custom_roles_old")
+                cursor.execute("""
+                    CREATE TABLE custom_roles (
+                        id           TEXT PRIMARY KEY,
+                        name         TEXT NOT NULL,
+                        org_type     TEXT,
+                        created_by   INTEGER,
+                        created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("INSERT INTO custom_roles (id, name, org_type, created_by, created_at) "
+                               "SELECT id, name, org_type, created_by, created_at FROM custom_roles_old")
+                cursor.execute("DROP TABLE custom_roles_old")
+                conn.commit()
+                print("💾 [DATABASE] Migrated: custom_roles.org_type is now optional")
+    except Exception as e:
+        conn.rollback()
+        print(f"⚠️  [DATABASE] Could not relax custom_roles.org_type: {e}")
 
 
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
@@ -1246,6 +1289,13 @@ class UserSignup(BaseModel):
     barangay_id: Optional[str] = None
     station_id: Optional[str] = None
     assignment: str
+    # Personal record (2026-09-29) -- what DevTeam reviews the application
+    # against. See PROFILE_FIELDS.
+    full_name: Optional[str] = None
+    birthdate: Optional[str] = None
+    home_address: Optional[str] = None
+    contact_number: Optional[str] = None
+    position: Optional[str] = None
 
 class UserLogin(BaseModel):
     username: str
@@ -1380,6 +1430,11 @@ class DevteamUserEdit(BaseModel):
     # fixed together, see DevteamView.tsx's edit-user modal.
     station_id: Optional[str] = None
     role: Optional[str] = None
+    full_name: Optional[str] = None
+    birthdate: Optional[str] = None
+    home_address: Optional[str] = None
+    contact_number: Optional[str] = None
+    position: Optional[str] = None
 
 class DevteamCreateUser(BaseModel):
     username: str
@@ -1400,6 +1455,19 @@ class DevteamCreateUser(BaseModel):
     parent_admin_id: Optional[int] = None
     permissions: Optional[dict] = None
     custom_role_id: Optional[str] = None
+    full_name: Optional[str] = None
+    birthdate: Optional[str] = None
+    home_address: Optional[str] = None
+    contact_number: Optional[str] = None
+    position: Optional[str] = None
+    # Per-camera dicing applied right after creation: {permission_key:
+    # [camera ids]}. Omitted key = every camera the account's org allows.
+    camera_scopes: Optional[dict] = None
+
+class CameraScopesUpdate(BaseModel):
+    # {permission_key: [camera ids] | None}. None = every camera the
+    # account's org allows (clears the dicing); a list = only those.
+    scopes: dict
 
 class ResourceGrantRequest(BaseModel):
     permission_key: str
@@ -1408,8 +1476,40 @@ class ResourceGrantRequest(BaseModel):
 
 class CustomRoleCreate(BaseModel):
     name: str
-    org_type: str  # 'barangay' | 'police'
+    # Optional since 2026-09-29: roles apply to either side, and whatever
+    # an account's side can't hold is dropped at assignment time.
+    org_type: Optional[str] = None
     permissions: Optional[dict] = None
+
+
+# Personal record fields shared by signup, DevTeam create and edit.
+PROFILE_FIELDS = ("full_name", "birthdate", "home_address", "contact_number", "position")
+
+
+def _clean_profile(model, required: tuple = ()) -> dict:
+    """Trimmed profile values from any model carrying PROFILE_FIELDS.
+    Absent fields are left out (so an edit only touches what was sent);
+    birthdate must be a real YYYY-MM-DD date for someone 18 or older."""
+    out = {}
+    for f in PROFILE_FIELDS:
+        v = getattr(model, f, None)
+        if v is None:
+            continue
+        v = v.strip()
+        out[f] = v or None
+    for f in required:
+        if not out.get(f):
+            raise HTTPException(status_code=400, detail=f"{f.replace('_', ' ').capitalize()} is required")
+    if out.get("birthdate"):
+        try:
+            born = datetime.strptime(out["birthdate"], "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Birthdate must be a date (YYYY-MM-DD)")
+        today = datetime.now()
+        age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+        if age < 18 or age > 110:
+            raise HTTPException(status_code=400, detail="Birthdate must be for someone 18 or older")
+    return out
 
 class ReportRequestCreate(BaseModel):
     incident_id: Optional[str] = None
@@ -1704,6 +1804,10 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
         if existing and existing["barangay_id"] != payload.get("barangay_id"):
             conn.close()
             raise HTTPException(status_code=403, detail="Can only delete cameras for your own barangay")
+        scoped = _scoped_camera_ids(cursor, payload, "manage_cameras")
+        if scoped is not None and cam_id not in scoped:
+            conn.close()
+            raise HTTPException(status_code=403, detail="Your camera access doesn't include this camera")
     cursor.execute("DELETE FROM cameras WHERE id = ?", (cam_id,))
     conn.commit()
     conn.close()
@@ -3183,6 +3287,7 @@ async def signup(request: Request, user: UserSignup):
         raise HTTPException(status_code=400, detail="A police station is required")
     if not is_pnp and not barangay_id:
         raise HTTPException(status_code=400, detail="Location is required")
+    profile = _clean_profile(user, required=("full_name", "birthdate", "home_address", "position"))
 
     conn = get_conn()
     cursor = conn.cursor()
@@ -3230,10 +3335,12 @@ async def signup(request: Request, user: UserSignup):
         # path (devteam_create_user, create_my_user) leaves this column at
         # its 'approved' default, so nothing about those changes.
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, signup_status) "
-            "VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending')",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, signup_status, "
+            f"{', '.join(PROFILE_FIELDS)}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', {', '.join('?' for _ in PROFILE_FIELDS)})",
             (user.username, hash_password(user.password), role,
-             barangay_id or None, station_id or None, user.assignment),
+             barangay_id or None, station_id or None, user.assignment,
+             *[profile.get(f) for f in PROFILE_FIELDS]),
         )
         new_user_id = cursor.lastrowid
 
@@ -3283,8 +3390,11 @@ async def signup(request: Request, user: UserSignup):
 async def upload_signup_verification(
     request: Request, user_id: int,
     username: str = Form(...), password: str = Form(...),
-    id_document: UploadFile = File(...),
+    id_document: Optional[UploadFile] = File(None),
+    face_photo: Optional[UploadFile] = File(None),
 ):
+    if id_document is None and face_photo is None:
+        raise HTTPException(status_code=400, detail="Attach a government ID and/or a face photo")
     conn = get_conn()
     cursor = conn.cursor()
     try:
@@ -3295,11 +3405,15 @@ async def upload_signup_verification(
         row = dict(row)
         if row["role"] not in ADMIN_ROLES:
             raise HTTPException(status_code=400, detail="This upload is for self-signup admin applications only")
-        filename = _save_verification_document(user_id, id_document)
-        cursor.execute(
-            "UPDATE users SET id_document_path = ?, verification_status = 'pending' WHERE id = ?",
-            (filename, user_id),
-        )
+        if id_document is not None:
+            filename = _save_verification_document(user_id, id_document)
+            cursor.execute(
+                "UPDATE users SET id_document_path = ?, verification_status = 'pending' WHERE id = ?",
+                (filename, user_id),
+            )
+        if face_photo is not None:
+            cursor.execute("UPDATE users SET face_photo_path = ? WHERE id = ?",
+                           (_save_verification_document(user_id, face_photo, kind="face"), user_id))
         log_audit(cursor, {"id": user_id, "username": username}, "user.verification_submitted", "user", str(user_id))
         conn.commit()
         return {"status": "submitted"}
@@ -3398,9 +3512,29 @@ BARANGAY_DETAIL_FIELDS = ("psgc_code", "city_municipality", "province", "region"
                           "hall_address", "contact_number", "description")
 
 
+MIN_REGISTRATION_REASON = 20
+
+
+def _require_registration_authority(cursor, payload: dict, reason: Optional[str], confirm_password: Optional[str]) -> str:
+    """Registering a station or barangay changes who can see which cameras
+    and incidents, so it needs a written justification (kept in the audit
+    log) and a fresh password re-entry from the DevTeam account doing it --
+    a stolen session token alone can't mint new jurisdictions."""
+    reason = (reason or "").strip()
+    if len(reason) < MIN_REGISTRATION_REASON:
+        raise HTTPException(status_code=400, detail=f"Give a reason for this registration (at least {MIN_REGISTRATION_REASON} characters)")
+    cursor.execute("SELECT password FROM users WHERE id = ?", (payload["id"],))
+    caller = cursor.fetchone()
+    if not caller or not verify_password(confirm_password or "", caller["password"]):
+        raise HTTPException(status_code=403, detail="Incorrect DevTeam password.")
+    return reason
+
+
 class StationSchema(BaseModel):
     id: Optional[str] = None
     name: str
+    reason: Optional[str] = None
+    confirm_password: Optional[str] = None
     station_type: Optional[str] = None
     parent_office: Optional[str] = None
     regional_office: Optional[str] = None
@@ -3414,6 +3548,8 @@ class StationJurisdictionSchema(BaseModel):
 
 class StationBarangayCreate(BaseModel):
     name: str
+    reason: Optional[str] = None
+    confirm_password: Optional[str] = None
     barangay_id: Optional[str] = None
     psgc_code: Optional[str] = None
     city_municipality: Optional[str] = None
@@ -3478,6 +3614,9 @@ async def create_station(data: StationSchema, authorization: Optional[str] = Hea
     conn = get_conn()
     cursor = conn.cursor()
     try:
+        if not _clean_optional(data.station_type):
+            raise HTTPException(status_code=400, detail="Unit type is required")
+        reason = _require_registration_authority(cursor, payload, data.reason, data.confirm_password)
         cursor.execute("SELECT 1 FROM police_stations WHERE LOWER(name) = LOWER(?)", (name,))
         if cursor.fetchone():
             raise HTTPException(status_code=409, detail=f'A station named "{name}" already exists')
@@ -3487,6 +3626,8 @@ async def create_station(data: StationSchema, authorization: Optional[str] = Hea
             f"VALUES (?, ?, {', '.join('?' for _ in STATION_DETAIL_FIELDS)})",
             (sid, name, *details),
         )
+        log_audit(cursor, payload, "station.created", "station", sid,
+                  snapshot={"name": name, "reason": reason, **dict(zip(STATION_DETAIL_FIELDS, details))})
         conn.commit()
     except HTTPException:
         raise
@@ -3577,7 +3718,15 @@ async def create_barangay_for_station(station_id: str, body: StationBarangayCrea
                 raise HTTPException(status_code=400, detail="PSGC code must be 10 digits (or the older 9-digit form)")
         details = {f: _clean_optional(getattr(body, f)) for f in BARANGAY_DETAIL_FIELDS}
         details["psgc_code"] = psgc
+        if not details["city_municipality"]:
+            raise HTTPException(status_code=400, detail="City / municipality is required")
         set_clause = ", ".join(f"{f} = ?" for f in BARANGAY_DETAIL_FIELDS)
+        reason = _require_registration_authority(cursor, payload, body.reason, body.confirm_password)
+        if psgc:
+            cursor.execute("SELECT name FROM barangays WHERE psgc_code = ? AND id <> ?", (psgc, barangay_id))
+            clash = cursor.fetchone()
+            if clash:
+                raise HTTPException(status_code=409, detail=f'PSGC code {psgc} is already registered to Barangay {clash["name"]}')
 
         cursor.execute("SELECT status FROM barangays WHERE id = ?", (barangay_id,))
         existing = cursor.fetchone()
@@ -3603,6 +3752,8 @@ async def create_barangay_for_station(station_id: str, body: StationBarangayCrea
         cursor.execute("SELECT 1 FROM station_barangays WHERE station_id = ? AND barangay_id = ?", (station_id, barangay_id))
         if not cursor.fetchone():
             cursor.execute("INSERT INTO station_barangays (station_id, barangay_id) VALUES (?, ?)", (station_id, barangay_id))
+        log_audit(cursor, payload, "barangay.created", "barangay", barangay_id,
+                  snapshot={"name": name, "station_id": station_id, "reason": reason, **details})
         conn.commit()
         await manager.broadcast({"channel": "stations", "event": "jurisdiction_updated", "id": station_id})
         return {"status": "created", "barangay_id": barangay_id}
@@ -3646,7 +3797,10 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
     query = """
         SELECT b.*, u.id AS requester_id, u.username AS requester_username, u.role AS requester_role,
                u.assignment AS requester_assignment, u.verification_status AS requester_verification_status,
-               u.id_document_path AS requester_has_document
+               u.id_document_path AS requester_has_document, u.face_photo_path AS requester_has_face_photo,
+               u.full_name AS requester_full_name, u.birthdate AS requester_birthdate,
+               u.home_address AS requester_home_address, u.contact_number AS requester_contact_number,
+               u.position AS requester_position, u.created_at AS requester_created_at
         FROM barangays b
         LEFT JOIN users u ON u.id = b.requested_by
     """
@@ -3660,6 +3814,7 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
         # the actual file through get_verification_document, this list is
         # just "has one been submitted", not a place to leak the path.
         r["requester_has_document"] = bool(r.get("requester_has_document"))
+        r["requester_has_face_photo"] = bool(r.get("requester_has_face_photo"))
     conn.close()
     return rows
 
@@ -3736,16 +3891,25 @@ async def list_pending_signups(authorization: Optional[str] = Header(None)):
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT u.id, u.username, u.role, u.assignment, u.station_id, u.created_at,
-               u.verification_status, u.id_document_path, s.name AS station_name
+        SELECT u.id, u.username, u.role, u.assignment, u.station_id, u.barangay_id, u.created_at,
+               u.verification_status, u.id_document_path, u.face_photo_path,
+               COALESCE(s.name, 'Barangay ' || b.name) AS station_name,
+               u.full_name, u.birthdate, u.home_address, u.contact_number, u.position
         FROM users u
         LEFT JOIN police_stations s ON s.id = u.station_id
-        WHERE u.role = 'PNP_ADMIN' AND u.signup_status = 'pending' AND u.deleted_at IS NULL
+        LEFT JOIN barangays b ON b.id = u.barangay_id
+        WHERE u.signup_status = 'pending' AND u.deleted_at IS NULL
+          AND (u.role = 'PNP_ADMIN'
+               -- A barangay applicant for an ALREADY-approved barangay
+               -- (e.g. replacing a removed captain) has no pending location
+               -- to show up under, so they're reviewed here instead.
+               OR (u.role = 'BARANGAY_ADMIN' AND COALESCE(b.status, 'approved') <> 'pending'))
         ORDER BY u.created_at DESC
     """)
     rows = [dict(r) for r in cursor.fetchall()]
     for r in rows:
         r["has_document"] = bool(r.pop("id_document_path"))
+        r["has_face_photo"] = bool(r.pop("face_photo_path"))
     conn.close()
     return rows
 
@@ -3902,6 +4066,7 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         raise HTTPException(status_code=400, detail="A police station is required for PNP roles")
     if not is_pnp and not barangay_id:
         raise HTTPException(status_code=400, detail="A barangay is required for barangay roles")
+    profile = _clean_profile(new_user, required=("full_name",))
 
     conn = get_conn()
     cursor = conn.cursor()
@@ -4054,19 +4219,23 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             if not custom_role:
                 conn.close()
                 raise HTTPException(status_code=400, detail="Unknown custom role.")
+            # Legacy side-bound roles (created before 2026-09-29) keep their
+            # check; side-agnostic roles (org_type NULL) apply to either side.
             wanted_org = "police" if is_pnp else "barangay"
-            if custom_role["org_type"] != wanted_org:
+            if custom_role["org_type"] and custom_role["org_type"] != wanted_org:
                 conn.close()
                 raise HTTPException(status_code=400, detail=f"That role is for {custom_role['org_type']} accounts, not {wanted_org}.")
 
         display_title = new_user.display_title or (custom_role["name"] if custom_role else None)
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, custom_role_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, custom_role_id, "
+            f"{', '.join(PROFILE_FIELDS)}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {', '.join('?' for _ in PROFILE_FIELDS)})",
             (new_user.username, hash_password(new_user.password), role,
              barangay_id or None, station_id or None, new_user.assignment, parent_id,
              display_title, 1 if display_title else 0,
-             custom_role["id"] if custom_role else None),
+             custom_role["id"] if custom_role else None,
+             *[profile.get(f) for f in PROFILE_FIELDS]),
         )
         new_id = cursor.lastrowid
 
@@ -4081,9 +4250,15 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         if custom_role:
             banned = BARANGAY_ONLY_PERMISSIONS if role in PNP_SIDE_ROLES else POLICE_ONLY_PERMISSIONS
             cursor.execute("SELECT * FROM custom_role_permission_defaults WHERE role_id = ?", (custom_role["id"],))
+            explicit = new_user.permissions or {}
             for default in cursor.fetchall():
                 key = default["permission_key"]
                 if key not in VALID_PERMISSION_KEYS or key in banned:
+                    continue
+                # The Create User form pre-fills its tree from the role and
+                # sends every key explicitly -- a key the operator unticked
+                # arrives as False and must stay off, not be re-added here.
+                if key in explicit and not default["resource_type"]:
                     continue
                 if default["resource_type"] and default["resource_id"]:
                     cursor.execute(
@@ -4096,6 +4271,9 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                         "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
                         (new_id, key, payload["id"]),
                     )
+        if new_user.camera_scopes:
+            _apply_camera_scopes(cursor, payload, {"id": new_id, "role": role, "barangay_id": barangay_id or None,
+                                                   "station_id": station_id or None}, new_user.camera_scopes)
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
@@ -4266,6 +4444,13 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
             conn.close()
             raise HTTPException(status_code=400, detail=f"Invalid role '{data.role}'")
         fields.append("role = ?"); values.append(data.role)
+    try:
+        profile = _clean_profile(data)
+    except HTTPException:
+        conn.close()
+        raise
+    for f, v in profile.items():
+        fields.append(f"{f} = ?"); values.append(v)
 
     if not fields:
         conn.close()
@@ -4559,6 +4744,74 @@ def _resource_permissions_handler(payload: dict, user_id: int, method: str, body
     finally:
         conn.close()
 
+# Permissions that can be diced down to individual cameras: view_map narrows
+# which cameras get_cameras() returns, manage_cameras which cameras
+# _camera_owned_by() lets them configure.
+CAMERA_SCOPABLE_KEYS = ("view_map", "manage_cameras")
+
+
+def _apply_camera_scopes(cursor, payload: dict, target: dict, scopes: dict):
+    """Replaces a user's per-camera grants for each key in `scopes`.
+    None clears the dicing (every camera their org allows); a list keeps
+    exactly those cameras. An empty list is refused rather than stored --
+    zero grant rows means "all cameras", the opposite of what an empty
+    selection looks like it means."""
+    for key, ids in scopes.items():
+        if key not in CAMERA_SCOPABLE_KEYS:
+            raise HTTPException(status_code=400, detail=f"'{key}' can't be limited to specific cameras")
+        _check_permission_key_allowed(target, key)
+        cursor.execute(
+            "DELETE FROM permission_grants WHERE user_id = ? AND permission_key = ? AND resource_type = 'camera'",
+            (target["id"], key),
+        )
+        if ids is None:
+            continue
+        wanted = list(dict.fromkeys(str(i) for i in ids))
+        if not wanted:
+            raise HTTPException(status_code=400, detail="Pick at least one camera, or give access to all cameras")
+        placeholders = ",".join("?" for _ in wanted)
+        if target.get("station_id"):
+            cursor.execute(
+                f"SELECT id FROM cameras WHERE id IN ({placeholders}) AND barangay_id IN "
+                "(SELECT barangay_id FROM station_barangays WHERE station_id = ?)",
+                (*wanted, target["station_id"]),
+            )
+        else:
+            cursor.execute(
+                f"SELECT id FROM cameras WHERE id IN ({placeholders}) AND LOWER(barangay_id) = LOWER(?)",
+                (*wanted, target.get("barangay_id") or ""),
+            )
+        in_scope = {r["id"] for r in cursor.fetchall()}
+        outside = [i for i in wanted if i not in in_scope]
+        if outside:
+            raise HTTPException(status_code=400, detail=f"Camera(s) outside this account's jurisdiction: {', '.join(outside)}")
+        for cid in wanted:
+            cursor.execute(
+                "INSERT INTO permission_grants (id, user_id, permission_key, resource_type, resource_id, granted_by) "
+                "VALUES (?, ?, ?, 'camera', ?, ?)",
+                (str(uuid.uuid4()), target["id"], key, cid, payload["id"]),
+            )
+    log_audit(cursor, payload, "permission_grant.cameras_set", "user", str(target["id"]), snapshot={"scopes": scopes})
+
+
+@app.put("/api/devteam/users/{user_id}/camera_scopes")
+async def devteam_set_camera_scopes(user_id: int, body: CameraScopesUpdate, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        target = _resource_grant_target(cursor, user_id)
+        if target["role"] == "DEVTEAM":
+            raise HTTPException(status_code=400, detail="DevTeam access is never narrowed")
+        _apply_camera_scopes(cursor, payload, target, body.scopes)
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "users", "event": "permissions_updated", "id": user_id})
+    return {"status": "updated", "id": user_id}
+
+
 @app.get("/api/admin/users/{user_id}/resource_permissions")
 async def admin_list_resource_permissions(user_id: int, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -4622,16 +4875,24 @@ async def devteam_cameras_for_grants(authorization: Optional[str] = Header(None)
 # on, not a second gate on top of those.
 @app.post("/api/users/me/verification")
 @limiter.limit("5/minute")
-async def upload_my_verification(request: Request, id_document: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+async def upload_my_verification(request: Request, id_document: Optional[UploadFile] = File(None),
+                                 face_photo: Optional[UploadFile] = File(None),
+                                 authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
+    if id_document is None and face_photo is None:
+        raise HTTPException(status_code=400, detail="Attach a government ID and/or a face photo")
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        filename = _save_verification_document(payload["id"], id_document)
-        cursor.execute(
-            "UPDATE users SET id_document_path = ?, verification_status = 'pending', verified_by = NULL, verified_at = NULL WHERE id = ?",
-            (filename, payload["id"]),
-        )
+        if id_document is not None:
+            filename = _save_verification_document(payload["id"], id_document)
+            cursor.execute(
+                "UPDATE users SET id_document_path = ?, verification_status = 'pending', verified_by = NULL, verified_at = NULL WHERE id = ?",
+                (filename, payload["id"]),
+            )
+        if face_photo is not None:
+            cursor.execute("UPDATE users SET face_photo_path = ? WHERE id = ?",
+                           (_save_verification_document(payload["id"], face_photo, kind="face"), payload["id"]))
         log_audit(cursor, payload, "user.verification_submitted", "user", str(payload["id"]))
         conn.commit()
         return {"status": "submitted"}
@@ -4646,11 +4907,22 @@ async def get_verification_document(user_id: int, authorization: Optional[str] =
     since 'can see this specific person's ID document' isn't a permission
     key anyone should be able to grant around -- it's strictly who they are
     to that account."""
-    payload = require_auth(authorization)
+    return _serve_user_file(require_auth(authorization), user_id, "id_document_path")
+
+
+@app.get("/api/users/{user_id}/face_photo")
+async def get_face_photo(user_id: int, authorization: Optional[str] = Header(None)):
+    """Same guard as the ID document -- a face photo is identity data too."""
+    return _serve_user_file(require_auth(authorization), user_id, "face_photo_path")
+
+
+def _serve_user_file(payload: dict, user_id: int, column: str):
+    if column not in ("id_document_path", "face_photo_path"):
+        raise HTTPException(status_code=400, detail="Unknown file")
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT id, parent_admin_id, id_document_path FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        cursor.execute(f"SELECT id, parent_admin_id, {column} AS path FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
         target = cursor.fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
@@ -4662,12 +4934,12 @@ async def get_verification_document(user_id: int, authorization: Optional[str] =
         )
         if not allowed:
             raise HTTPException(status_code=403, detail="Not authorized to view this document")
-        if not target["id_document_path"]:
-            raise HTTPException(status_code=404, detail="No document uploaded")
+        if not target["path"]:
+            raise HTTPException(status_code=404, detail="Nothing uploaded")
         real_dir = os.path.realpath(VERIFICATION_DOCS_DIR)
-        real_path = os.path.realpath(os.path.join(real_dir, target["id_document_path"]))
+        real_path = os.path.realpath(os.path.join(real_dir, target["path"]))
         if os.path.commonpath([real_dir, real_path]) != real_dir or not os.path.isfile(real_path):
-            raise HTTPException(status_code=404, detail="Document missing from disk")
+            raise HTTPException(status_code=404, detail="File missing from disk")
         return FileResponse(real_path)
     finally:
         conn.close()
@@ -4726,7 +4998,7 @@ async def list_custom_roles(org_type: Optional[str] = None, authorization: Optio
     conn = get_conn()
     cursor = conn.cursor()
     if org_type:
-        cursor.execute("SELECT * FROM custom_roles WHERE org_type = ? ORDER BY name", (org_type,))
+        cursor.execute("SELECT * FROM custom_roles WHERE org_type = ? OR org_type IS NULL ORDER BY name", (org_type,))
     else:
         cursor.execute("SELECT * FROM custom_roles ORDER BY name")
     roles = [dict(r) for r in cursor.fetchall()]
@@ -4748,22 +5020,25 @@ async def list_custom_roles(org_type: Optional[str] = None, authorization: Optio
 async def create_custom_role(body: CustomRoleCreate, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
-    org_type = body.org_type.strip().lower()
-    if org_type not in ("barangay", "police"):
-        raise HTTPException(status_code=400, detail="org_type must be 'barangay' or 'police'")
+    org_type = (body.org_type or "").strip().lower() or None
+    if org_type not in (None, "barangay", "police"):
+        raise HTTPException(status_code=400, detail="org_type must be 'barangay', 'police', or omitted")
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Role name is required")
 
-    # A role's permission set is bound by the SAME banned-key rules as the
-    # tier it will be applied to (STANDARD_ROLES only -- custom roles apply
-    # to staff/officer accounts, never to an admin's own automatic access).
-    stand_in_role = "PNP_OFFICER" if org_type == "police" else "BARANGAY_STAFF"
-    banned = BARANGAY_ONLY_PERMISSIONS if stand_in_role in PNP_SIDE_ROLES else POLICE_ONLY_PERMISSIONS
+    # A side-bound role is still limited to what its side can hold. A
+    # side-agnostic role (org_type None) stores every permission picked;
+    # devteam_create_user drops whatever the account's side can't hold.
+    banned = (BARANGAY_ONLY_PERMISSIONS if org_type == "police"
+              else POLICE_ONLY_PERMISSIONS if org_type == "barangay" else set())
 
     conn = get_conn()
     cursor = conn.cursor()
     try:
+        cursor.execute("SELECT 1 FROM custom_roles WHERE LOWER(name) = LOWER(?)", (name,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail=f'A role named "{name}" already exists')
         role_id = str(uuid.uuid4())
         cursor.execute(
             "INSERT INTO custom_roles (id, name, org_type, created_by) VALUES (?, ?, ?, ?)",
@@ -4958,13 +5233,25 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     # deleted_at IS NULL added 2026-09-22 -- same reasoning as list_my_users
     # above: a soft-deleted account belongs in the Audit Log, not sitting in
     # Directory/Users looking exactly like an active one.
-    cursor.execute("SELECT id, username, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, last_login, custom_permissions FROM users WHERE deleted_at IS NULL")
+    cursor.execute(
+        "SELECT id, username, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, "
+        "last_login, custom_permissions, custom_role_id, created_at, signup_status, verification_status, "
+        f"id_document_path, face_photo_path, {', '.join(PROFILE_FIELDS)} FROM users WHERE deleted_at IS NULL")
     user_rows = cursor.fetchall()
     users = [dict(r) for r in user_rows]
     perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])
+    # Per-camera dicing, batched: {user_id: {permission_key: [camera ids]}}.
+    cursor.execute("SELECT user_id, permission_key, resource_id FROM permission_grants WHERE resource_type = 'camera'")
+    scopes_by_user: dict = {}
+    for r in cursor.fetchall():
+        scopes_by_user.setdefault(r["user_id"], {}).setdefault(r["permission_key"], []).append(r["resource_id"])
     for u in users:
         u["permissions"] = perms_by_id.get(u["id"], "{}")
         u["custom_permissions"] = bool(u["custom_permissions"])
+        u["camera_scopes"] = scopes_by_user.get(u["id"], {})
+        u["has_document"] = bool(u.pop("id_document_path"))
+        u["has_face_photo"] = bool(u.pop("face_photo_path"))
+        u["verification_status"] = u.get("verification_status") or "unverified"
 
     cursor.execute("SELECT COUNT(*) AS c FROM incidents")
     incident_count = cursor.fetchone()["c"]
@@ -5210,18 +5497,36 @@ async def set_detection_model(
 # exactly as it always has.
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _scoped_camera_ids(cursor, payload: dict, permission_key: str) -> Optional[set]:
+    """Cameras this user's `permission_key` is diced down to, or None when it
+    isn't diced (every camera their org allows). DEVTEAM is never narrowed."""
+    if payload.get("role") == "DEVTEAM":
+        return None
+    cursor.execute(
+        "SELECT resource_id FROM permission_grants WHERE user_id = ? AND permission_key = ? AND resource_type = 'camera'",
+        (payload["id"], permission_key),
+    )
+    ids = {r["resource_id"] for r in cursor.fetchall()}
+    return ids or None
+
+
 def _camera_owned_by(cursor, camera_id: str, payload: dict) -> bool:
     """DEVTEAM can touch any camera. Everyone else must own it -- the
-    camera's barangay_id must match the caller's own barangay_id. PNP roles
-    never reach this: manage_cameras is barangay-only (BARANGAY_ONLY_PERMISSIONS),
-    enforced by require_permission() before this is ever called."""
+    camera's barangay_id must match the caller's own barangay_id -- and, if
+    their manage_cameras access is diced down to specific cameras, this must
+    be one of them. PNP roles never reach this: manage_cameras is
+    barangay-only (BARANGAY_ONLY_PERMISSIONS), enforced by
+    require_permission() before this is ever called."""
     if payload.get("role") == "DEVTEAM":
         return True
     cursor.execute("SELECT barangay_id FROM cameras WHERE id = ?", (camera_id,))
     row = cursor.fetchone()
     if not row:
         return False
-    return (row["barangay_id"] or "").lower() == (payload.get("barangay_id") or "").lower()
+    if (row["barangay_id"] or "").lower() != (payload.get("barangay_id") or "").lower():
+        return False
+    scoped = _scoped_camera_ids(cursor, payload, "manage_cameras")
+    return scoped is None or camera_id in scoped
 
 
 def _camera_model_map(cursor, camera_id: str) -> dict:
@@ -5263,6 +5568,9 @@ async def list_camera_models(authorization: Optional[str] = Header(None)):
     sql, params = apply_scope(payload, "SELECT id, name, barangay_id FROM cameras", [])
     cursor.execute(sql, tuple(params))
     cameras = [dict(r) for r in cursor.fetchall()]
+    scoped = _scoped_camera_ids(cursor, payload, "manage_cameras")
+    if scoped is not None:
+        cameras = [c for c in cameras if c["id"] in scoped]
     for cam in cameras:
         cam["models"] = _camera_model_map(cursor, cam["id"])
     conn.close()
@@ -5415,6 +5723,9 @@ async def list_camera_thresholds(authorization: Optional[str] = Header(None)):
     sql, params = apply_scope(payload, "SELECT id, name, barangay_id FROM cameras", [])
     cursor.execute(sql, tuple(params))
     cameras = [dict(r) for r in cursor.fetchall()]
+    scoped = _scoped_camera_ids(cursor, payload, "manage_cameras")
+    if scoped is not None:
+        cameras = [c for c in cameras if c["id"] in scoped]
     for cam in cameras:
         cam["thresholds"] = _camera_threshold_map(cursor, cam["id"])
     defaults = _global_threshold_defaults(_read_config_file())
