@@ -322,7 +322,7 @@ export default function DevteamView() {
 
   const fetchAuditLog = async (action?: string) => {
     try {
-      const qs = action ? `?action=${encodeURIComponent(action)}` : '';
+      const qs = action ? `?q=${encodeURIComponent(action)}&limit=500` : '?limit=500';
       const res = await fetch(`${API_URL}/api/devteam/audit_log${qs}`, { headers: authHeaders() });
       if (res.ok) setAuditEntries(await res.json());
     } catch { /* leave whatever was last shown */ }
@@ -1217,7 +1217,7 @@ export default function DevteamView() {
                 value={auditActionFilter}
                 onChange={e => setAuditActionFilter(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') fetchAuditLog(auditActionFilter.trim() || undefined); }}
-                placeholder="filter by action, e.g. user.deleted (enter to apply)"
+                placeholder="search action, person or details, e.g. confirmed, login_failed, juan (enter)"
                 className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
               />
               {auditActionFilter && (

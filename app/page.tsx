@@ -22,7 +22,7 @@ import {
   Maximize2, X, Sun, User,
   BatteryMedium, Thermometer, Zap, Plus, Film, Users, Terminal,
   Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi, Siren,
-  ClipboardList
+  ClipboardList, PanelRightClose, PanelRightOpen
 } from 'lucide-react';
 
 // Every tab view was previously eagerly imported at module top -- all six
@@ -66,6 +66,9 @@ export default function EcoVisionSentinel() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedCam, setSelectedCam] = useState<Camera | null>(null);
   const [isFullscreenGrid, setIsFullscreenGrid] = useState(false);
+  // The fullscreen wall's own incident queue -- hideable for a clean wall,
+  // but it reopens by itself whenever a new incident arrives.
+  const [fsQueueOpen, setFsQueueOpen] = useState(true);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [isSirenActive, setIsSirenActive] = useState(false);
@@ -478,6 +481,28 @@ const fetchCameras = async (userObj: any) => {
     }
     setTimeout(() => setSirenStopState('idle'), 2500);
   };
+
+  // The fullscreen wall is a real OS fullscreen, not just an overlay inside
+  // the window: no taskbar, title bar or browser chrome. Leaving OS
+  // fullscreen with Esc/F11 closes the wall too, so the two never disagree.
+  useEffect(() => {
+    if (!isFullscreenGrid) {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      return;
+    }
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    const onChange = () => { if (!document.fullscreenElement) { setIsFullscreenGrid(false); setIsSirenActive(false); } };
+    // Attached a beat later so the enter transition itself can't trip it.
+    const t = setTimeout(() => document.addEventListener('fullscreenchange', onChange), 300);
+    return () => { clearTimeout(t); document.removeEventListener('fullscreenchange', onChange); };
+  }, [isFullscreenGrid]);
+
+  const pendingCount = alerts.filter(a => a.status === 'pending').length;
+  const prevPendingCount = React.useRef(pendingCount);
+  useEffect(() => {
+    if (pendingCount > prevPendingCount.current) setFsQueueOpen(true);
+    prevPendingCount.current = pendingCount;
+  }, [pendingCount]);
 
   const handleLogout = () => {
     // Was only clearing ecoUser, not ecoToken -- the same half-clear that
@@ -1078,7 +1103,16 @@ const fetchCameras = async (userObj: any) => {
                 </button>
               )}
               <button
-                title="Exit fullscreen"
+                title={fsQueueOpen ? 'Hide incident queue' : 'Show incident queue'}
+                onClick={() => setFsQueueOpen(o => !o)}
+                className="h-6 flex items-center gap-1 px-1.5 border transition-colors hover:bg-white/5"
+                style={{ borderColor: pendingAlerts.length && !fsQueueOpen ? 'var(--critical)' : 'var(--line)', color: pendingAlerts.length && !fsQueueOpen ? 'var(--critical)' : 'var(--text-2)' }}
+              >
+                {fsQueueOpen ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
+                {!fsQueueOpen && pendingAlerts.length > 0 && <span className="data text-[10px]">{pendingAlerts.length}</span>}
+              </button>
+              <button
+                title="Exit fullscreen (Esc)"
                 onClick={() => { setIsFullscreenGrid(false); setIsSirenActive(false); }}
                 className="h-6 w-6 flex items-center justify-center border transition-colors hover:bg-white/5"
                 style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}
@@ -1087,7 +1121,8 @@ const fetchCameras = async (userObj: any) => {
               </button>
             </div>
           </div>
-          <div className="flex-1 min-h-0 p-1.5 flex flex-col gap-1.5">
+          <div className="flex-1 min-h-0 flex">
+          <div className="flex-1 min-w-0 p-1.5 flex flex-col gap-1.5">
             {selectedCam ? (
               <>
                 <div className="flex-1 min-h-0">
@@ -1113,6 +1148,47 @@ const fetchCameras = async (userObj: any) => {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Incident queue -- the wall hides the app's nav and panels, but
+              an operator watching it still has to be able to act on what
+              it shows. Same rows (and the same review-then-decide popup) as
+              the dashboard's queue. */}
+          {fsQueueOpen && (
+            <aside className="w-[300px] shrink-0 flex flex-col border-l" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
+              <div className="h-9 shrink-0 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
+                <span className="label" style={{ color: 'var(--text)' }}>Incident Queue</span>
+                <span
+                  className="data text-[10px] px-1.5 py-0.5 border"
+                  style={{
+                    color: pendingAlerts.length ? 'var(--critical)' : 'var(--text-3)',
+                    borderColor: pendingAlerts.length ? 'var(--critical)' : 'var(--line)',
+                    borderRadius: 'var(--radius-sm)',
+                  }}
+                >
+                  {String(pendingAlerts.length).padStart(2, '0')}
+                </span>
+              </div>
+              <div className="flex-1 overflow-y-auto custom-scrollbar" role="log" aria-live="assertive" aria-relevant="additions" aria-label="Incident queue, newest first">
+                {pendingAlerts.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
+                    <span className="status-dot ok" />
+                    <span className="label text-center">Monitoring — no incidents awaiting review</span>
+                  </div>
+                ) : (
+                  pendingAlerts.map(alert => (
+                    <IncidentRow
+                      key={alert.id}
+                      alert={alert}
+                      cameras={cameras}
+                      onConfirm={handleVerifyCrime}
+                      onDismiss={handleDismissCrime}
+                    />
+                  ))
+                )}
+              </div>
+            </aside>
+          )}
           </div>
         </div>
       )}

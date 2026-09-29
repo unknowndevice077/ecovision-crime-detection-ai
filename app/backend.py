@@ -44,6 +44,7 @@ import hashlib
 import hmac
 import base64
 import secrets
+import contextvars
 from dotenv import load_dotenv
 from db import get_conn, IntegrityError, DB_KIND, table_exists, SQLITE_PATH
 from port_utils import find_free_port, write_runtime_port, read_runtime_ports, start_parent_watchdog
@@ -441,6 +442,59 @@ app = FastAPI(
     title=sys_config["system"]["name"],
     version=sys_config["system"]["version"]
 )
+
+# Audit catch-all (2026-09-30): only some endpoints wrote their own detailed
+# audit entry, so most changes -- confirming/dismissing an incident,
+# creating or editing an account, resetting a password, adding a camera --
+# left no trace at all. Every successful (or permission-denied) change
+# request now leaves at least one row: the endpoint's own detailed entry
+# when it writes one, otherwise a generic "<METHOD> <route>" entry with the
+# actor, route parameters and outcome. Machine-to-machine traffic from the
+# AI core / ESP32 and continuous PTZ nudges are left out -- they'd bury the
+# human actions this log exists for.
+_AUDIT_SKIP_PATHS = {
+    "/api/ai_trigger", "/api/ai_register_clip", "/api/esp32/register",
+    "/api/ptz/move", "/api/ptz/stop", "/api/login", "/api/logout",
+}
+
+
+@app.middleware("http")
+async def audit_every_change(request: Request, call_next):
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return await call_next(request)
+    state = {"logged": False}
+    token = _audit_request_state.set(state)
+    try:
+        response = await call_next(request)
+    finally:
+        _audit_request_state.reset(token)
+    try:
+        route = request.scope.get("route")
+        template = getattr(route, "path", None) or request.url.path
+        status = response.status_code
+        if state["logged"] or template in _AUDIT_SKIP_PATHS or not (status < 400 or status == 403):
+            return response
+        auth = request.headers.get("authorization") or ""
+        try:
+            actor = verify_token(auth.removeprefix("Bearer ")) if auth.startswith("Bearer ") else {}
+        except HTTPException:
+            actor = {}
+        params = dict(request.scope.get("path_params") or {})
+        target_type = template.strip("/").split("/")[1] if template.count("/") >= 2 else "system"
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            log_audit(cur, {"id": actor.get("id"), "username": actor.get("username") or "anonymous"},
+                      f"{'denied ' if status == 403 else ''}{request.method} {template}",
+                      target_type, ",".join(str(v) for v in params.values()) or "-",
+                      snapshot={"status": status, **({"params": params} if params else {})})
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️  [AUDIT] catch-all could not record {request.method} {request.url.path}: {e}")
+    return response
+
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -858,6 +912,12 @@ def _migrate_schema(conn, cursor):
         print(f"⚠️  [DATABASE] Could not relax custom_roles.org_type: {e}")
 
 
+# Set per request by audit_every_change() below: a mutable holder so an
+# endpoint's own detailed log_audit() call is visible to the middleware
+# after the handler returns, and the catch-all doesn't write a duplicate.
+_audit_request_state: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar("_audit_request_state", default=None)
+
+
 def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: str, snapshot: Optional[dict] = None):
     """Writes one audit_log row. Never raises -- an audit-trail failure must
     not be allowed to look like the action itself (a delete, a permission
@@ -886,6 +946,9 @@ def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: s
                 json.dumps(snapshot, default=str) if snapshot is not None else None,
             ),
         )
+        state = _audit_request_state.get()
+        if state is not None:
+            state["logged"] = True
     except Exception as e:
         print(f"⚠️  [AUDIT] Could not write audit_log row for {action} {target_type}={target_id}: {e}")
 
@@ -1435,6 +1498,10 @@ class DevteamUserEdit(BaseModel):
     home_address: Optional[str] = None
     contact_number: Optional[str] = None
     position: Optional[str] = None
+    # Sent explicitly as null to clear (see model_fields_set in
+    # devteam_edit_user); left out entirely to leave unchanged.
+    parent_admin_id: Optional[int] = None
+    custom_role_id: Optional[str] = None
 
 class DevteamCreateUser(BaseModel):
     username: str
@@ -1785,6 +1852,8 @@ async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(No
             "INSERT INTO cameras (id, name, url, status, barangay_id) VALUES (?, ?, ?, 'online', ?)",
             (cam_id, cam.name, cam.url, cam.barangay_id.lower()),
         )
+        log_audit(cursor, payload, "camera.created", "camera", cam_id,
+                  snapshot={"name": cam.name, "barangay_id": cam.barangay_id.lower()})
         conn.commit()
         return {"status": "created", "id": cam_id}
     except Exception as e:
@@ -1818,7 +1887,12 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
         if scoped is not None and cam_id not in scoped:
             conn.close()
             raise HTTPException(status_code=403, detail="Your camera access doesn't include this camera")
+    cursor.execute("SELECT * FROM cameras WHERE id = ?", (cam_id,))
+    cam_row = cursor.fetchone()
     cursor.execute("DELETE FROM cameras WHERE id = ?", (cam_id,))
+    if cam_row:
+        log_audit(cursor, payload, "camera.deleted", "camera", cam_id,
+                  snapshot={k: v for k, v in dict(cam_row).items() if k != "url"})
     conn.commit()
     conn.close()
     return {"status": "deleted"}
@@ -1893,6 +1967,9 @@ async def add_notify_target(target: NotifyTargetSchema, authorization: Optional[
                VALUES (?, ?, ?, ?, ?, ?, 1)""",
             (target_id, target.barangay_id, target.station_id, target.channel, target.destination, target.label),
         )
+        log_audit(cursor, payload, "notify_target.created", "notify_target", target_id,
+                  snapshot={"channel": target.channel, "destination": target.destination, "label": target.label,
+                            "barangay_id": target.barangay_id, "station_id": target.station_id})
         conn.commit()
         return {"status": "created", "id": target_id}
     except Exception as e:
@@ -1924,7 +2001,11 @@ async def delete_notify_target(target_id: str, authorization: Optional[str] = He
                 conn.close()
                 raise HTTPException(status_code=403, detail="Can only manage targets for your own barangay")
 
+    cursor.execute("SELECT * FROM notify_targets WHERE id = ?", (target_id,))
+    nt_row = cursor.fetchone()
     cursor.execute("DELETE FROM notify_targets WHERE id = ?", (target_id,))
+    if nt_row:
+        log_audit(cursor, payload, "notify_target.deleted", "notify_target", target_id, snapshot=dict(nt_row))
     conn.commit()
     conn.close()
     return {"status": "deleted"}
@@ -2673,9 +2754,15 @@ async def update_incident_status(incident_id: str, data: StatusUpdateSchema, aut
     except HTTPException:
         conn.close()
         raise
+    cursor.execute("SELECT case_id, type, status, barangay_id FROM incidents WHERE id = ?", (incident_id,))
+    before = cursor.fetchone()
     cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
-    conn.commit()
     updated = cursor.rowcount
+    if updated and before:
+        log_audit(cursor, payload, f"incident.{(data.status or '').lower() or 'status_changed'}", "incident", incident_id,
+                  snapshot={"case_id": before["case_id"], "type": before["type"], "from": before["status"],
+                            "to": data.status, "barangay_id": before["barangay_id"]})
+    conn.commit()
     conn.close()
     if not updated:
         raise HTTPException(status_code=404, detail="Incident not found")
@@ -3512,6 +3599,12 @@ async def login(request: Request, creds: UserLogin):
     cursor.execute("SELECT * FROM users WHERE username = ? AND deleted_at IS NULL", (creds.username,))
     row = cursor.fetchone()
     if not row or not verify_password(creds.password, row["password"]):
+        # Failed sign-ins are recorded against the username tried (known or
+        # not) so repeated guessing at an account shows up in the log.
+        log_audit(cursor, {"id": row["id"] if row else None, "username": creds.username}, "user.login_failed",
+                  "user", str(row["id"]) if row else "-",
+                  snapshot={"ip": request.client.host if request.client else None})
+        conn.commit()
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid Credentials")
 
@@ -3563,6 +3656,8 @@ async def login(request: Request, creds: UserLogin):
     # right now" (there's no session/heartbeat concept in this app to answer
     # that second question honestly, so the Users list doesn't claim to).
     cursor.execute("UPDATE users SET last_login = NOW() WHERE id = ?", (user_dict["id"],))
+    log_audit(cursor, user_dict, "user.login", "user", str(user_dict["id"]),
+              snapshot={"ip": request.client.host if request.client else None})
     conn.commit()
 
     token = issue_token(user_dict)
@@ -3787,7 +3882,11 @@ async def set_station_jurisdiction(station_id: str, data: StationJurisdictionSch
             raise HTTPException(status_code=400, detail=f"Unknown barangay ids: {', '.join(unknown)}")
 
     try:
+        cursor.execute("SELECT barangay_id FROM station_barangays WHERE station_id = ?", (station_id,))
+        juris_before = sorted(r["barangay_id"] for r in cursor.fetchall())
         cursor.execute("DELETE FROM station_barangays WHERE station_id = ?", (station_id,))
+        log_audit(cursor, payload, "station.jurisdiction_updated", "station", station_id,
+                  snapshot={"from": juris_before, "to": sorted(wanted)})
         for b in wanted:
             cursor.execute(
                 "INSERT INTO station_barangays (station_id, barangay_id) VALUES (?, ?)", (station_id, b))
@@ -3897,7 +3996,11 @@ async def delete_station(station_id: str, authorization: Optional[str] = Header(
         raise HTTPException(
             status_code=409,
             detail=f"{n} user(s) are still assigned to this station. Reassign them first.")
+    cursor.execute("SELECT * FROM police_stations WHERE id = ?", (station_id,))
+    st_row = cursor.fetchone()
     cursor.execute("DELETE FROM police_stations WHERE id = ?", (station_id,))
+    if st_row:
+        log_audit(cursor, payload, "station.removed", "station", station_id, snapshot=dict(st_row))
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "stations", "event": "station_deleted", "id": station_id})
@@ -3962,6 +4065,7 @@ async def approve_location(barangay_id: str, data: LocationDecisionSchema, autho
         "UPDATE users SET signup_status = 'approved' WHERE id = (SELECT requested_by FROM barangays WHERE id = ?) AND signup_status = 'pending'",
         (barangay_id,),
     )
+    log_audit(cursor, payload, "barangay.approved", "barangay", barangay_id, snapshot={"reason": data.reason})
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
@@ -3985,6 +4089,7 @@ async def reject_location(barangay_id: str, data: LocationDecisionSchema, author
         "UPDATE users SET signup_status = 'rejected' WHERE id = (SELECT requested_by FROM barangays WHERE id = ?) AND signup_status = 'pending'",
         (barangay_id,),
     )
+    log_audit(cursor, payload, "barangay.rejected", "barangay", barangay_id, snapshot={"reason": data.reason})
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "locations", "event": "location_rejected", "barangay_id": barangay_id})
@@ -4149,6 +4254,9 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
                         "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
                         (new_id, key, payload["id"]),
                     )
+        log_audit(cursor, payload, "user.created", "user", str(new_id), snapshot={
+            "username": new_user.username, "role": target_role, "barangay_id": new_barangay, "station_id": new_station,
+            "assignment": new_user.assignment, "permissions": new_user.permissions if new_user.is_sub_admin else None})
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         return {"status": "success", "role": target_role, "id": new_id}
@@ -4394,6 +4502,10 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         if new_user.resource_scopes:
             _apply_resource_scopes(cursor, payload, {"id": new_id, "role": role, "barangay_id": barangay_id or None,
                                                      "station_id": station_id or None}, new_user.resource_scopes)
+        log_audit(cursor, payload, "user.created", "user", str(new_id), snapshot={
+            "username": new_user.username, "role": role, "barangay_id": barangay_id or None, "station_id": station_id or None,
+            "assignment": new_user.assignment, "custom_role_id": custom_role["id"] if custom_role else None,
+            "permissions": new_user.permissions, **profile})
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
@@ -4422,6 +4534,8 @@ async def update_user_permissions(user_id: int, data: PermissionsUpdate, authori
         conn.close()
         raise HTTPException(status_code=403, detail="You can only edit permissions for your own users")
 
+    cursor.execute("SELECT permission_key FROM user_permissions WHERE user_id = ?", (user_id,))
+    perms_before = sorted(r["permission_key"] for r in cursor.fetchall())
     cursor.execute("DELETE FROM user_permissions WHERE user_id = ?", (user_id,))
     for key, granted in data.permissions.items():
         if granted and key in VALID_PERMISSION_KEYS:
@@ -4429,6 +4543,9 @@ async def update_user_permissions(user_id: int, data: PermissionsUpdate, authori
                 "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?)",
                 (user_id, key, payload["id"]),
             )
+    perms_after = sorted(k for k, g in data.permissions.items() if g and k in VALID_PERMISSION_KEYS)
+    log_audit(cursor, payload, "user.permissions_updated", "user", str(user_id),
+              snapshot={"from": perms_before, "to": perms_after})
     conn.commit()
     conn.close()
     await manager.broadcast({"channel": "users", "event": "permissions_updated", "id": user_id})
@@ -4506,6 +4623,7 @@ async def reset_my_users_password(user_id: int, authorization: Optional[str] = H
     new_password = secrets.token_urlsafe(12)
     cursor.execute("UPDATE users SET password = ? WHERE id = ?",
                     (hash_password(new_password), user_id))
+    log_audit(cursor, payload, "user.password_reset", "user", str(user_id), snapshot={"username": target["username"]})
     conn.commit()
     conn.close()
     # The new password itself never goes over the broadcast channel -- only
@@ -4559,11 +4677,54 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
             conn.close()
             raise HTTPException(status_code=400, detail=f"Unknown station '{stn}'")
         fields.append("station_id = ?"); values.append(stn)
-    if data.role is not None:
+    new_role = target["role"]
+    if data.role is not None and data.role != target["role"]:
         if data.role not in ALL_ROLES:
             conn.close()
             raise HTTPException(status_code=400, detail=f"Invalid role '{data.role}'")
+        # DevTeam access is granted by creating a DevTeam account, never by
+        # promoting someone in place (or quietly demoting one).
+        if "DEVTEAM" in (data.role, target["role"]):
+            conn.close()
+            raise HTTPException(status_code=400, detail="DevTeam accounts can't be converted to or from other roles")
+        new_role = data.role
         fields.append("role = ?"); values.append(data.role)
+        # Crossing sides (barangay <-> police) swaps which org column is set
+        # -- chk_user_scope allows exactly one -- and drops the old
+        # supervisor, who belongs to the other side.
+        if (data.role in PNP_SIDE_ROLES) != (target["role"] in PNP_SIDE_ROLES):
+            if data.role in PNP_SIDE_ROLES:
+                if not data.station_id:
+                    conn.close()
+                    raise HTTPException(status_code=400, detail="Pick the police station for this account's new role")
+                fields.append("barangay_id = ?"); values.append(None)
+            else:
+                if not data.barangay_id:
+                    conn.close()
+                    raise HTTPException(status_code=400, detail="Pick the barangay for this account's new role")
+                fields.append("station_id = ?"); values.append(None)
+            if "parent_admin_id" not in data.model_fields_set:
+                fields.append("parent_admin_id = ?"); values.append(None)
+    if "parent_admin_id" in data.model_fields_set:
+        if data.parent_admin_id is not None:
+            if data.parent_admin_id == user_id:
+                conn.close()
+                raise HTTPException(status_code=400, detail="An account can't report to itself")
+            cursor.execute("SELECT role FROM users WHERE id = ? AND deleted_at IS NULL", (data.parent_admin_id,))
+            boss = cursor.fetchone()
+            wanted_boss = "PNP_ADMIN" if new_role in PNP_SIDE_ROLES else "BARANGAY_ADMIN"
+            if not boss or boss["role"] != wanted_boss:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"Supervisor must be an active {wanted_boss} account")
+        fields.append("parent_admin_id = ?"); values.append(data.parent_admin_id)
+    if "custom_role_id" in data.model_fields_set:
+        role_id = (data.custom_role_id or "").strip() or None
+        if role_id:
+            cursor.execute("SELECT 1 FROM custom_roles WHERE id = ?", (role_id,))
+            if not cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=400, detail="Unknown custom role")
+        fields.append("custom_role_id = ?"); values.append(role_id)
     try:
         profile = _clean_profile(data)
     except HTTPException:
@@ -4577,8 +4738,20 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
         raise HTTPException(status_code=400, detail="No fields to update")
 
     values.append(user_id)
+    before = dict(target)
     try:
         cursor.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+        changes = {}
+        for f in fields:
+            col = f.split(" = ")[0]
+            if col == "password":
+                changes["password"] = "changed"
+                continue
+            new_v = values[fields.index(f)]
+            if before.get(col) != new_v:
+                changes[col] = {"from": before.get(col), "to": new_v}
+        log_audit(cursor, payload, "user.updated", "user", str(user_id),
+                  snapshot={"username": before.get("username"), "changes": changes})
         conn.commit()
     except IntegrityError as e:
         conn.close()
@@ -4633,6 +4806,7 @@ async def devteam_override_admin_permissions(
         if data.permissions is None:
             cursor.execute("UPDATE users SET custom_permissions = 0 WHERE id = ?", (user_id,))
             cursor.execute("DELETE FROM user_permissions WHERE user_id = ?", (user_id,))
+            log_audit(cursor, payload, "user.permissions_reset_to_automatic", "user", str(user_id))
             conn.commit()
             await manager.broadcast({"channel": "users", "event": "permissions_reset", "id": user_id})
             return {"status": "reset_to_automatic", "id": user_id}
@@ -4660,6 +4834,8 @@ async def devteam_override_admin_permissions(
                     "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?)",
                     (user_id, key, payload["id"]),
                 )
+        log_audit(cursor, payload, "user.permissions_overridden", "user", str(user_id), snapshot={
+            "permissions": sorted(k for k, g in data.permissions.items() if g and k in VALID_PERMISSION_KEYS and k not in banned_for_target)})
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "permissions_overridden", "id": user_id})
         return {"status": "overridden", "id": user_id, "permissions": data.permissions}
@@ -4704,20 +4880,30 @@ async def devteam_delete_user(user_id: int, authorization: Optional[str] = Heade
 # target is still soft-deleted, undoes it.
 @app.get("/api/devteam/audit_log")
 async def devteam_list_audit_log(
-    action: Optional[str] = None, limit: int = 200, authorization: Optional[str] = Header(None)
+    action: Optional[str] = None, limit: int = 200, user_id: Optional[int] = None, q: Optional[str] = None,
+    authorization: Optional[str] = Header(None)
 ):
+    """action: exact action name. user_id: everything that account did OR
+    that was done to it. q: free-text match on action, actor or target."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(limit, 1000))
     conn = get_conn()
     cursor = conn.cursor()
+    where, params = [], []
     if action:
-        cursor.execute(
-            "SELECT * FROM audit_log WHERE action = ? ORDER BY created_at DESC LIMIT ?",
-            (action, limit),
-        )
-    else:
-        cursor.execute("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?", (limit,))
+        where.append("action = ?"); params.append(action)
+    if user_id is not None:
+        where.append("(actor_user_id = ? OR (target_type = 'user' AND target_id = ?))")
+        params += [user_id, str(user_id)]
+    if q and q.strip():
+        like = f"%{q.strip().lower()}%"
+        where.append("(LOWER(action) LIKE ? OR LOWER(actor_username) LIKE ? OR LOWER(target_id) LIKE ? OR LOWER(COALESCE(target_snapshot, '')) LIKE ?)")
+        params += [like] * 4
+    cursor.execute(
+        f"SELECT * FROM audit_log {'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY created_at DESC LIMIT ?",
+        (*params, limit),
+    )
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     for r in rows:
@@ -5085,6 +5271,40 @@ async def upload_my_verification(request: Request, id_document: Optional[UploadF
         return {"status": "submitted"}
     finally:
         conn.close()
+
+@app.post("/api/devteam/users/{user_id}/identity_files")
+async def devteam_upload_identity_files(user_id: int, id_document: Optional[UploadFile] = File(None),
+                                        face_photo: Optional[UploadFile] = File(None),
+                                        authorization: Optional[str] = Header(None)):
+    """DevTeam attaches an ID or face photo to any account -- e.g. a paper
+    ID handed in at the station, or replacing a blurry photo. A new ID
+    resets verification to pending, same as when the owner uploads one."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    if id_document is None and face_photo is None:
+        raise HTTPException(status_code=400, detail="Attach a government ID and/or a face photo")
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="User not found")
+        if id_document is not None:
+            cursor.execute(
+                "UPDATE users SET id_document_path = ?, verification_status = 'pending', verified_by = NULL, verified_at = NULL WHERE id = ?",
+                (_save_verification_document(user_id, id_document), user_id),
+            )
+        if face_photo is not None:
+            cursor.execute("UPDATE users SET face_photo_path = ? WHERE id = ?",
+                           (_save_verification_document(user_id, face_photo, kind="face"), user_id))
+        log_audit(cursor, payload, "user.identity_files_uploaded", "user", str(user_id),
+                  snapshot={"id_document": id_document is not None, "face_photo": face_photo is not None})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "users", "event": "user_edited", "id": user_id})
+    return {"status": "uploaded"}
+
 
 @app.get("/api/users/{user_id}/verification_document")
 async def get_verification_document(user_id: int, authorization: Optional[str] = Header(None)):

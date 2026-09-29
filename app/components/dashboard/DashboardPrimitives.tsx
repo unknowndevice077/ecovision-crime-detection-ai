@@ -266,97 +266,130 @@ export function IncidentRow({ alert, onConfirm, onDismiss, cameras }: any) {
 }
 
 /* ── Incident review modal ──────────────────────────────────────────────
-   The actual look-before-you-decide step: the evidence frame captured at
-   the moment of detection (banner burned in, same file the case record
-   keeps), plus which camera saw it, plus a live check of that camera's
-   current feed. The live feed is the same /video_feed stream every
-   CameraTile shows -- this deployment runs one AI core against one active
-   camera at a time (see docs/scaling_plan.md), so "live" here means
-   whatever that one camera currently sees. Labelled honestly rather than
-   implied to be a dedicated per-camera stream this system doesn't have. */
+   The actual look-before-you-decide step, side by side: left is the
+   evidence frame captured at the moment of detection (banner burned in,
+   same file the case record keeps), right is that camera's live feed right
+   now -- so the operator compares "what the AI saw" against "what's
+   happening" without toggling anything. The live feed is the same
+   /video_feed stream every CameraTile shows -- this deployment runs one AI
+   core against one active camera at a time (see docs/scaling_plan.md), so
+   "live" means whatever that one camera currently sees, and is labelled
+   that way rather than implied to be a dedicated per-camera stream. */
 function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss }: any) {
     const { aiUrl } = useRuntimeConfig();
+    const [liveBroken, setLiveBroken] = useState(false);
+
+    React.useEffect(() => {
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [onClose]);
+
     // Portalled straight to document.body -- this <article> row (see
     // IncidentRow above) carries `animate-rise-in`, whose `both` fill mode
     // leaves a `transform: translateY(0)` on it permanently after the
     // animation ends. A non-none transform on an ancestor makes THAT
     // element the containing block for any `position: fixed` descendant,
-    // so without the portal this modal was being sized/positioned against
-    // the ~310px incident row instead of the viewport -- squashed into a
-    // corner and able to sit behind/between other rows instead of
-    // overlaying the whole screen. Portalling out of that subtree is what
-    // actually fixes it; z-index alone can't, since this was never a
-    // stacking-order problem.
+    // so without the portal this modal was sized against the ~310px
+    // incident row instead of the viewport. z-[120] so it also opens above
+    // the fullscreen video wall (z-[100]), whose queue uses this same row.
     return createPortal(
-        <div className="fixed inset-0 z-[70] flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,0.75)' }}>
-            <div className="border w-full max-w-lg" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
-                <div className="h-9 flex justify-between items-center px-3 border-b" style={{ borderColor: 'var(--line)' }}>
-                    <span className="label" style={{ color: 'var(--text)' }}>Review — {alert.type}</span>
-                    <button
-                        title="Close"
-                        aria-label="Close review"
-                        onClick={onClose}
-                        style={{ color: 'var(--text-3)' }}
-                        className="transition-colors hover:text-[var(--text)]"
-                    >
-                        <X size={15} />
-                    </button>
+        <div
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 md:p-6"
+            style={{ background: 'rgba(0,0,0,0.8)' }}
+            onClick={onClose}
+        >
+            <div
+                className="border w-full max-w-6xl max-h-full flex flex-col"
+                style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="h-10 shrink-0 flex justify-between items-center px-3 border-b gap-3" style={{ borderColor: 'var(--line)' }}>
+                    <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-2 h-2 shrink-0 pulse-alert" style={{ background: 'var(--critical)' }} />
+                        <span className="label truncate" style={{ color: 'var(--text)' }}>Review — {alert.type}</span>
+                        <span className="text-[10px] truncate hidden sm:inline" style={{ color: 'var(--text-3)' }}>
+                            <Video size={10} className="inline -mt-0.5 mr-1" />{cameraName} · {alert.timestamp}
+                        </span>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                        <span className="label" style={{ fontSize: '8px' }}>Confidence</span>
+                        <span className="data text-[11px]" style={{ color: 'var(--text)' }}>{(alert.confidence * 100).toFixed(1)}%</span>
+                        <button
+                            title="Close (Esc)"
+                            aria-label="Close review"
+                            onClick={onClose}
+                            style={{ color: 'var(--text-3)' }}
+                            className="transition-colors hover:text-[var(--text)]"
+                        >
+                            <X size={15} />
+                        </button>
+                    </div>
                 </div>
 
-                <div className="p-3 space-y-3">
-                    {/* Evidence frame: what the detector actually saw, banner and all --
-              the moment itself, not a live view of whatever's happening now. */}
-                    <div className="border overflow-hidden" style={{ borderColor: 'var(--line)', background: '#000' }}>
-                        {alert.screenshot_path ? (
-                            <img src={alert.screenshot_path} alt={`${alert.type} evidence frame`} className="w-full h-auto block" />
-                        ) : (
-                            <div className="h-40 flex items-center justify-center">
-                                <span className="label">No evidence frame captured</span>
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 text-[11px]">
-                        <div className="flex items-center gap-1.5">
-                            <Video size={11} style={{ color: 'var(--text-3)' }} />
-                            <span style={{ color: 'var(--text-2)' }}>{cameraName}</span>
+                <div className="flex-1 min-h-0 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-2 p-2">
+                    <figure className="flex flex-col min-w-0">
+                        <figcaption className="flex items-center justify-between px-1 pb-1.5">
+                            <span className="label" style={{ color: 'var(--text-2)' }}>Captured at detection</span>
+                            <span className="data text-[10px]" style={{ color: 'var(--text-3)' }}>{alert.timestamp}</span>
+                        </figcaption>
+                        <div className="relative border overflow-hidden aspect-video" style={{ borderColor: 'var(--line)', background: '#000' }}>
+                            {alert.screenshot_path ? (
+                                <img src={alert.screenshot_path} alt={`${alert.type} evidence frame`} className="absolute inset-0 w-full h-full object-contain" />
+                            ) : (
+                                <div className="absolute inset-0 flex items-center justify-center">
+                                    <span className="label">No evidence frame captured</span>
+                                </div>
+                            )}
                         </div>
-                        <div className="flex items-center gap-1.5 justify-end">
-                            <span className="label" style={{ fontSize: '8px' }}>Confidence</span>
-                            <span className="data" style={{ color: 'var(--text)' }}>{(alert.confidence * 100).toFixed(1)}%</span>
-                        </div>
-                    </div>
+                    </figure>
 
-                    {/* Live check -- see this component's header comment: same single
-              active-camera feed every tile on the dashboard shows, not a
-              guarantee this is footage of the pole that raised the alert. */}
-                    <details className="border" style={{ borderColor: 'var(--line)' }}>
-                        <summary className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider cursor-pointer select-none" style={{ color: 'var(--text-2)' }}>
-                            Check the live feed now
-                        </summary>
-                        <div className="p-1.5 pt-0">
-                            <img src={`${aiUrl}/video_feed`} alt="Live camera feed" className="w-full h-auto block border" style={{ borderColor: 'var(--line)' }} />
+                    <figure className="flex flex-col min-w-0">
+                        <figcaption className="flex items-center justify-between px-1 pb-1.5">
+                            <span className="label" style={{ color: 'var(--text-2)' }}>Live now</span>
+                            <span className="flex items-center gap-1">
+                                <span className="status-dot live" />
+                                <span className="data text-[10px]" style={{ color: 'var(--text-3)' }}>active camera feed</span>
+                            </span>
+                        </figcaption>
+                        <div className="relative border overflow-hidden aspect-video" style={{ borderColor: 'var(--line)', background: '#000' }}>
+                            {liveBroken ? (
+                                <div className="absolute inset-0 flex items-center justify-center">
+                                    <span className="label">Live feed unavailable</span>
+                                </div>
+                            ) : (
+                                <img
+                                    src={`${aiUrl}/video_feed`}
+                                    alt="Live camera feed"
+                                    onError={() => setLiveBroken(true)}
+                                    className="absolute inset-0 w-full h-full object-contain"
+                                />
+                            )}
+                            <span className="absolute top-1.5 left-1.5 osd text-[10px] font-bold text-white">{cameraName?.toUpperCase()}</span>
+                            <span className="absolute bottom-1.5 left-1.5 osd text-[10px] text-white/90">
+                                <SystemDateText /> <SystemClockText />
+                            </span>
                         </div>
-                    </details>
+                    </figure>
+                </div>
 
-                    <div className="grid grid-cols-2 gap-1.5 pt-1">
-                        <button
-                            onClick={onConfirm}
-                            aria-label={`Confirm ${alert.type} at ${cameraName}`}
-                            className="py-2 text-[10px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97]"
-                            style={{ background: 'var(--critical)' }}
-                        >
-                            Confirm
-                        </button>
-                        <button
-                            onClick={onDismiss}
-                            aria-label={`Dismiss ${alert.type} at ${cameraName}`}
-                            className="py-2 text-[10px] font-bold uppercase tracking-wider border transition-all hover:bg-white/5 active:scale-[0.97]"
-                            style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
-                        >
-                            Dismiss
-                        </button>
-                    </div>
+                <div className="shrink-0 grid grid-cols-2 gap-1.5 p-2 pt-0">
+                    <button
+                        onClick={onConfirm}
+                        aria-label={`Confirm ${alert.type} at ${cameraName}`}
+                        className="py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.97]"
+                        style={{ background: 'var(--critical)' }}
+                    >
+                        Confirm
+                    </button>
+                    <button
+                        onClick={onDismiss}
+                        aria-label={`Dismiss ${alert.type} at ${cameraName}`}
+                        className="py-2.5 text-[11px] font-bold uppercase tracking-wider border transition-all hover:bg-white/5 active:scale-[0.97]"
+                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                    >
+                        Dismiss
+                    </button>
                 </div>
             </div>
         </div>,
