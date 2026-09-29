@@ -57,7 +57,7 @@ export type ManagedUser = {
   signup_status?: string | null;
   has_document?: boolean;
   has_face_photo?: boolean;
-  camera_scopes?: Record<string, string[]>;
+  resource_scopes?: Record<string, Partial<Record<'camera' | 'crime_type' | 'channel', string[]>>>;
   full_name?: string | null;
   birthdate?: string | null;
   home_address?: string | null;

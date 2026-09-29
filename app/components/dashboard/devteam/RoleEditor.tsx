@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { AlertTriangle, Info, Save } from 'lucide-react';
-import PermissionTree from './PermissionTree';
+import PermissionTree, { ResourceScopes, narrowedOnly, scopeProblem, scopesForSave } from './PermissionTree';
 import { FieldInput, authHeaders } from './shared';
 import { PERMISSION_KEYS } from '../../../lib/permissions';
 
@@ -12,8 +12,9 @@ type Warning = { level: 'danger' | 'note'; text: string };
 // admin bypass): everything except the side-restricted keys.
 const ADMIN_AUTOMATIC = ['view_map', 'confirm_dismiss_alerts', 'manage_notify_targets'];
 
-export function roleWarnings(perms: Record<string, boolean>): Warning[] {
+export function roleWarnings(perms: Record<string, boolean>, scopes: ResourceScopes = {}): Warning[] {
   const on = (k: string) => !!perms[k];
+  const limited = (k: string) => !!scopes[k]?.crime_type;
   const granted = PERMISSION_KEYS.filter(p => on(p.key)).map(p => p.key);
   const out: Warning[] = [];
   if (ADMIN_AUTOMATIC.every(on)) {
@@ -21,8 +22,8 @@ export function roleWarnings(perms: Record<string, boolean>): Warning[] {
   } else if (granted.length >= 4) {
     out.push({ level: 'danger', text: `Grants ${granted.length} of ${PERMISSION_KEYS.length} permissions -- close to a full admin account.` });
   }
-  if (on('view_map') && on('view_history')) {
-    out.push({ level: 'danger', text: 'Crime map + crime history together expose the full incident record of the whole jurisdiction -- admin-level visibility.' });
+  if (on('view_map') && on('view_history') && !(limited('view_map') && limited('view_history'))) {
+    out.push({ level: 'danger', text: 'Crime map + crime history together expose the full incident record of the whole jurisdiction -- admin-level visibility. Limit both to specific crime types to narrow it.' });
   }
   if (on('manage_notify_targets')) {
     out.push({ level: 'danger', text: 'Can change who receives SMS/Telegram incident alerts -- a misconfigured target silences a responder.' });
@@ -36,8 +37,8 @@ export function roleWarnings(perms: Record<string, boolean>): Warning[] {
   return out;
 }
 
-export function RoleWarnings({ perms }: { perms: Record<string, boolean> }) {
-  const warnings = roleWarnings(perms);
+export function RoleWarnings({ perms, scopes }: { perms: Record<string, boolean>; scopes?: ResourceScopes }) {
+  const warnings = roleWarnings(perms, scopes);
   if (!warnings.length) return null;
   return (
     <div className="space-y-1.5">
@@ -63,6 +64,7 @@ export default function RoleEditor({ apiUrl, onCreated, flash }: {
 }) {
   const [name, setName] = useState('');
   const [perms, setPerms] = useState<Record<string, boolean>>({});
+  const [scopes, setScopes] = useState<ResourceScopes>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -70,18 +72,21 @@ export default function RoleEditor({ apiUrl, onCreated, flash }: {
     const trimmed = name.trim();
     if (!trimmed) { setError('Give the role a name.'); return; }
     if (!Object.values(perms).some(Boolean)) { setError('Pick at least one permission.'); return; }
+    const problem = scopeProblem(null, perms, scopes);
+    if (problem) { setError(problem); return; }
     setBusy(true);
     setError('');
     try {
       const res = await fetch(`${apiUrl}/api/devteam/custom_roles`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ name: trimmed, permissions: perms }),
+        body: JSON.stringify({ name: trimmed, permissions: perms, scopes: narrowedOnly(scopesForSave(null, perms, scopes)) }),
       });
       const d = await res.json().catch(() => ({}));
       if (res.ok) {
         flash(`Role "${trimmed}" created.`);
         setName('');
         setPerms({});
+        setScopes({});
         onCreated(d.id, trimmed);
       } else setError(d.detail || 'Could not create role.');
     } catch {
@@ -96,13 +101,13 @@ export default function RoleEditor({ apiUrl, onCreated, flash }: {
       <FieldInput label="Role name" value={name} onChange={setName} placeholder="e.g. Gate Monitor" />
       <div>
         <div className="text-[8px] tracking-[0.15em] uppercase text-[var(--text-2)] mb-2">Permissions this role pre-applies</div>
-        <PermissionTree role={null} perms={perms} onPermsChange={setPerms} />
+        <PermissionTree role={null} perms={perms} onPermsChange={setPerms} scopes={scopes} onScopesChange={setScopes} />
         <p className="text-[9px] leading-relaxed text-[var(--text-3)] mt-2">
           Works for barangay staff and police officers alike. Anything an account&apos;s side can&apos;t hold is dropped when the role is assigned,
-          and camera limits are set per account in Create User or Manage Users.
+          crime-type and channel limits carry over, and camera limits are set per account in Create User or Manage Users.
         </p>
       </div>
-      <RoleWarnings perms={perms} />
+      <RoleWarnings perms={perms} scopes={scopes} />
       {error && <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide">{error}</p>}
       <button
         onClick={create}

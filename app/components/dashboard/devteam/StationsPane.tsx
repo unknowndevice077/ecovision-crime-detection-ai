@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from 'react';
-import { Lock, MapPinned, Plus, Radio, Search, Trash2, X } from 'lucide-react';
+import { Lock, MapPinned, Pencil, Plus, Radio, Search, Trash2, X } from 'lucide-react';
 import {
   EmptyPane, FieldInput, InfoRow, ManagedUser, PaneHeader, PendingLocation, SectionLabel, SelectInput, Station,
   TextAreaInput, authHeaders, roleLabel, roleStyle,
@@ -57,8 +57,8 @@ const MIN_REASON = 20;
 // Registering a jurisdiction changes who can see which cameras and
 // incidents, so both forms end with a written reason (audit-logged) and a
 // fresh DevTeam password re-entry.
-function AuthorizationFields({ reason, setReason, password, setPassword }: {
-  reason: string; setReason: (v: string) => void; password: string; setPassword: (v: string) => void;
+function AuthorizationFields({ reason, setReason, password, setPassword, label = 'Reason for registering *' }: {
+  reason: string; setReason: (v: string) => void; password: string; setPassword: (v: string) => void; label?: string;
 }) {
   const short = reason.trim().length < MIN_REASON;
   return (
@@ -68,7 +68,7 @@ function AuthorizationFields({ reason, setReason, password, setPassword }: {
       </div>
       <div>
         <TextAreaInput
-          label="Reason for registering *"
+          label={label}
           value={reason}
           onChange={setReason}
           rows={2}
@@ -93,6 +93,8 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
   const [busy, setBusy] = useState(false);
 
   const [stationModalOpen, setStationModalOpen] = useState(false);
+  // Set when the station modal is editing an existing station.
+  const [editingStation, setEditingStation] = useState<Station | null>(null);
   const [stationForm, setStationForm] = useState<StationForm>(EMPTY_STATION_FORM);
   const [barangayModalStation, setBarangayModalStation] = useState<Station | null>(null);
   const [barangayForm, setBarangayForm] = useState<BarangayForm>(EMPTY_BARANGAY_FORM);
@@ -115,7 +117,21 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
 
   const resetAuth = () => { setReason(''); setPassword(''); setFormError(''); };
 
-  const openStationModal = () => { setStationForm(EMPTY_STATION_FORM); resetAuth(); setStationModalOpen(true); };
+  const openStationModal = () => { setEditingStation(null); setStationForm(EMPTY_STATION_FORM); resetAuth(); setStationModalOpen(true); };
+
+  const openEditStation = (st: Station) => {
+    setEditingStation(st);
+    setStationForm({
+      name: st.name || '', station_type: st.station_type || '', parent_office: st.parent_office || '',
+      regional_office: st.regional_office || '', commander: st.commander || '', address: st.address || '',
+      contact_number: st.contact_number || '', description: st.description || '',
+    });
+    resetAuth();
+    setStationModalOpen(true);
+  };
+
+  const stationUnchanged = !!editingStation && (Object.keys(EMPTY_STATION_FORM) as (keyof StationForm)[])
+    .every(k => (stationForm[k] || '').trim() === ((editingStation[k] as string | null | undefined) || '').trim());
 
   // LGU fields pre-filled from a barangay this station already covers --
   // a station's barangays are nearly always in the same city/province.
@@ -141,13 +157,15 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
     const name = stationForm.name.trim();
     if (!name) return setFormError('Station name is required.');
     if (!stationForm.station_type) return setFormError('Pick the unit type.');
+    if (stationUnchanged) return setFormError('Nothing has changed.');
     const problem = authProblem();
     if (problem) return setFormError(problem);
     setBusy(true);
     setFormError('');
+    const editing = editingStation;
     try {
-      const res = await fetch(`${apiUrl}/api/devteam/stations`, {
-        method: 'POST', headers: authHeaders(),
+      const res = await fetch(editing ? `${apiUrl}/api/devteam/stations/${editing.id}` : `${apiUrl}/api/devteam/stations`, {
+        method: editing ? 'PATCH' : 'POST', headers: authHeaders(),
         body: JSON.stringify({ ...stationForm, name, reason: reason.trim(), confirm_password: password }),
       });
       const d = await res.json().catch(() => ({}));
@@ -155,8 +173,8 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
         setStationModalOpen(false);
         setSelectedId(d.id);
         refresh();
-        flash(`Station "${name}" registered.`);
-      } else setFormError(d.detail || 'Could not register station.');
+        flash(editing ? `${name} updated.` : `Station "${name}" registered.`);
+      } else setFormError(d.detail || (editing ? 'Could not update station.' : 'Could not register station.'));
     } catch {
       setFormError('Backend connection failure.');
     } finally {
@@ -303,12 +321,20 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
               icon={<MapPinned size={12} />}
               title={selected.name}
               right={
-                <button
-                  onClick={() => openBarangayModal(selected)}
-                  className="flex items-center gap-1 px-2.5 py-1 border border-[var(--accent)]/40 text-[var(--accent)] text-[9px] tracking-[0.12em] uppercase hover:bg-[var(--accent)]/10"
-                >
-                  <Plus size={11} /> Add barangay
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => openEditStation(selected)}
+                    className="flex items-center gap-1 px-2.5 py-1 border border-[var(--line)] text-[var(--text-2)] text-[9px] tracking-[0.12em] uppercase hover:text-[var(--text)] hover:border-[var(--text-3)]"
+                  >
+                    <Pencil size={10} /> Edit
+                  </button>
+                  <button
+                    onClick={() => openBarangayModal(selected)}
+                    className="flex items-center gap-1 px-2.5 py-1 border border-[var(--accent)]/40 text-[var(--accent)] text-[9px] tracking-[0.12em] uppercase hover:bg-[var(--accent)]/10"
+                  >
+                    <Plus size={11} /> Add barangay
+                  </button>
+                </div>
               }
             />
             <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-5 space-y-5">
@@ -397,8 +423,12 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
           <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-2xl max-h-[90vh] overflow-y-auto custom-scrollbar font-mono">
             <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--panel-2)]">
               <div>
-                <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">Register a police station</span>
-                <p className="text-[9px] text-[var(--text-3)] mt-1">PNP accounts are scoped to a station, so it has to exist before its commander or officers.</p>
+                <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">{editingStation ? `Edit ${editingStation.name}` : 'Register a police station'}</span>
+                <p className="text-[9px] text-[var(--text-3)] mt-1">
+                  {editingStation
+                    ? 'Changes are recorded in the audit log with the old and new value of every field.'
+                    : 'PNP accounts are scoped to a station, so it has to exist before its commander or officers.'}
+                </p>
               </div>
               <button onClick={() => setStationModalOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
@@ -418,13 +448,14 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
               </div>
               <TextAreaInput label="Description" value={stationForm.description} onChange={v => setStationForm({ ...stationForm, description: v })}
                 placeholder="Coverage area, notable landmarks, operating notes…" />
-              <AuthorizationFields reason={reason} setReason={setReason} password={password} setPassword={setPassword} />
+              <AuthorizationFields reason={reason} setReason={setReason} password={password} setPassword={setPassword}
+                label={editingStation ? 'Reason for this change *' : undefined} />
               {formError && <p className="text-[10px] text-[var(--critical)] uppercase tracking-wide">{formError}</p>}
               <div className="flex justify-end gap-2 pt-1">
                 <button onClick={() => setStationModalOpen(false)} className="px-4 py-2.5 border border-[var(--line)] text-[10px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--text)]">Cancel</button>
-                <button onClick={createStation} disabled={busy}
+                <button onClick={createStation} disabled={busy || stationUnchanged}
                   className="px-4 py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] tracking-[0.15em] uppercase disabled:opacity-30 hover:opacity-90">
-                  {busy ? 'Registering…' : 'Register station'}
+                  {editingStation ? (busy ? 'Saving…' : 'Save changes') : (busy ? 'Registering…' : 'Register station')}
                 </button>
               </div>
             </div>

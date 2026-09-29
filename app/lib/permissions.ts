@@ -28,6 +28,48 @@ export const PERMISSION_KEYS = [
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]["key"];
 
+// Dimensions each permission can be narrowed along -- mirrors backend.py's
+// RESOURCE_DIMENSIONS. No selection on a dimension = everything.
+export type ResourceDimension = "camera" | "crime_type" | "channel";
+export const RESOURCE_DIMENSIONS: Record<string, ResourceDimension[]> = {
+  view_map: ["camera", "crime_type"],
+  manage_cameras: ["camera"],
+  view_records: ["crime_type"],
+  view_history: ["crime_type"],
+  confirm_dismiss_alerts: ["crime_type"],
+  manage_notify_targets: ["channel"],
+};
+
+// Mirrors backend.py's CRIME_TYPES / NO_INCIDENT / NOTIFY_CHANNELS.
+export const CRIME_TYPE_OPTIONS = [
+  { id: "ASSAULT", label: "Assault" },
+  { id: "ARMED THREAT", label: "Armed threat" },
+  { id: "ROBBERY", label: "Robbery" },
+  { id: "THEFT", label: "Theft" },
+  { id: "PHYSICAL VIOLENCE", label: "Physical violence" },
+  { id: "VANDALISM", label: "Vandalism" },
+  { id: "HARDWARE_PANIC_INTERRUPT", label: "Panic button" },
+];
+export const NO_INCIDENT_OPTION = { id: "NO_INCIDENT", label: "Footage with no incident (24/7)" };
+export const CHANNEL_OPTIONS = [
+  { id: "telegram", label: "Telegram" },
+  { id: "sms", label: "SMS" },
+];
+
+export const DIMENSION_LABELS: Record<ResourceDimension, { title: string; noun: string; plural: string }> = {
+  camera: { title: "Cameras", noun: "camera", plural: "cameras" },
+  crime_type: { title: "Crime types", noun: "crime type", plural: "crime types" },
+  channel: { title: "Channels", noun: "channel", plural: "channels" },
+};
+
+// Fixed options for a non-camera dimension (cameras come from the account's
+// jurisdiction instead).
+export function dimensionOptions(key: string, dim: ResourceDimension) {
+  if (dim === "crime_type") return key === "view_records" ? [...CRIME_TYPE_OPTIONS, NO_INCIDENT_OPTION] : CRIME_TYPE_OPTIONS;
+  if (dim === "channel") return CHANNEL_OPTIONS;
+  return [];
+}
+
 // "editable"  -- a real DB-checked grant; the checkbox does what it says.
 // "always"    -- this role gets it automatically (backend's admin bypass);
 //                showing an editable checkbox implies it could be turned

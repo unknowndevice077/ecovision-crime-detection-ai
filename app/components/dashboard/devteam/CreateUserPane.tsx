@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { KeyRound, Save, UserPlus, X } from 'lucide-react';
-import PermissionTree, { CameraScopes, scopeProblem, scopesForSave } from './PermissionTree';
+import PermissionTree, { ResourceScopes, scopeProblem, scopesForSave } from './PermissionTree';
 import RoleEditor, { RoleWarnings } from './RoleEditor';
 import {
   CREATABLE_ROLES, PNP_ROLES, CameraRow, CustomRole, FieldInput, ManagedUser, PaneHeader, PendingLocation,
@@ -25,7 +25,7 @@ export default function CreateUserPane({
 }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [perms, setPerms] = useState<Record<string, boolean>>({});
-  const [scopes, setScopes] = useState<CameraScopes>({});
+  const [scopes, setScopes] = useState<ResourceScopes>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [addRoleOpen, setAddRoleOpen] = useState(false);
@@ -70,11 +70,19 @@ export default function CreateUserPane({
     const role = customRoles.find(r => r.id === id);
     if (!role) return;
     const next: Record<string, boolean> = {};
+    const nextScopes: ResourceScopes = {};
     (role.permission_defaults || []).forEach(d => {
-      if (!d.resource_type && permissionStatus(form.role, d.permission_key) === 'editable') next[d.permission_key] = true;
+      if (permissionStatus(form.role, d.permission_key) === 'banned') return;
+      if (!d.resource_type) {
+        if (permissionStatus(form.role, d.permission_key) === 'editable') next[d.permission_key] = true;
+      } else if (d.resource_id && d.resource_type !== 'camera') {
+        const dims = (nextScopes[d.permission_key] ||= {});
+        const dim = d.resource_type as 'crime_type' | 'channel';
+        dims[dim] = [...(dims[dim] || []), d.resource_id];
+      }
     });
     setPerms(next);
-    setScopes({});
+    setScopes(nextScopes);
   };
 
   useEffect(() => {
@@ -103,8 +111,9 @@ export default function CreateUserPane({
     PERMISSION_KEYS.forEach(p => {
       if (permissionStatus(form.role, p.key) === 'editable') permissions[p.key] = !!perms[p.key];
     });
-    const saveScopes = scopesForSave(form.role, perms, scopes);
-    const camera_scopes = Object.fromEntries(Object.entries(saveScopes).filter(([, v]) => v !== null));
+    // Every dimension sent (null = all) so the form, not the role preset,
+    // decides the final narrowing.
+    const resource_scopes = scopesForSave(form.role, perms, scopes);
 
     setBusy(true);
     try {
@@ -121,7 +130,7 @@ export default function CreateUserPane({
           parent_admin_id: form.parent_admin_id ? Number(form.parent_admin_id) : null,
           custom_role_id: form.custom_role_id || null,
           permissions,
-          camera_scopes: Object.keys(camera_scopes).length ? camera_scopes : null,
+          resource_scopes,
           full_name: form.full_name.trim(),
           birthdate: form.birthdate || null,
           home_address: form.home_address.trim() || null,
@@ -275,7 +284,7 @@ export default function CreateUserPane({
             cameraHint={isPnp ? 'Pick a station on the left to choose its cameras.' : 'Pick a barangay on the left to choose its cameras.'}
             subject={form.full_name.trim() || form.username.trim() || 'This account'}
           />
-          {isStandard && <RoleWarnings perms={grantedPerms} />}
+          {isStandard && <RoleWarnings perms={grantedPerms} scopes={scopes} />}
           <p className="text-[9px] leading-relaxed text-[var(--text-3)]">
             Camera permissions expand into the cameras this account can reach. Leave them at &ldquo;all&rdquo; or narrow them to specific cameras.
           </p>

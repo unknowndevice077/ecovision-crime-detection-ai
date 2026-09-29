@@ -259,7 +259,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
 
   const fetchIncidents = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/incidents`, { headers: authHeaders() });
+      const res = await fetch(`${API_URL}/api/incidents?purpose=history`, { headers: authHeaders() });
       if (res.status === 401) {
         setActionError('Session expired -- please log in again.');
         return;

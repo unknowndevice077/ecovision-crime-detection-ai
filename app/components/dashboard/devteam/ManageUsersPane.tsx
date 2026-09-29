@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { IdCard, KeyRound, Pencil, Save, Search, ShieldCheck, ShieldX, Trash2, User, Users2, X } from 'lucide-react';
-import PermissionTree, { CameraScopes, scopeProblem, scopesForSave } from './PermissionTree';
+import PermissionTree, { ResourceScopes, narrowedOnly, scopeProblem, scopesForSave } from './PermissionTree';
 import {
   ADMIN_ROLES, CameraRow, CustomRole, EmptyPane, FieldInput, InfoRow, ManagedUser, PNP_ROLES, PaneHeader,
   PendingLocation, SectionLabel, SelectInput, Station, ageFrom, authHeaders, camerasInScope, inputClass,
@@ -45,11 +45,12 @@ export async function openIdentityFile(apiUrl: string, userId: number, kind: 've
   }
 }
 
-// false == absent and null (all cameras) == absent, so toggling something
+// false == absent and null (everything) == absent, so toggling something
 // back to how it was doesn't read as an unsaved change.
 const normPerms = (p: Record<string, boolean>) => JSON.stringify(Object.keys(p).filter(k => p[k]).sort());
-const normScopes = (s: CameraScopes) => JSON.stringify(
-  Object.entries(s).filter(([, v]) => v !== null).map(([k, v]) => [k, [...(v as string[])].sort()]).sort());
+const normScopes = (s: ResourceScopes) => JSON.stringify(
+  Object.entries(narrowedOnly(s)).sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, dims]) => [k, Object.entries(dims).sort(([a], [b]) => a.localeCompare(b)).map(([d, ids]) => [d, [...(ids || [])].sort()])]));
 
 const detailsFrom = (u: ManagedUser) => ({
   username: u.username, password: '', assignment: u.assignment || '', display_title: u.display_title || '',
@@ -162,14 +163,10 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
   const [detailsBusy, setDetailsBusy] = useState(false);
 
   const serverPerms = useMemo(() => { try { return JSON.parse(u.permissions || '{}'); } catch { return {}; } }, [u.permissions]);
-  const serverScopes = useMemo<CameraScopes>(() => {
-    const s: CameraScopes = {};
-    Object.entries(u.camera_scopes || {}).forEach(([k, ids]) => { s[k] = ids; });
-    return s;
-  }, [u.camera_scopes]);
+  const serverScopes = useMemo<ResourceScopes>(() => ({ ...(u.resource_scopes || {}) }), [u.resource_scopes]);
 
   const [perms, setPerms] = useState<Record<string, boolean>>(serverPerms);
-  const [scopes, setScopes] = useState<CameraScopes>(serverScopes);
+  const [scopes, setScopes] = useState<ResourceScopes>(serverScopes);
   const [overrideMode, setOverrideMode] = useState(!!u.custom_permissions);
   const [overridePassword, setOverridePassword] = useState('');
   const [accessBusy, setAccessBusy] = useState(false);
@@ -239,13 +236,13 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
         setAccessError(d.detail || 'Could not save permissions.');
         return;
       }
-      const scopeRes = await fetch(`${apiUrl}/api/devteam/users/${u.id}/camera_scopes`, {
+      const scopeRes = await fetch(`${apiUrl}/api/devteam/users/${u.id}/resource_scopes`, {
         method: 'PUT', headers: authHeaders(),
         body: JSON.stringify({ scopes: scopesForSave(u.role, perms, scopes, overrideMode) }),
       });
       if (!scopeRes.ok) {
         const d = await scopeRes.json().catch(() => ({}));
-        setAccessError(d.detail || 'Permissions saved, but camera limits failed.');
+        setAccessError(d.detail || 'Permissions saved, but the access limits failed.');
         return;
       }
       setOverridePassword('');

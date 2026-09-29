@@ -32,7 +32,7 @@ export default function HistoryView() {
       // runs (a 401 is still a normal HTTP response, not a fetch error),
       // so this silently fell through to "No incidents match the current
       // filters" forever, indistinguishable from a genuinely empty log.
-      const res = await fetch(`${API_URL}/api/incidents`, { headers: authHeaders() });
+      const res = await fetch(`${API_URL}/api/incidents?purpose=history`, { headers: authHeaders() });
       if (res.ok) {
         const data = await res.json();
         // schema_final.sql: incidents.status is 'Active' | 'Confirmed' | 'Dismissed'

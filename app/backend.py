@@ -1460,13 +1460,13 @@ class DevteamCreateUser(BaseModel):
     home_address: Optional[str] = None
     contact_number: Optional[str] = None
     position: Optional[str] = None
-    # Per-camera dicing applied right after creation: {permission_key:
-    # [camera ids]}. Omitted key = every camera the account's org allows.
-    camera_scopes: Optional[dict] = None
+    # Dicing applied right after creation: {permission_key: {resource_type:
+    # [ids] | None}} -- see RESOURCE_DIMENSIONS. Omitted = not narrowed.
+    resource_scopes: Optional[dict] = None
 
-class CameraScopesUpdate(BaseModel):
-    # {permission_key: [camera ids] | None}. None = every camera the
-    # account's org allows (clears the dicing); a list = only those.
+class ResourceScopesUpdate(BaseModel):
+    # {permission_key: {resource_type: [ids] | None}}. None clears that
+    # dimension (everything the account's org allows); a list = only those.
     scopes: dict
 
 class ResourceGrantRequest(BaseModel):
@@ -1480,6 +1480,9 @@ class CustomRoleCreate(BaseModel):
     # an account's side can't hold is dropped at assignment time.
     org_type: Optional[str] = None
     permissions: Optional[dict] = None
+    # Same shape as ResourceScopesUpdate.scopes, minus cameras (a role has
+    # no jurisdiction of its own to pick cameras from).
+    scopes: Optional[dict] = None
 
 
 # Personal record fields shared by signup, DevTeam create and edit.
@@ -1699,6 +1702,13 @@ def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
     cursor.execute("SELECT 1 FROM user_permissions WHERE user_id = ? AND permission_key = ?", (user_id, key))
     return cursor.fetchone() is not None
 
+def _holds_permission(cursor, payload: dict, key: str) -> bool:
+    try:
+        require_permission(cursor, payload, key)
+        return True
+    except HTTPException:
+        return False
+
 def require_permission(cursor, payload: dict, key: str):
     """Server-side gate matching the permission checkboxes in
     AdminUsersView.tsx / DevteamView.tsx. DEVTEAM always passes; admin tiers
@@ -1839,6 +1849,9 @@ async def list_notify_targets(authorization: Optional[str] = Header(None)):
             (payload.get("barangay_id"),),
         )
     rows = [dict(r) for r in cursor.fetchall()]
+    channels = _scoped_resource_ids(cursor, payload, "manage_notify_targets", "channel")
+    if channels is not None:
+        rows = [r for r in rows if r["channel"] in channels]
     conn.close()
     return rows
 
@@ -1853,6 +1866,10 @@ async def add_notify_target(target: NotifyTargetSchema, authorization: Optional[
     if target.channel not in ("telegram", "sms"):
         conn.close()
         raise HTTPException(status_code=400, detail="channel must be 'telegram' or 'sms'")
+    channels = _scoped_resource_ids(cursor, payload, "manage_notify_targets", "channel")
+    if channels is not None and target.channel not in channels:
+        conn.close()
+        raise HTTPException(status_code=403, detail=f"You can't manage {target.channel} recipients")
     if not target.barangay_id and not target.station_id:
         conn.close()
         raise HTTPException(status_code=400, detail="Provide barangay_id or station_id")
@@ -1893,9 +1910,13 @@ async def delete_notify_target(target_id: str, authorization: Optional[str] = He
 
     role = payload.get("role")
     if role != "DEVTEAM":
-        cursor.execute("SELECT barangay_id, station_id FROM notify_targets WHERE id = ?", (target_id,))
+        cursor.execute("SELECT barangay_id, station_id, channel FROM notify_targets WHERE id = ?", (target_id,))
         existing = cursor.fetchone()
         if existing:
+            channels = _scoped_resource_ids(cursor, payload, "manage_notify_targets", "channel")
+            if channels is not None and existing["channel"] not in channels:
+                conn.close()
+                raise HTTPException(status_code=403, detail=f"You can't manage {existing['channel']} recipients")
             if role in PNP_SIDE_ROLES and existing["station_id"] != payload.get("station_id"):
                 conn.close()
                 raise HTTPException(status_code=403, detail="Can only manage targets for your own station")
@@ -2039,7 +2060,8 @@ async def ptz_save_preset(data: PTZPresetSchema, authorization: Optional[str] = 
 
 # --- HIERARCHICAL INCIDENT FETCH ---
 @app.get("/api/incidents")
-async def get_incidents(authorization: Optional[str] = Header(None), filter_barangay_id: Optional[str] = "all"):
+async def get_incidents(authorization: Optional[str] = Header(None), filter_barangay_id: Optional[str] = "all",
+                        purpose: Optional[str] = "map"):
     payload = require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
@@ -2114,6 +2136,20 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     cursor.execute(sql, tuple(params))
 
     inc_rows = cursor.fetchall()
+
+    # Dicing (2026-09-29): the map and the history archive share this
+    # endpoint, so the caller says which one it is and gets that
+    # permission's narrowing -- falling back to whichever of the two it
+    # actually holds, so asking for the other can never widen anything.
+    scope_key = "view_history" if purpose == "history" else "view_map"
+    if not _holds_permission(cursor, payload, scope_key):
+        scope_key = "view_map" if scope_key == "view_history" else "view_history"
+    allowed_types = _scoped_resource_ids(cursor, payload, scope_key, "crime_type")
+    allowed_cams = _scoped_resource_ids(cursor, payload, "view_map", "camera") if scope_key == "view_map" else None
+    if allowed_types is not None:
+        inc_rows = [r for r in inc_rows if (r["type"] or "").strip().upper() in allowed_types]
+    if allowed_cams is not None:
+        inc_rows = [r for r in inc_rows if not r["camera_id"] or r["camera_id"] in allowed_cams]
 
     # Was 2 extra queries PER incident row (N+1) -- batch both child tables
     # in one IN(...) query each instead, keyed by incident_id.
@@ -2632,6 +2668,11 @@ async def update_incident_status(incident_id: str, data: StatusUpdateSchema, aut
     if not _incident_owned_by(cursor, incident_id, payload):
         conn.close()
         raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+    try:
+        _require_incident_type_access(cursor, payload, incident_id, "confirm_dismiss_alerts")
+    except HTTPException:
+        conn.close()
+        raise
     cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
     conn.commit()
     updated = cursor.rowcount
@@ -2752,6 +2793,11 @@ async def get_report_draft(incident_id: str, authorization: Optional[str] = Head
     try:
         if not _incident_owned_by(cursor, incident_id, payload):
             raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        cursor.execute("SELECT type FROM incidents WHERE id = ?", (incident_id,))
+        inc_type = (cursor.fetchone() or {"type": None})["type"]
+        if not any(_holds_permission(cursor, payload, k) and _crime_type_allowed(cursor, payload, k, inc_type)
+                   for k in ("confirm_dismiss_alerts", "view_history")):
+            raise HTTPException(status_code=404, detail="Incident not found (or outside your access)")
         ai = build_ai_report_draft(cursor, incident_id)
         cursor.execute(
             """SELECT r.*, u.username AS reported_by_username
@@ -2777,6 +2823,7 @@ async def save_report_draft(incident_id: str, data: ReportDraftSchema, authoriza
         require_permission(cursor, payload, "confirm_dismiss_alerts")
         if not _incident_owned_by(cursor, incident_id, payload):
             raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        _require_incident_type_access(cursor, payload, incident_id, "confirm_dismiss_alerts")
         rid = _upsert_incident_report(cursor, incident_id, payload, data.report_body, "draft")
         conn.commit()
         return {"status": "draft_saved", "id": rid}
@@ -2803,6 +2850,16 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
     # flip ever persisted. report_details is now the structured report body
     # (see _REPORT_REQUIRED) and is stored whole in report_body.
     details = data.report_details or {}
+    try:
+        _require_incident_type_access(cursor, payload, incident_id, "confirm_dismiss_alerts")
+        # Re-typing an incident into a crime type this officer can't handle
+        # would hand it off their own desk -- refuse rather than allow it.
+        new_type = str(details.get("incident_type") or "").strip().upper()
+        if new_type and not _crime_type_allowed(cursor, payload, "confirm_dismiss_alerts", new_type):
+            raise HTTPException(status_code=403, detail=f"You can't file {new_type} incidents")
+    except HTTPException:
+        conn.close()
+        raise
     missing = [k for k in _REPORT_REQUIRED if not str(details.get(k) or "").strip()]
     if missing:
         conn.close()
@@ -2955,8 +3012,25 @@ async def get_video_records(authorization: Optional[str] = Header(None)):
     sql += " ORDER BY recorded_at DESC"
     cursor.execute(sql, tuple(params))
     rows = cursor.fetchall()
+    rows = _filter_records_by_crime_type(cursor, payload, rows)
     conn.close()
     return [_row_to_record_dict(r) for r in rows]
+
+
+def _filter_records_by_crime_type(cursor, payload: dict, rows: list) -> list:
+    """Drops recordings whose incident type (or NO_INCIDENT for footage
+    with none) is outside the caller's view_records dicing."""
+    allowed = _scoped_resource_ids(cursor, payload, "view_records", "crime_type")
+    if allowed is None or not rows:
+        return rows
+    inc_ids = list({r["associated_incident_id"] for r in rows if r["associated_incident_id"]})
+    types: dict = {}
+    if inc_ids:
+        placeholders = ",".join("?" for _ in inc_ids)
+        cursor.execute(f"SELECT id, type FROM incidents WHERE id IN ({placeholders})", tuple(inc_ids))
+        types = {r["id"]: (r["type"] or "").strip().upper() for r in cursor.fetchall()}
+    return [r for r in rows
+            if (types.get(r["associated_incident_id"]) if r["associated_incident_id"] else NO_INCIDENT) in allowed]
 
 def _ffmpeg_exe():
     """Same resolution order as maincode/main.py: bundled binary first, system
@@ -3018,6 +3092,8 @@ async def extract_record_segment(record_id: str, data: ExtractRangeSchema,
                               extra_where="id = ?", extra_params=[record_id])
     cursor.execute(sql, tuple(params))
     row = cursor.fetchone()
+    if row and not _filter_records_by_crime_type(cursor, payload, [row]):
+        row = None
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
@@ -3092,6 +3168,8 @@ async def delete_record(record_id: str, authorization: Optional[str] = Header(No
                               extra_where="id = ?", extra_params=[record_id])
     cursor.execute(sql, tuple(params))
     row = cursor.fetchone()
+    if row and not _filter_records_by_crime_type(cursor, payload, [row]):
+        row = None
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
@@ -3236,10 +3314,11 @@ async def update_record_notes(record_id: str, data: RecordNotesSchema, authoriza
     # station, could rewrite the evidence notes on any recording anywhere in
     # the system. Scoped the same way GET /api/records and the extract
     # endpoint already are, via apply_scope().
-    sql, params = apply_scope(payload, "SELECT id FROM video_records", [],
+    sql, params = apply_scope(payload, "SELECT id, associated_incident_id FROM video_records", [],
                               extra_where="id = ?", extra_params=[record_id])
     cursor.execute(sql, tuple(params))
-    if not cursor.fetchone():
+    found = cursor.fetchone()
+    if not found or not _filter_records_by_crime_type(cursor, payload, [found]):
         conn.close()
         raise HTTPException(status_code=404, detail="Recording not found (or outside your jurisdiction)")
     cursor.execute("UPDATE video_records SET notes = ? WHERE id = ?", (data.notes, record_id))
@@ -3637,6 +3716,47 @@ async def create_station(data: StationSchema, authorization: Optional[str] = Hea
         conn.close()
     await manager.broadcast({"channel": "stations", "event": "station_created", "id": sid})
     return {"status": "created", "id": sid, "name": name}
+
+
+@app.patch("/api/devteam/stations/{station_id}")
+async def update_station(station_id: str, data: StationSchema, authorization: Optional[str] = Header(None)):
+    """Edits a station's name and record. Same reason + password bar as
+    registering one, and the audit entry keeps a before/after of every
+    field that changed."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Station name is required")
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(f"SELECT id, name, {', '.join(STATION_DETAIL_FIELDS)} FROM police_stations WHERE id = ?", (station_id,))
+        before = cursor.fetchone()
+        if not before:
+            raise HTTPException(status_code=404, detail="Station not found")
+        before = dict(before)
+        if not _clean_optional(data.station_type):
+            raise HTTPException(status_code=400, detail="Unit type is required")
+        cursor.execute("SELECT 1 FROM police_stations WHERE LOWER(name) = LOWER(?) AND id <> ?", (name, station_id))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail=f'A station named "{name}" already exists')
+        after = {"name": name, **{f: _clean_optional(getattr(data, f)) for f in STATION_DETAIL_FIELDS}}
+        changes = {k: {"from": before.get(k), "to": v} for k, v in after.items() if (before.get(k) or None) != v}
+        if not changes:
+            return {"status": "unchanged", "id": station_id}
+        reason = _require_registration_authority(cursor, payload, data.reason, data.confirm_password)
+        cursor.execute(
+            f"UPDATE police_stations SET {', '.join(f'{k} = ?' for k in after)} WHERE id = ?",
+            (*after.values(), station_id),
+        )
+        log_audit(cursor, payload, "station.updated", "station", station_id,
+                  snapshot={"name": name, "reason": reason, "changes": changes})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "stations", "event": "station_updated", "id": station_id})
+    return {"status": "updated", "id": station_id, "changed": sorted(changes)}
 
 
 @app.put("/api/devteam/stations/{station_id}/jurisdiction")
@@ -4258,7 +4378,7 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                 # The Create User form pre-fills its tree from the role and
                 # sends every key explicitly -- a key the operator unticked
                 # arrives as False and must stay off, not be re-added here.
-                if key in explicit and not default["resource_type"]:
+                if key in explicit and (not default["resource_type"] or not explicit[key]):
                     continue
                 if default["resource_type"] and default["resource_id"]:
                     cursor.execute(
@@ -4271,9 +4391,9 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                         "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
                         (new_id, key, payload["id"]),
                     )
-        if new_user.camera_scopes:
-            _apply_camera_scopes(cursor, payload, {"id": new_id, "role": role, "barangay_id": barangay_id or None,
-                                                   "station_id": station_id or None}, new_user.camera_scopes)
+        if new_user.resource_scopes:
+            _apply_resource_scopes(cursor, payload, {"id": new_id, "role": role, "barangay_id": barangay_id or None,
+                                                     "station_id": station_id or None}, new_user.resource_scopes)
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
@@ -4744,58 +4864,125 @@ def _resource_permissions_handler(payload: dict, user_id: int, method: str, body
     finally:
         conn.close()
 
-# Permissions that can be diced down to individual cameras: view_map narrows
-# which cameras get_cameras() returns, manage_cameras which cameras
-# _camera_owned_by() lets them configure.
-CAMERA_SCOPABLE_KEYS = ("view_map", "manage_cameras")
+# Resource dicing (2026-09-29): every permission can be narrowed along one
+# or more dimensions, stored as permission_grants rows of that
+# resource_type. No rows for a (key, dimension) pair = no narrowing.
+#   camera     -- view_map: which feeds get_cameras() returns and whose
+#                 incidents show on the map; manage_cameras: which cameras
+#                 _camera_owned_by() lets them configure.
+#   crime_type -- which incident types the map / history / video vault
+#                 shows, and which alerts they may confirm or dismiss.
+#   channel    -- which notification channels they may manage.
+RESOURCE_DIMENSIONS = {
+    "view_map": ("camera", "crime_type"),
+    "manage_cameras": ("camera",),
+    "view_records": ("crime_type",),
+    "view_history": ("crime_type",),
+    "confirm_dismiss_alerts": ("crime_type",),
+    "manage_notify_targets": ("channel",),
+}
+CAMERA_SCOPABLE_KEYS = tuple(k for k, dims in RESOURCE_DIMENSIONS.items() if "camera" in dims)
+CRIME_TYPES = ("ASSAULT", "ARMED THREAT", "ROBBERY", "THEFT", "PHYSICAL VIOLENCE", "VANDALISM",
+               "HARDWARE_PANIC_INTERRUPT")
+# view_records only: continuous/manual footage with no incident attached.
+NO_INCIDENT = "NO_INCIDENT"
+NOTIFY_CHANNELS = ("telegram", "sms")
 
 
-def _apply_camera_scopes(cursor, payload: dict, target: dict, scopes: dict):
-    """Replaces a user's per-camera grants for each key in `scopes`.
-    None clears the dicing (every camera their org allows); a list keeps
-    exactly those cameras. An empty list is refused rather than stored --
-    zero grant rows means "all cameras", the opposite of what an empty
-    selection looks like it means."""
-    for key, ids in scopes.items():
-        if key not in CAMERA_SCOPABLE_KEYS:
-            raise HTTPException(status_code=400, detail=f"'{key}' can't be limited to specific cameras")
+def _dimension_values(key: str, rtype: str) -> tuple:
+    if rtype == "crime_type":
+        return CRIME_TYPES + ((NO_INCIDENT,) if key == "view_records" else ())
+    if rtype == "channel":
+        return NOTIFY_CHANNELS
+    return ()
+
+
+def _scoped_resource_ids(cursor, payload: dict, key: str, rtype: str) -> Optional[set]:
+    """Resource ids this user's `key` is diced down to along `rtype`, or
+    None when it isn't narrowed. DEVTEAM is never narrowed."""
+    if payload.get("role") == "DEVTEAM":
+        return None
+    cursor.execute(
+        "SELECT resource_id FROM permission_grants WHERE user_id = ? AND permission_key = ? AND resource_type = ?",
+        (payload["id"], key, rtype),
+    )
+    ids = {r["resource_id"] for r in cursor.fetchall()}
+    return ids or None
+
+
+def _crime_type_allowed(cursor, payload: dict, key: str, incident_type: Optional[str]) -> bool:
+    allowed = _scoped_resource_ids(cursor, payload, key, "crime_type")
+    if allowed is None:
+        return True
+    t = (incident_type or "").strip().upper() or NO_INCIDENT
+    return t in allowed
+
+
+def _require_incident_type_access(cursor, payload: dict, incident_id: str, key: str):
+    """404 (same as out-of-jurisdiction) when `key` is diced to crime
+    types and this incident's type isn't one of them."""
+    cursor.execute("SELECT type FROM incidents WHERE id = ?", (incident_id,))
+    row = cursor.fetchone()
+    if row and not _crime_type_allowed(cursor, payload, key, row["type"]):
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your access)")
+
+
+def _apply_resource_scopes(cursor, payload: dict, target: dict, scopes: dict):
+    """Replaces a user's dicing. `scopes` is {permission_key: {resource_type:
+    [ids] | None}}; None clears that dimension, a list keeps exactly those.
+    An empty list is refused rather than stored -- zero grant rows means
+    "everything", the opposite of what an empty selection looks like."""
+    for key, dims in (scopes or {}).items():
+        if key not in RESOURCE_DIMENSIONS:
+            raise HTTPException(status_code=400, detail=f"'{key}' can't be narrowed")
+        if not isinstance(dims, dict):
+            raise HTTPException(status_code=400, detail=f"Scopes for '{key}' must be an object of resource types")
         _check_permission_key_allowed(target, key)
-        cursor.execute(
-            "DELETE FROM permission_grants WHERE user_id = ? AND permission_key = ? AND resource_type = 'camera'",
-            (target["id"], key),
-        )
-        if ids is None:
-            continue
-        wanted = list(dict.fromkeys(str(i) for i in ids))
-        if not wanted:
-            raise HTTPException(status_code=400, detail="Pick at least one camera, or give access to all cameras")
-        placeholders = ",".join("?" for _ in wanted)
-        if target.get("station_id"):
+        for rtype, ids in dims.items():
+            if rtype not in RESOURCE_DIMENSIONS[key]:
+                raise HTTPException(status_code=400, detail=f"'{key}' can't be narrowed by {rtype}")
             cursor.execute(
-                f"SELECT id FROM cameras WHERE id IN ({placeholders}) AND barangay_id IN "
-                "(SELECT barangay_id FROM station_barangays WHERE station_id = ?)",
-                (*wanted, target["station_id"]),
+                "DELETE FROM permission_grants WHERE user_id = ? AND permission_key = ? AND resource_type = ?",
+                (target["id"], key, rtype),
             )
-        else:
-            cursor.execute(
-                f"SELECT id FROM cameras WHERE id IN ({placeholders}) AND LOWER(barangay_id) = LOWER(?)",
-                (*wanted, target.get("barangay_id") or ""),
-            )
-        in_scope = {r["id"] for r in cursor.fetchall()}
-        outside = [i for i in wanted if i not in in_scope]
-        if outside:
-            raise HTTPException(status_code=400, detail=f"Camera(s) outside this account's jurisdiction: {', '.join(outside)}")
-        for cid in wanted:
-            cursor.execute(
-                "INSERT INTO permission_grants (id, user_id, permission_key, resource_type, resource_id, granted_by) "
-                "VALUES (?, ?, ?, 'camera', ?, ?)",
-                (str(uuid.uuid4()), target["id"], key, cid, payload["id"]),
-            )
-    log_audit(cursor, payload, "permission_grant.cameras_set", "user", str(target["id"]), snapshot={"scopes": scopes})
+            if ids is None:
+                continue
+            wanted = list(dict.fromkeys(str(i) for i in ids))
+            if not wanted:
+                raise HTTPException(status_code=400, detail=f"{key}: pick at least one {rtype.replace('_', ' ')}, or allow all")
+            if rtype == "camera":
+                placeholders = ",".join("?" for _ in wanted)
+                if target.get("station_id"):
+                    cursor.execute(
+                        f"SELECT id FROM cameras WHERE id IN ({placeholders}) AND barangay_id IN "
+                        "(SELECT barangay_id FROM station_barangays WHERE station_id = ?)",
+                        (*wanted, target["station_id"]),
+                    )
+                else:
+                    cursor.execute(
+                        f"SELECT id FROM cameras WHERE id IN ({placeholders}) AND LOWER(barangay_id) = LOWER(?)",
+                        (*wanted, target.get("barangay_id") or ""),
+                    )
+                in_scope = {r["id"] for r in cursor.fetchall()}
+                outside = [i for i in wanted if i not in in_scope]
+                if outside:
+                    raise HTTPException(status_code=400, detail=f"Camera(s) outside this account's jurisdiction: {', '.join(outside)}")
+            else:
+                valid = _dimension_values(key, rtype)
+                unknown = [i for i in wanted if i not in valid]
+                if unknown:
+                    raise HTTPException(status_code=400, detail=f"Unknown {rtype.replace('_', ' ')}(s): {', '.join(unknown)}")
+            for rid in wanted:
+                cursor.execute(
+                    "INSERT INTO permission_grants (id, user_id, permission_key, resource_type, resource_id, granted_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), target["id"], key, rtype, rid, payload["id"]),
+                )
+    log_audit(cursor, payload, "permission_grant.scopes_set", "user", str(target["id"]), snapshot={"scopes": scopes})
 
 
-@app.put("/api/devteam/users/{user_id}/camera_scopes")
-async def devteam_set_camera_scopes(user_id: int, body: CameraScopesUpdate, authorization: Optional[str] = Header(None)):
+@app.put("/api/devteam/users/{user_id}/resource_scopes")
+async def devteam_set_resource_scopes(user_id: int, body: ResourceScopesUpdate, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
     conn = get_conn()
@@ -4804,7 +4991,7 @@ async def devteam_set_camera_scopes(user_id: int, body: CameraScopesUpdate, auth
         target = _resource_grant_target(cursor, user_id)
         if target["role"] == "DEVTEAM":
             raise HTTPException(status_code=400, detail="DevTeam access is never narrowed")
-        _apply_camera_scopes(cursor, payload, target, body.scopes)
+        _apply_resource_scopes(cursor, payload, target, body.scopes)
         conn.commit()
     finally:
         conn.close()
@@ -5051,6 +5238,22 @@ async def create_custom_role(body: CustomRoleCreate, authorization: Optional[str
                     "VALUES (?, ?, NULL, NULL)",
                     (role_id, key),
                 )
+        for key, dims in (body.scopes or {}).items():
+            if not (body.permissions or {}).get(key) or key not in RESOURCE_DIMENSIONS or key in banned or not isinstance(dims, dict):
+                continue
+            for rtype, ids in dims.items():
+                if rtype == "camera" or rtype not in RESOURCE_DIMENSIONS[key] or ids is None:
+                    continue
+                valid = _dimension_values(key, rtype)
+                wanted = [i for i in dict.fromkeys(str(i) for i in ids) if i in valid]
+                if not wanted:
+                    raise HTTPException(status_code=400, detail=f"{key}: pick at least one {rtype.replace('_', ' ')}, or allow all")
+                for rid in wanted:
+                    cursor.execute(
+                        "INSERT INTO custom_role_permission_defaults (role_id, permission_key, resource_type, resource_id) "
+                        "VALUES (?, ?, ?, ?)",
+                        (role_id, key, rtype, rid),
+                    )
         log_audit(cursor, payload, "custom_role.created", "custom_role", role_id, snapshot={"name": name, "org_type": org_type})
         conn.commit()
         return {"status": "created", "id": role_id, "name": name, "org_type": org_type}
@@ -5240,15 +5443,17 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
     user_rows = cursor.fetchall()
     users = [dict(r) for r in user_rows]
     perms_by_id = _user_permissions_json_batch(cursor, [u["id"] for u in users])
-    # Per-camera dicing, batched: {user_id: {permission_key: [camera ids]}}.
-    cursor.execute("SELECT user_id, permission_key, resource_id FROM permission_grants WHERE resource_type = 'camera'")
+    # Dicing, batched: {user_id: {permission_key: {resource_type: [ids]}}}.
+    cursor.execute("SELECT user_id, permission_key, resource_type, resource_id FROM permission_grants "
+                   "WHERE resource_type IN ('camera', 'crime_type', 'channel')")
     scopes_by_user: dict = {}
     for r in cursor.fetchall():
-        scopes_by_user.setdefault(r["user_id"], {}).setdefault(r["permission_key"], []).append(r["resource_id"])
+        (scopes_by_user.setdefault(r["user_id"], {}).setdefault(r["permission_key"], {})
+         .setdefault(r["resource_type"], []).append(r["resource_id"]))
     for u in users:
         u["permissions"] = perms_by_id.get(u["id"], "{}")
         u["custom_permissions"] = bool(u["custom_permissions"])
-        u["camera_scopes"] = scopes_by_user.get(u["id"], {})
+        u["resource_scopes"] = scopes_by_user.get(u["id"], {})
         u["has_document"] = bool(u.pop("id_document_path"))
         u["has_face_photo"] = bool(u.pop("face_photo_path"))
         u["verification_status"] = u.get("verification_status") or "unverified"

@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, KeyRound, Plus, Trash2 } from 'lucide-react';
 import RoleEditor, { roleWarnings } from './RoleEditor';
 import { CustomRole, EmptyPane, ManagedUser, PaneHeader, authHeaders } from './shared';
-import { PERMISSION_KEYS } from '../../../lib/permissions';
+import { PERMISSION_KEYS, dimensionOptions, ResourceDimension } from '../../../lib/permissions';
+import { ResourceScopes } from './PermissionTree';
 
 export default function RolesPane({ apiUrl, customRoles, users, fetchCustomRoles, flash }: {
   apiUrl: string; customRoles: CustomRole[]; users: ManagedUser[];
@@ -42,7 +43,18 @@ export default function RolesPane({ apiUrl, customRoles, users, fetchCustomRoles
               {customRoles.map(r => {
                 const keys = (r.permission_defaults || []).filter(d => !d.resource_type).map(d => d.permission_key);
                 const perms = Object.fromEntries(keys.map(k => [k, true]));
-                const risky = roleWarnings(perms).filter(w => w.level === 'danger');
+                const scopes: ResourceScopes = {};
+                (r.permission_defaults || []).forEach(d => {
+                  if (!d.resource_type || !d.resource_id) return;
+                  const dims = (scopes[d.permission_key] ||= {});
+                  const dim = d.resource_type as ResourceDimension;
+                  dims[dim] = [...(dims[dim] || []), d.resource_id];
+                });
+                const limits = (k: string) => Object.entries(scopes[k] || {}).map(([dim, ids]) => {
+                  const opts = dimensionOptions(k, dim as ResourceDimension);
+                  return (ids || []).map(id => opts.find(o => o.id === id)?.label || id).join(', ');
+                }).filter(Boolean).join(' · ');
+                const risky = roleWarnings(perms, scopes).filter(w => w.level === 'danger');
                 const assigned = users.filter(u => u.custom_role_id === r.id).length;
                 return (
                   <div key={r.id} className={`px-4 py-3 transition-opacity ${busyId === r.id ? 'opacity-40' : ''}`}>
@@ -62,7 +74,11 @@ export default function RolesPane({ apiUrl, customRoles, users, fetchCustomRoles
                     <div className="flex flex-wrap gap-1 mt-1.5">
                       {keys.length === 0
                         ? <span className="text-[9px] text-[var(--text-3)]">no permissions</span>
-                        : keys.map(k => <span key={k} className="text-[8.5px] px-1.5 py-0.5 border border-[var(--line-2)] text-[var(--text-2)]">{label(k)}</span>)}
+                        : keys.map(k => (
+                          <span key={k} className="text-[8.5px] px-1.5 py-0.5 border border-[var(--line-2)] text-[var(--text-2)]">
+                            {label(k)}{limits(k) && <span className="text-[var(--accent)]"> · {limits(k)}</span>}
+                          </span>
+                        ))}
                     </div>
                     {risky.map(w => (
                       <p key={w.text} className="flex items-start gap-1.5 text-[9px] leading-relaxed text-[var(--warn)] mt-1.5">
