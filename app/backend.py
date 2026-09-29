@@ -792,6 +792,33 @@ def _migrate_schema(conn, cursor):
         conn.commit()
         print("💾 [DATABASE] Migrated: created custom_role_permission_defaults")
 
+    # Detection feedback (2026-09-30): every operator verdict on an AI alert
+    # is a labelled example from a camera this system actually runs on --
+    # the training data public datasets can't supply. One row per incident,
+    # updated if the verdict changes. ai_event is what the model said and
+    # final_type what the human settled on (differs when an officer
+    # re-types an ASSAULT as a ROBBERY in the report).
+    if not table_exists(cursor, "detection_feedback"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS detection_feedback (
+                incident_id   TEXT PRIMARY KEY,
+                camera_id     TEXT,
+                barangay_id   TEXT,
+                ai_event      TEXT NOT NULL,
+                final_type    TEXT,
+                label         TEXT NOT NULL,
+                confidence    REAL,
+                ai_context    TEXT,
+                screenshot    TEXT,
+                decided_by    INTEGER,
+                decided_by_username TEXT,
+                decided_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                exported_at   TEXT
+            )
+        """)
+        conn.commit()
+        print("💾 [DATABASE] Migrated: created detection_feedback")
+
     # Report requests (#7, 2026-09-23): a formal barangay -> police
     # workflow for requesting a specific report/crime record. Deliberately
     # NOT implemented as "accepting grants the barangay resource-scoped
@@ -2759,6 +2786,7 @@ async def update_incident_status(incident_id: str, data: StatusUpdateSchema, aut
     cursor.execute("UPDATE incidents SET status = ? WHERE id = ?", (data.status, incident_id))
     updated = cursor.rowcount
     if updated and before:
+        _record_detection_feedback(cursor, payload, incident_id, (data.status or "").lower())
         log_audit(cursor, payload, f"incident.{(data.status or '').lower() or 'status_changed'}", "incident", incident_id,
                   snapshot={"case_id": before["case_id"], "type": before["type"], "from": before["status"],
                             "to": data.status, "barangay_id": before["barangay_id"]})
@@ -2956,6 +2984,9 @@ async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, aut
     # below, so ai_draft records what the AI actually said.
     ai_draft = build_ai_report_draft(cursor, incident_id)
 
+    # Before the UPDATE below, so ai_event records the model's own call.
+    _record_detection_feedback(cursor, payload, incident_id, (data.status or "").lower(),
+                               final_type=str(details.get("incident_type") or "").strip().upper() or None)
     sets, params = ["status = ?", "officer = ?"], [data.status, officer]
     corrected_type = str(details.get("incident_type") or "").strip().upper()
     if corrected_type:
@@ -4872,6 +4903,53 @@ async def devteam_delete_user(user_id: int, authorization: Optional[str] = Heade
     await manager.broadcast({"channel": "users", "event": "user_deleted", "id": user_id})
     return {"status": "deleted", "id": user_id}
 
+# --- DEVTEAM: DETECTION QUALITY ---
+@app.get("/api/devteam/detection_quality")
+async def devteam_detection_quality(days: int = 30, authorization: Optional[str] = Header(None)):
+    """Per camera and per alert type, over the last `days`: how many alerts
+    the AI raised, how operators judged them, and the resulting precision.
+    This is the live, own-camera counterpart to the 20-minute outside-camera
+    measurements in config.json -- it only gets better as operators decide."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    days = max(1, min(days, 365))
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """SELECT i.camera_id, c.name AS camera_name, UPPER(COALESCE(f.ai_event, i.type)) AS event,
+                      COUNT(*) AS alerts,
+                      SUM(CASE WHEN f.label = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+                      SUM(CASE WHEN f.label = 'dismissed' THEN 1 ELSE 0 END) AS dismissed,
+                      SUM(CASE WHEN f.label IS NULL AND i.status = 'Active' THEN 1 ELSE 0 END) AS pending,
+                      SUM(CASE WHEN f.label = 'confirmed' AND f.final_type IS NOT NULL AND f.final_type <> f.ai_event THEN 1 ELSE 0 END) AS retyped,
+                      AVG(CASE WHEN f.label = 'confirmed' THEN i.confidence END) AS avg_conf_confirmed,
+                      AVG(CASE WHEN f.label = 'dismissed' THEN i.confidence END) AS avg_conf_dismissed
+               FROM incidents i
+               LEFT JOIN detection_feedback f ON f.incident_id = i.id
+               LEFT JOIN cameras c ON c.id = i.camera_id
+               WHERE i.source = 'AI_AUTOMATION' AND i.deleted_at IS NULL AND i.occurred_date >= ?
+               GROUP BY i.camera_id, c.name, UPPER(COALESCE(f.ai_event, i.type))
+               ORDER BY alerts DESC""",
+            (since,),
+        )
+        rows = []
+        for r in cursor.fetchall():
+            r = dict(r)
+            decided = (r["confirmed"] or 0) + (r["dismissed"] or 0)
+            r["precision"] = round(r["confirmed"] / decided, 3) if decided else None
+            r["alerts_per_day"] = round(r["alerts"] / days, 2)
+            for k in ("avg_conf_confirmed", "avg_conf_dismissed"):
+                r[k] = round(r[k], 3) if r[k] is not None else None
+            rows.append(r)
+        cursor.execute("SELECT COUNT(*) AS n, SUM(CASE WHEN exported_at IS NULL THEN 1 ELSE 0 END) AS fresh FROM detection_feedback")
+        totals = dict(cursor.fetchone())
+        return {"days": days, "rows": rows, "labelled_examples": totals["n"] or 0, "not_yet_exported": totals["fresh"] or 0}
+    finally:
+        conn.close()
+
+
 # --- DEVTEAM: AUDIT LOG ---
 # User request 2026-09-22: "monitor what each user has done... removed a
 # user, removed this report like that and recover it." log_audit() (see its
@@ -5102,6 +5180,46 @@ def _crime_type_allowed(cursor, payload: dict, key: str, incident_type: Optional
         return True
     t = (incident_type or "").strip().upper() or NO_INCIDENT
     return t in allowed
+
+
+def _record_detection_feedback(cursor, payload: dict, incident_id: str, label: str, final_type: Optional[str] = None):
+    """Stores an operator verdict on an AI alert as a training label.
+    Manual and panic-button incidents are skipped -- no model made those
+    calls, so there's nothing to learn from agreeing or disagreeing."""
+    if label not in ("confirmed", "dismissed"):
+        return
+    try:
+        cursor.execute(
+            """SELECT i.type, i.source, i.camera_id, i.barangay_id, i.confidence, d.ai_context, v.screenshot_path
+               FROM incidents i
+               LEFT JOIN incident_details d ON d.incident_id = i.id
+               LEFT JOIN incident_visibility v ON v.incident_id = i.id
+               WHERE i.id = ?""",
+            (incident_id,),
+        )
+        row = cursor.fetchone()
+        if not row or row["source"] != "AI_AUTOMATION":
+            return
+        cursor.execute("SELECT ai_event FROM detection_feedback WHERE incident_id = ?", (incident_id,))
+        existing = cursor.fetchone()
+        final = (final_type or row["type"] or "").strip().upper() or None
+        if existing:
+            # ai_event stays what the model originally said, even after a re-type.
+            cursor.execute(
+                "UPDATE detection_feedback SET label = ?, final_type = ?, decided_by = ?, decided_by_username = ?, "
+                "decided_at = NOW(), exported_at = NULL WHERE incident_id = ?",
+                (label, final, payload.get("id"), payload.get("username"), incident_id),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO detection_feedback (incident_id, camera_id, barangay_id, ai_event, final_type, label, confidence, "
+                "ai_context, screenshot, decided_by, decided_by_username) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (incident_id, row["camera_id"], row["barangay_id"], (row["type"] or "").upper(), final, label,
+                 row["confidence"], row["ai_context"], row["screenshot_path"], payload.get("id"), payload.get("username")),
+            )
+    except Exception as e:
+        # Training data is a by-product; never let it fail the verdict itself.
+        print(f"⚠️  [FEEDBACK] Could not record verdict for {incident_id}: {e}")
 
 
 def _require_incident_type_access(cursor, payload: dict, incident_id: str, key: str):

@@ -19,6 +19,7 @@ import CreateUserPane from './devteam/CreateUserPane';
 import ApprovalsPane from './devteam/ApprovalsPane';
 import StationsPane from './devteam/StationsPane';
 import RolesPane from './devteam/RolesPane';
+import DetectionQualityPanel from './devteam/DetectionQualityPanel';
 
 // Split 2026-09-23 (explicit teacher requirement: separate configuration/
 // CRUD from monitoring in the DevTeam console). Monitoring is read-only --
@@ -1329,6 +1330,8 @@ export default function DevteamView() {
               </p>
             </div>
           )}
+
+          <DetectionQualityPanel apiUrl={API_URL} />
 
           {/* OPTIMIZE WEIGHTS -- machine-level, not per-model */}
           <div className="border border-[var(--line)]">

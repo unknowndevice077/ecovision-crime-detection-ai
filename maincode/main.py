@@ -2297,6 +2297,11 @@ while _running:
     _camera_fail_streak = 0
     _camera_last_ok = time.perf_counter()
     _camera_retry_delay = 2.0
+    # Untouched copy for training data: everything below draws on `frame`
+    # (boxes, HUD, the X3D picture-in-picture), and a model retrained on
+    # frames carrying its own overlays learns the overlays. Saved next to
+    # the evidence image only when an alert fires; see the snapshot flush.
+    clean_frame = frame.copy()
 
     frame_count += 1
     fps_frame_count += 1
@@ -2504,12 +2509,16 @@ while _running:
                 scene_last_alert_frame = frame_count
 
                 event_type = "ARMED THREAT" if state == "ARMED" else "ASSAULT"
-                track_weapons = [{"name": w["name"], "conf": round(float(w.get("conf", 0)), 3)}
+                # Boxes are in clean-frame pixels (xyxy) so the feedback
+                # export can crop exactly what the detector looked at.
+                track_weapons = [{"name": w["name"], "conf": round(float(w.get("conf", 0)), 3),
+                                  **({"box": [round(float(v), 1) for v in w["box"]]} if w.get("box") is not None else {})}
                                  for w in weapon_assigns.get(tid, []) if w.get("name")]
                 triggered_alerts_this_frame.append({"id": incident_id, "conf": conf, "event": event_type, "ctx": {
                     "detector": "weapon detector + pose tracking" if state == "ARMED" else "X3D violence-recognition model",
                     "attribution": "track", "track_id": int(tid),
                     "people_in_frame": people_in_frame, "weapons": track_weapons,
+                    "person_box": [round(float(v), 1) for v in p_box],
                 }})
 
             _draw_overlay(frame, p_box, tid, state, weapon_assigns.get(tid))
@@ -2678,6 +2687,9 @@ while _running:
         # the live stream or the event clip (both consume `frame` below).
         snap_frame = _draw_alert_banner(frame.copy(), alert["event"], alert["conf"])
         cv2.imwrite(snap_path, snap_frame)
+        # Same name + "_clean": served alongside the evidence image, read by
+        # tools/export_feedback_dataset.py once an operator has decided.
+        cv2.imwrite(os.path.join(SCREENSHOTS_DIR, f"snap_{alert['id']}_clean.jpg"), clean_frame)
         screenshot_url_path = f"/static/screenshots/{snap_filename}"
         _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path, alert.get('ctx'))
         _start_pending_clip(alert['id'], alert['event'], alert['conf'])
