@@ -52,6 +52,15 @@ class WeaponGates(unittest.TestCase):
         self.assertEqual(R.WEAPON_CONF, 0.1)
         self.assertEqual(R.WEAPON_YOLO_CONF_FLOOR, 0.1)
 
+    def test_gating_drops_phones_and_sub_threshold_boxes(self):
+        box = np.array([10, 10, 50, 50])
+        raw = [("Phone", 0.99, box), ("Knife", R.CONF_BY_CLASS["knife"] - 0.01, box),
+               ("Knife", R.CONF_BY_CLASS["knife"], box), ("Gun", 0.9, box)]
+        weapons, vboxes = R.gate_weapon_detections(raw)
+        self.assertEqual([w["name"] for w in weapons], ["knife", "gun"])
+        self.assertEqual(vboxes, [])
+        self.assertEqual(weapons[0]["center"], [30.0, 30.0])
+
     def test_trackers_are_independent(self):
         # Two cameras must not share weapon tracks (was module-global state).
         a, b = R.WeaponTracker(), R.WeaponTracker()

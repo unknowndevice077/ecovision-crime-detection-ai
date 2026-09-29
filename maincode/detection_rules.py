@@ -23,6 +23,22 @@ from collections import deque
 
 import numpy as np
 
+# RAISED 416 -> 640 on 2026-08-21, because weapons v2 trained at 640 and a
+# detector run at a resolution it was not benchmarked at is not the model whose
+# numbers were published. Measured on the same 2,157-image held-out test split,
+# same checkpoint, thresholds re-selected on val for each resolution:
+#
+#             baseline recall    @<=3% FPR budget    val->test FPR drift
+#   imgsz 416     76.1%          88.3% @ 5.3%        4.9% -> 7.2%
+#   imgsz 640     79.7%          89.0% @ 3.1%        4.9% -> 4.6%
+#
+# 640 gives MORE recall at LOWER false-positive rate -- not a trade. The drift
+# column is the deciding one: at 416 the threshold chosen on validation
+# overshoots its budget badly on test, i.e. the confidence distribution is not
+# stable at that resolution. Any TensorRT engine must be rebuilt at 640;
+# optimize_weights.py reads this constant, so it follows automatically.
+WEAPON_IMGSZ        = 640
+
 # detection.confidence_threshold -- set by configure(). Fallback gate for any
 # weapon class CONF_BY_CLASS does not name.
 WEAPON_CONF = 0.38
@@ -496,3 +512,25 @@ class TrackState:
         self.last_alert_frame   = frame_no
         self.active_incident_id = incident_id
 
+
+
+def gate_weapon_detections(raw):
+    """Per-class confidence gates applied to one weapon-model pass, before
+    tracking. raw: iterable of (class name as the model emits it, confidence,
+    xyxy box). Returns (weapons, violence_boxes) exactly as main.py's
+    _run_weapon_detection used to build them inline -- phones and any class
+    not named in WEAPON_CLASSES / VIOLENCE_CLASSES / SIGN_CLASSES are dropped."""
+    weapons, vboxes = [], []
+    for cls_raw, raw_conf, xyxy in raw:
+        cls_name = cls_raw.lower().strip()
+        required_conf = CONF_BY_CLASS.get(cls_name, WEAPON_CONF)
+        if raw_conf < required_conf:
+            continue
+        if cls_name in VIOLENCE_CLASSES:
+            vboxes.append((xyxy, raw_conf))
+        elif cls_name in WEAPON_CLASSES or cls_name in SIGN_CLASSES:
+            weapons.append({
+                "name": cls_name, "conf": raw_conf,
+                "center": [(xyxy[0]+xyxy[2])/2, (xyxy[1]+xyxy[3])/2], "box": xyxy,
+            })
+    return weapons, vboxes

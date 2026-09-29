@@ -206,21 +206,6 @@ else:
         json.dump(sys_config, f, indent=2)
 
 POSE_IMGSZ          = 416
-# RAISED 416 -> 640 on 2026-08-21, because weapons v2 trained at 640 and a
-# detector run at a resolution it was not benchmarked at is not the model whose
-# numbers were published. Measured on the same 2,157-image held-out test split,
-# same checkpoint, thresholds re-selected on val for each resolution:
-#
-#             baseline recall    @<=3% FPR budget    val->test FPR drift
-#   imgsz 416     76.1%          88.3% @ 5.3%        4.9% -> 7.2%
-#   imgsz 640     79.7%          89.0% @ 3.1%        4.9% -> 4.6%
-#
-# 640 gives MORE recall at LOWER false-positive rate -- not a trade. The drift
-# column is the deciding one: at 416 the threshold chosen on validation
-# overshoots its budget badly on test, i.e. the confidence distribution is not
-# stable at that resolution. Any TensorRT engine must be rebuilt at 640;
-# optimize_weights.py reads this constant, so it follows automatically.
-WEAPON_IMGSZ        = 640
 # Decision rules (weapon gates and tracking, static-object filter, grip
 # assignment, the ASSAULT/ARMED state machine) live in detection_rules.py so
 # offline evaluation runs exactly what ships. configure() applies this
@@ -236,6 +221,7 @@ from detection_rules import (  # noqa: E402
     EVIDENCE_WINDOW, EVIDENCE_THRESHOLD, ALERT_COOLDOWN_FRAMES, SCENE_COOLDOWN_FRAMES, MAX_UNSEEN_FRAMES, GRIP_THRESHOLD,
     GRIP_RADIUS_BOX_FRAC, GRIP_STICKY_MARGIN, VBoxTracker, WeaponTracker, _is_static_scene_object, _bbox_overlap_count,
     _assign_weapons, _vbox_overlap_ratio, TrackState,
+    WEAPON_IMGSZ, gate_weapon_detections,
 )
 # Previously had no switch at all -- weapon detection ran unconditionally
 # every DETECTION_INTERVAL frames regardless of config. Added 2026-08-19 for
@@ -782,30 +768,12 @@ _update_weapon_tracks = _weapon_tracker.update
 # ──────────────────────────────────────────────────────────────────────────────
 def _run_weapon_detection(frame_copy):
     res = violence_model.predict(frame_copy, verbose=False, conf=WEAPON_YOLO_CONF_FLOOR, imgsz=WEAPON_IMGSZ, half=(USE_CUDA and weapon_file_name.endswith(".pt")))
-    weapons, vboxes = [], []
+    raw = []
     if res[0].boxes:
         for box in res[0].boxes:
-            cls_raw  = res[0].names[int(box.cls)]
-            cls_name = cls_raw.lower().strip()
-            raw_conf = float(box.conf[0].cpu())
-            xyxy     = box.xyxy[0].cpu().numpy().astype(int)
-            required_conf = CONF_BY_CLASS.get(cls_name, WEAPON_CONF)
-
-            if cls_name in VIOLENCE_CLASSES:
-                if raw_conf >= required_conf:
-                    vboxes.append((xyxy, raw_conf))
-            elif cls_name in WEAPON_CLASSES:
-                if raw_conf >= required_conf:
-                    weapons.append({
-                        "name": cls_name, "conf": raw_conf,
-                        "center": [(xyxy[0]+xyxy[2])/2, (xyxy[1]+xyxy[3])/2], "box": xyxy,
-                    })
-            elif cls_name in SIGN_CLASSES:   
-                if raw_conf >= required_conf:
-                    weapons.append({
-                        "name": cls_name, "conf": raw_conf,
-                        "center": [(xyxy[0]+xyxy[2])/2, (xyxy[1]+xyxy[3])/2], "box": xyxy,
-                    })
+            raw.append((res[0].names[int(box.cls)], float(box.conf[0].cpu()),
+                        box.xyxy[0].cpu().numpy().astype(int)))
+    weapons, vboxes = gate_weapon_detections(raw)
     with _weapon_lock:
         _weapon_cache["weapons"] = weapons
         _weapon_cache["vboxes"]  = vboxes
