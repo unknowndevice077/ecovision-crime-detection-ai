@@ -180,3 +180,6 @@ docs/media/_chk.png
 # a gitignored secrets.h first and commit only the .ino that includes it.
 hardware/
 *.ino
+
+# unittest scratch databases (tests/_support.py)
+tests/.tmp/

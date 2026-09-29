@@ -141,6 +141,10 @@
         "to": "maincode/robbery_vandalism.py"
       },
       {
+        "from": "maincode/detection_rules.py",
+        "to": "maincode/detection_rules.py"
+      },
+      {
         "from": "maincode/x3d_violence_detector.py",
         "to": "maincode/x3d_violence_detector.py"
       },
