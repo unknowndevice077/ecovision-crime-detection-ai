@@ -261,6 +261,12 @@ class X3DViolenceDetector:
         self.frame_size = FRAME_SIZE
         self.clip_frames = CLIP_FRAMES
         self.meta = None
+        # Temperature scaling (evalkit/calibrate_temperature.py). 1.0 = the
+        # model's raw probabilities, which is what every checkpoint without a
+        # "calibration" block in its .meta.json keeps getting -- deployed
+        # weights behave exactly as before until someone calibrates them AND
+        # re-selects their threshold on the calibrated scores.
+        self.temperature = 1.0
         meta_path = Path(str(model_path) + ".meta.json")
         if meta_path.exists():
             try:
@@ -275,6 +281,11 @@ class X3DViolenceDetector:
                           f"weights were trained at {key}={want}. Using {want} "
                           f"(the checkpoint is authoritative). Fix config.json to silence this.")
                     setattr(self, attr, want)
+            cal = self.meta.get("calibration") or {}
+            if isinstance(cal.get("temperature"), (int, float)) and cal["temperature"] > 0:
+                self.temperature = float(cal["temperature"])
+                print(f"[X3D] calibrated: temperature {self.temperature:.3f} "
+                      f"(fit on {cal.get('split', '?')}, NLL {cal.get('nll_before', '?')} -> {cal.get('nll_after', '?')})")
             repr_ = self.meta.get("input_repr")
             if repr_:
                 print(f"[X3D] weights trained on {repr_} "
@@ -527,7 +538,7 @@ class X3DViolenceDetector:
         """
         if self._trt is None or tensor.shape[0] > self._trt_max_batch:
             with torch.no_grad():
-                return self.model(tensor)
+                return self._calibrate(self.model(tensor))
 
         _engine, ctx = self._trt
         src = tensor.contiguous()   # named, so it outlives the enqueue below
@@ -538,7 +549,17 @@ class X3DViolenceDetector:
         stream = torch.cuda.current_stream(self.device)
         ctx.execute_async_v3(stream.cuda_stream)
         stream.synchronize()
-        return out
+        return self._calibrate(out)
+
+    def _calibrate(self, probs: torch.Tensor) -> torch.Tensor:
+        """Temperature-scales a probability pair: p_i^(1/T), renormalised --
+        the same as dividing the log-probabilities (the head's logits up to a
+        constant) by T. Monotonic, so the ranking of clips never changes;
+        only how confident each score claims to be."""
+        if self.temperature == 1.0:
+            return probs
+        logp = torch.log(probs.clamp_min(1e-7)) / self.temperature
+        return torch.softmax(logp, dim=1)
 
     def _prepare_clip_array(self, frames_deque: deque) -> np.ndarray:
         """Sample + normalize one buffer into a (C, T, H, W) float32 array,
