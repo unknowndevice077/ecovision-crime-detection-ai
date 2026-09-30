@@ -337,12 +337,16 @@ export default function SignupPage() {
 
             <div>
               <label htmlFor="su-station" className="label flex items-center gap-1.5 mb-1.5">
-                <Building size={11} /> Station / precinct
+                <Building size={11} /> Office / assignment
               </label>
+              {/* This fills the account's assignment. It was labelled
+                  "Station / precinct" for both roles, which asked a barangay
+                  captain for a police station and a police applicant for
+                  the station they had just picked above. */}
               <input
                 id="su-station"
-                title="Station or precinct name"
-                placeholder="e.g. Station 3"
+                title="Office or assignment"
+                placeholder={formData.role === 'PNP_ADMIN' ? "e.g. Office of the Chief of Police" : "e.g. Barangay Hall"}
                 value={formData.assignment}
                 onChange={e => setFormData({ ...formData, assignment: e.target.value })}
                 disabled={isSubmitting}

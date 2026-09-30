@@ -6,6 +6,8 @@ import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonList } from './Skeleton';
 import { permissionRowsFor, permissionNoteFor, onlyEditablePermissions } from '../../lib/permissions';
+import { positionsForRole } from '../../lib/positions';
+import { usePermissions } from '../../hooks/usePermissions';
 
 type ManagedUser = {
   id: number;
@@ -16,6 +18,8 @@ type ManagedUser = {
   parent_admin_id: number | null;
   permissions: string; // JSON string from backend
   verification_status?: string;
+  full_name?: string | null;
+  position?: string | null;
 };
 
 function authHeaders() {
@@ -28,7 +32,10 @@ export default function AdminUsersView() {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
-  const [newUser, setNewUser] = useState({ username: '', password: '', assignment: '' });
+  const EMPTY_NEW_USER = { username: '', password: '', assignment: '', full_name: '', position: '' };
+  const [newUser, setNewUser] = useState(EMPTY_NEW_USER);
+  // The account this admin creates is always their side's standard role.
+  const { role: myRole } = usePermissions();
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [editingPerms, setEditingPerms] = useState<ManagedUser | null>(null);
   const [permsDraft, setPermsDraft] = useState<Record<string, boolean>>({});
@@ -65,7 +72,7 @@ export default function AdminUsersView() {
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setShowCreate(false);
-        setNewUser({ username: '', password: '', assignment: '' });
+        setNewUser(EMPTY_NEW_USER);
         fetchUsers();
       } else {
         setError(data.detail || "Failed to create user");
@@ -79,6 +86,11 @@ export default function AdminUsersView() {
   // the request fails. Previously this waited for the round trip + a full
   // refetch before the row disappeared, which felt laggy for a triage tool.
   const handleDelete = async (id: number) => {
+    // One click used to remove the account outright.
+    const target = users.find(u => u.id === id);
+    if (!window.confirm(`Remove ${target?.username || 'this account'}?
+
+They can no longer sign in. DevTeam can restore the account from the Audit Log.`)) return;
     const snapshot = users;
     setUsers(prev => prev.filter(u => u.id !== id));
     setPendingIds(prev => new Set(prev).add(id));
@@ -324,8 +336,9 @@ export default function AdminUsersView() {
                 style={{ borderColor: 'var(--line)' }}
               >
                 <div className="min-w-0">
-                  <div className="data text-[12px] font-bold text-[var(--text)] truncate">{u.username}</div>
+                  <div className="data text-[12px] font-bold text-[var(--text)] truncate">{u.full_name || u.username}</div>
                   <div className="text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+                    {u.full_name && <>@{u.username}{u.position ? ` · ${u.position}` : ''} · </>}
                     {activeCount} permission{activeCount === 1 ? '' : 's'} granted
                   </div>
                   {/* Identity verification (#8, 2026-09-23) */}
@@ -426,6 +439,30 @@ export default function AdminUsersView() {
                     {showNewPassword ? <EyeOff size={13} /> : <Eye size={13} />}
                   </button>
                 </div>
+              </div>
+              {/* Personal record -- staff created here used to have none,
+                  unlike every account DevTeam creates. */}
+              <div>
+                <label className="label block mb-1.5">Full name</label>
+                <input
+                  placeholder="e.g. Juan Dela Cruz" required
+                  value={newUser.full_name}
+                  onChange={e => setNewUser({ ...newUser, full_name: e.target.value })}
+                  className="data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label className="label block mb-1.5">Position</label>
+                <select
+                  value={newUser.position}
+                  onChange={e => setNewUser({ ...newUser, position: e.target.value })}
+                  className="data w-full border p-2.5 text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
+                  style={inputStyle}
+                >
+                  <option value="">select…</option>
+                  {positionsForRole(myRole === 'PNP_ADMIN' ? 'PNP_OFFICER' : 'BARANGAY_STAFF').map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
               </div>
               <div>
                 <label className="label block mb-1.5">Assignment</label>

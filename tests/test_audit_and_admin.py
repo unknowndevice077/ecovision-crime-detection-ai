@@ -27,7 +27,7 @@ class AuditTrail(unittest.TestCase):
         self.assertTrue(S.audit_rows("user.login", self.dev["id"]))
 
     def test_staff_created_by_captain_is_attributed(self):
-        r = self.c.post("/api/admin/users", headers=S.auth(self.captain), json={"username": S.uid("tanod"), "password": S.PASSWORD, "assignment": "gate"})
+        r = self.c.post("/api/admin/users", headers=S.auth(self.captain), json={"username": S.uid("tanod"), "password": S.PASSWORD, "assignment": "gate", "full_name": "Tanod Test"})
         self.assertEqual(r.status_code, 200, r.text)
         row = S.audit_rows("user.created", r.json()["id"])[0]
         self.assertEqual(row["actor_username"], self.captain["username"])

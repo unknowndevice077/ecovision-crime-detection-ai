@@ -291,9 +291,17 @@ class Accounts(Base):
     def test_admin_creates_resets_and_removes_own_staff(self):
         name = S.uid("tanod")
         uid_ = self.ok(self.c.post("/api/admin/users", headers=self.h(self.capA),
-                                   json={"username": name, "password": S.PASSWORD, "assignment": "Gate", "permissions": {"view_map": True}}))["id"]
+                                   json={"username": name, "password": S.PASSWORD, "assignment": "Gate", "full_name": "Tanod Uno",
+                                         "position": "Barangay Tanod", "permissions": {"view_map": True}}))["id"]
         row = S.user_row(name)
         self.assertEqual((row["role"], row["barangay_id"], row["parent_admin_id"]), ("BARANGAY_STAFF", self.brgyA, self.capA["id"]))
+        self.assertEqual((row["full_name"], row["position"]), ("Tanod Uno", "Barangay Tanod"))
+        self.assertEqual(self.c.get("/api/incidents", headers=self.h(row)).status_code, 200, "ticked permissions are applied")
+        self.assertEqual(self.c.post("/api/admin/users", headers=self.h(self.capA), json={
+            "username": S.uid("x"), "password": S.PASSWORD, "assignment": "x"}).status_code, 400, "a full name is required")
+        self.assertEqual(self.c.post("/api/admin/users", headers=self.h(self.capA), json={
+            "username": S.uid("x"), "password": S.PASSWORD, "assignment": "x", "full_name": "X",
+            "permissions": {"view_records": True}}).status_code, 400, "barangay staff can't hold the vault")
         self.assertIn(uid_, {u["id"] for u in self.ok(self.c.get("/api/admin/users", headers=self.h(self.capA)))})
         self.assertNotIn(uid_, {u["id"] for u in self.ok(self.c.get("/api/admin/users", headers=self.h(self.capB)))})
         new_pw = self.ok(self.c.post(f"/api/admin/users/{uid_}/reset_password", headers=self.h(self.capA)))["new_password"]
@@ -306,7 +314,8 @@ class Accounts(Base):
     def test_police_admin_creates_officers(self):
         name = S.uid("po")
         self.ok(self.c.post("/api/admin/users", headers=self.h(self.pnpA),
-                            json={"username": name, "password": S.PASSWORD, "assignment": "Patrol", "permissions": {"view_history": True}}))
+                            json={"username": name, "password": S.PASSWORD, "assignment": "Patrol", "full_name": "PO1 Test",
+                                  "permissions": {"view_history": True}}))
         row = S.user_row(name)
         self.assertEqual((row["role"], row["station_id"]), ("PNP_OFFICER", self.stA))
 

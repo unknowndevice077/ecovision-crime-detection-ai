@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 
 export const CREATABLE_ROLES = [
@@ -235,11 +235,15 @@ export function FieldInput({ label, value, onChange, type = 'text', placeholder,
 }) {
   const [show, setShow] = useState(false);
   const isPassword = type === 'password';
+  // Labels weren't tied to their fields: screen readers announced unnamed
+  // inputs and clicking a label didn't focus anything.
+  const id = useId();
   return (
     <div>
-      <label className={labelClass}>{label}</label>
+      <label htmlFor={id} className={labelClass}>{label}</label>
       <div className={isPassword ? 'relative' : undefined}>
         <input
+          id={id}
           type={isPassword ? (show ? 'text' : 'password') : type}
           value={value}
           disabled={disabled}
@@ -267,10 +271,11 @@ export function SelectInput({ label, value, onChange, options, placeholder = 'se
   label: string; value: string; onChange: (v: string) => void;
   options: (string | { value: string; label: string })[]; placeholder?: string; disabled?: boolean;
 }) {
+  const id = useId();
   return (
     <div>
-      <label className={labelClass}>{label}</label>
-      <select value={value} disabled={disabled} onChange={e => onChange(e.target.value)} className={inputClass}>
+      <label htmlFor={id} className={labelClass}>{label}</label>
+      <select id={id} value={value} disabled={disabled} onChange={e => onChange(e.target.value)} className={inputClass}>
         <option value="">{placeholder}</option>
         {options.map(o => typeof o === 'string'
           ? <option key={o} value={o}>{o}</option>
@@ -283,10 +288,11 @@ export function SelectInput({ label, value, onChange, options, placeholder = 'se
 export function TextAreaInput({ label, value, onChange, placeholder, rows = 3 }: {
   label: string; value: string; onChange: (v: string) => void; placeholder?: string; rows?: number;
 }) {
+  const id = useId();
   return (
     <div>
-      <label className={labelClass}>{label}</label>
-      <textarea value={value} rows={rows} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      <label htmlFor={id} className={labelClass}>{label}</label>
+      <textarea id={id} value={value} rows={rows} onChange={e => onChange(e.target.value)} placeholder={placeholder}
         className={`${inputClass} resize-y`} />
     </div>
   );

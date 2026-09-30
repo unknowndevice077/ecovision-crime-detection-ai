@@ -165,7 +165,10 @@ export default function RecordsView() {
   };
 
   const filteredRecords = records.filter(r => {
-    if (r.type !== (subView === 'CLIPS' ? 'CLIP' : 'FULL_24_7')) return false;
+    // Event clips are every clip that isn't a 24/7 segment: CRIME_CLIP (the
+    // schema allows it and backend's legacy recorder writes it) used to be
+    // hidden from both tabs.
+    if (subView === 'CLIPS' ? r.type === 'FULL_24_7' : r.type !== 'FULL_24_7') return false;
     if (filterDate && !r.recorded_at.includes(filterDate)) return false;
     if (subView === 'CLIPS' && filterCrimeType !== 'ALL' && !r.filename.toUpperCase().includes(filterCrimeType)) return false;
     return true;

@@ -169,6 +169,10 @@ export default function EcoVisionSentinel() {
       if (res.status === 401) { forceLogoutStaleSession(); return; }
       if (!res.ok) return;
       const { user } = await res.json();
+      // A backend older than this dashboard answers /api/me with the bare
+      // session (no permissions, no location name). Taking that would strip
+      // the account of everything it can see, so keep what we have.
+      if (!user || !('permissions' in user)) return;
       const fresh = JSON.stringify(user);
       if (fresh !== localStorage.getItem('ecoUser')) {
         localStorage.setItem('ecoUser', fresh);
@@ -433,6 +437,11 @@ const fetchCameras = async (userObj: any) => {
   };
 
   const deleteCam = async (id: string) => {
+    // One click used to delete the camera outright.
+    const name = cameras.find(c => c.id === id)?.name || 'this camera';
+    if (!window.confirm(`Remove "${name}"?
+
+Its feed disappears from every dashboard. Recordings and incidents from it are kept.`)) return;
     try {
       const token = localStorage.getItem('ecoToken');
       const res = await fetch(`${apiUrl}/api/cameras/${id}`, {

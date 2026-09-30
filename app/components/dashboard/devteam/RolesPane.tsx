@@ -16,6 +16,9 @@ export default function RolesPane({ apiUrl, customRoles, users, fetchCustomRoles
   useEffect(() => { fetchCustomRoles(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deleteRole = async (r: CustomRole) => {
+    if (!window.confirm(`Delete the role "${r.name}"?
+
+It stops being offered in Create User. (A role still assigned to accounts can't be deleted.)`)) return;
     setBusyId(r.id);
     try {
       const res = await fetch(`${apiUrl}/api/devteam/custom_roles/${r.id}`, { method: 'DELETE', headers: authHeaders() });

@@ -107,7 +107,11 @@ const POLICE_ONLY_PERMISSIONS = new Set<string>(["view_records", "view_history"]
 export function permissionStatus(role: string, key: string, customPermissions: boolean = false): PermissionStatus {
   if (BARANGAY_ONLY_PERMISSIONS.has(key) && PNP_ROLES.has(role)) return "banned";
   if (POLICE_ONLY_PERMISSIONS.has(key) && BARANGAY_ROLES.has(role)) return "banned";
-  if (ADMIN_ROLES.has(role) && !customPermissions && !BARANGAY_ONLY_PERMISSIONS.has(key) && !POLICE_ONLY_PERMISSIONS.has(key)) return "always";
+  // Every key an admin's side can hold is automatic until overridden --
+  // exactly backend require_permission(). This used to leave manage_cameras
+  // out for BARANGAY_ADMIN, so the form showed an unticked box for access the
+  // captain actually had, and an override silently dropped it.
+  if (ADMIN_ROLES.has(role) && !customPermissions) return "always";
   return "editable";
 }
 

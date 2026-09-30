@@ -246,6 +246,10 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
 
   const deleteStation = async (st: Station) => {
     if (st.staff_count > 0) return;
+    // Permanent (a station isn't soft-deleted), and it used to go on one click.
+    if (!window.confirm(`Delete ${st.name}?
+
+Its barangays lose their police coverage until another station takes them. This can't be undone.`)) return;
     setBusy(true);
     try {
       const res = await fetch(`${apiUrl}/api/devteam/stations/${st.id}`, { method: 'DELETE', headers: authHeaders() });

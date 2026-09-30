@@ -34,7 +34,7 @@ class Applications(unittest.TestCase):
         S.B.limiter.enabled = True
 
     def signup_barangay(self, barangay_id=None):
-        barangay_id = barangay_id or S.uid("brgy")
+        barangay_id = barangay_id or S.uid("brgy").replace("_", "-")  # a slug, as signup stores it
         name = S.uid("cap")
         r = self.c.post("/api/signup", json={"username": name, "password": S.PASSWORD, "role": "BARANGAY_ADMIN",
                                              "barangay_id": barangay_id, "assignment": "hall", **PROFILE})
@@ -121,6 +121,18 @@ class Applications(unittest.TestCase):
         st = next(s for s in self.c.get("/api/devteam/stations", headers=self.h).json() if s["id"] == self.station)
         self.assertNotIn(bid, st["barangay_ids"])
         self.assertEqual(snap(S.audit_rows("barangay.rejected", bid)[0])["removed_from_stations"], [self.station])
+
+    def test_signup_uses_the_same_barangay_id_as_the_stations_tab(self):
+        word = S.uid("Haven").split("_")[1]
+        r, bid, _ = self.signup_barangay(f"Brgy. New {word}")
+        self.assertEqual(r.status_code, 200, r.text)
+        conn = S.db(); cur = conn.cursor()
+        cur.execute("SELECT id, name FROM barangays WHERE id = ?", (f"new-{word}",))
+        row = cur.fetchone(); conn.close()
+        self.assertIsNotNone(row, "stored as the slug, like the Stations tab")
+        self.reject(f"new-{word}")
+        again, _, _ = self.signup_barangay(f"new {word}")
+        self.assertEqual(again.status_code, 403, "a rejected barangay can't come back under another spelling")
 
     def test_pending_barangay_cannot_be_added_to_a_jurisdiction(self):
         _, bid, _ = self.signup_barangay()

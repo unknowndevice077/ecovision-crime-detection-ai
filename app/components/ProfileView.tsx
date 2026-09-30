@@ -17,6 +17,8 @@ interface ProfileViewProps {
     display_title?: string;
     is_sub_admin?: boolean;
     verification_status?: 'unverified' | 'pending' | 'verified' | 'rejected';
+    full_name?: string | null;
+    position?: string | null;
   };
   onLogout: () => void;
 }
@@ -115,10 +117,10 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
           </div>
           <div className="min-w-0">
             <div className="text-[15px] font-bold text-[var(--text)] tracking-wide truncate">
-              {currentUser.username || 'Unknown operator'}
+              {currentUser.full_name || currentUser.username || 'Unknown operator'}
             </div>
             <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--text-2)' }}>
-              {currentUser.display_title || 'Personnel authentication record'}
+              @{currentUser.username}{(currentUser.position || currentUser.display_title) ? ` · ${currentUser.position || currentUser.display_title}` : ''}
             </div>
           </div>
         </div>
@@ -161,32 +163,37 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
           </div>
 
           <div className="grid grid-cols-3 gap-3 p-3">
+            {/* This row used to show a hardcoded "Verified" badge (next to a
+                real "not submitted" verification status below), an invented
+                operator ID, and the assignment labelled "Station". */}
             <div>
-              <span className="label block mb-1.5">Badge status</span>
+              <span className="label block mb-1.5">Identity</span>
               <span
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 border text-[9px] font-bold uppercase tracking-wider"
-                style={{ color: 'var(--ok)', borderColor: 'var(--ok)' }}
+                style={{ color: verifStyle.color, borderColor: verifStyle.color }}
               >
-                <ShieldCheck size={10} /> Verified
+                {verifStatus === 'verified' && <ShieldCheck size={10} />} {verifStyle.label}
               </span>
             </div>
             <div>
-              <span className="label block mb-1.5">Station</span>
+              <span className="label block mb-1.5">Assignment</span>
               <span className="text-[11px] font-bold uppercase" style={{ color: 'var(--text)' }}>
-                {currentUser.assignment || 'UNASSIGNED'}
+                {currentUser.assignment || 'None'}
               </span>
             </div>
             <div>
-              <span className="label block mb-1.5">Operator ID</span>
+              <span className="label block mb-1.5">Account ID</span>
               <span className="data text-[11px]" style={{ color: 'var(--text-2)' }}>
-                SEC-{currentUser.id || '0'}026
+                #{currentUser.id}
               </span>
             </div>
           </div>
 
-          {currentUser.is_sub_admin && (
+          {/* Shown for everyone now -- it was limited to the old
+              "sub-admin" flag, so most accounts never saw what they can do. */}
+          {currentUser.role !== 'DEVTEAM' && (
             <div className="border-t p-3" style={{ borderColor: 'var(--line)' }}>
-              <span className="label block mb-1.5">Granted permissions</span>
+              <span className="label block mb-1.5">What this account can do</span>
               <div className="flex flex-wrap gap-1.5">
                 {activePerms.length > 0 ? activePerms.map((p) => (
                   <span

@@ -1472,6 +1472,9 @@ export default function DevteamView() {
                   </span>
 
                   <button
+                    role="switch"
+                    aria-checked={m.enabled}
+                    aria-label={`${m.display_name || m.name} detection`}
                     onClick={() => requestToggle(m)}
                     disabled={modelBusy === m.name || (!m.enabled && !m.weights_present)}
                     title={!m.weights_present ? 'Model file is missing' : (m.enabled ? 'Turn off' : 'Turn on')}

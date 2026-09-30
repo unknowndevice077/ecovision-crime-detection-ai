@@ -1453,6 +1453,13 @@ class AdminCreateUser(BaseModel):
     display_title: Optional[str] = None
     is_sub_admin: Optional[bool] = False
     permissions: Optional[dict] = None
+    # Personal record, same fields as DevTeam's Create User (full_name
+    # required there and here -- staff made by an admin used to have none).
+    full_name: Optional[str] = None
+    birthdate: Optional[str] = None
+    home_address: Optional[str] = None
+    contact_number: Optional[str] = None
+    position: Optional[str] = None
 
 class PermissionsUpdate(BaseModel):
     permissions: dict
@@ -1750,6 +1757,9 @@ def _row_to_user_dict_base(row) -> dict:
         "custom_role_id": d.get("custom_role_id"),
         "verification_status": d.get("verification_status") or "unverified",
         "signup_status": d.get("signup_status") or "approved",
+        # Personal record (never file paths). Admins' own team lists used
+        # to get usernames only, so Personnel couldn't show who anyone was.
+        **{f: d.get(f) for f in PROFILE_FIELDS},
     }
 
 def _location_name(cursor, barangay_id, station_id) -> Optional[str]:
@@ -3646,7 +3656,13 @@ async def signup(request: Request, user: UserSignup):
         )
 
     is_pnp = role in PNP_SIDE_ROLES
-    barangay_id = (user.barangay_id or "").strip().lower()
+    # Same id rule as the Stations tab's "Add barangay" (_slugify_barangay):
+    # signup used the raw lowercased text, so "New Haven" became "new haven"
+    # here but "new-haven" there -- one barangay, two rows, and a rejected
+    # one could be applied for again under the other spelling.
+    import re as _re
+    barangay_name = _re.sub(r"^(brgy\.?|barangay)\s+", "", (user.barangay_id or "").strip(), flags=_re.IGNORECASE)
+    barangay_id = _slugify_barangay(barangay_name) if barangay_name else ""
     station_id = (user.station_id or "").strip().lower()
 
     if is_pnp and not station_id:
@@ -3674,6 +3690,14 @@ async def signup(request: Request, user: UserSignup):
             barangay_id = ""
         else:
             station_id = ""
+            # An existing barangay is matched under its stored id first -- rows made
+            # by the old rule keep raw ids (spaces, underscores) -- and only a new
+            # one gets the slug.
+            legacy_id = (user.barangay_id or "").strip().lower()
+            cursor.execute("SELECT id FROM barangays WHERE id = ?", (legacy_id,))
+            legacy = cursor.fetchone()
+            if legacy:
+                barangay_id = legacy["id"]
             cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
             claimed = cursor.fetchone()
             if claimed and claimed["status"] == "rejected":
@@ -3683,7 +3707,7 @@ async def signup(request: Request, user: UserSignup):
             if not claimed:
                 cursor.execute(
                     "INSERT INTO barangays (id, name, status) VALUES (?, ?, 'pending')",
-                    (barangay_id, user.barangay_id.strip().title()),
+                    (barangay_id, barangay_name.title()),
                 )
 
         # One admin per org unit, matching the unique indexes. deleted_at IS
@@ -4689,20 +4713,28 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
             raise HTTPException(status_code=400,
                                 detail="Your account has no barangay assigned; contact DevTeam.")
 
+    profile = _clean_profile(new_user, required=("full_name",))
+    # Permissions sent with the account used to be dropped unless
+    # is_sub_admin was also set; now they're applied (and a key this side
+    # can never hold is refused, as in PATCH .../permissions).
+    for key, granted in (new_user.permissions or {}).items():
+        if granted:
+            _check_permission_key_allowed({"role": target_role}, key)
     conn = get_conn()
     cursor = conn.cursor()
     try:
         cursor.returning_execute(
-            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, "
+            f"{', '.join(PROFILE_FIELDS)}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {', '.join('?' for _ in PROFILE_FIELDS)})",
             (new_user.username, hash_password(new_user.password), target_role,
              new_barangay, new_station, new_user.assignment, payload["id"],
              new_user.display_title if new_user.is_sub_admin else None,
-             1 if new_user.is_sub_admin else 0),
+             1 if new_user.is_sub_admin else 0, *[profile.get(f) for f in PROFILE_FIELDS]),
         )
         new_id = cursor.lastrowid
 
-        if new_user.is_sub_admin and new_user.permissions:
+        if new_user.permissions:
             for key, granted in new_user.permissions.items():
                 if granted and key in VALID_PERMISSION_KEYS:
                     cursor.execute(
@@ -4711,7 +4743,7 @@ async def create_my_user(new_user: AdminCreateUser, authorization: Optional[str]
                     )
         log_audit(cursor, payload, "user.created", "user", str(new_id), snapshot={
             "username": new_user.username, "role": target_role, "barangay_id": new_barangay, "station_id": new_station,
-            "assignment": new_user.assignment, "permissions": new_user.permissions if new_user.is_sub_admin else None})
+            "assignment": new_user.assignment, "permissions": new_user.permissions, **profile})
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         return {"status": "success", "role": target_role, "id": new_id}
