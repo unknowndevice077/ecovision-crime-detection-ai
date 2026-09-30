@@ -54,7 +54,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     // re-runs and reconnects to the real URL when that happens, so a
     // fallback port (backend didn't land on 8000) doesn't leave this
     // socket permanently pointed at the wrong address.
-    const wsUrl = apiUrl.replace(/^http/, "ws") + "/ws";
+    // The backend only accepts signed-in sockets (a browser WebSocket can't
+    // send an Authorization header, so the token rides in the query).
+    const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
+    const wsUrl = apiUrl.replace(/^http/, "ws") + "/ws" + (token ? `?token=${encodeURIComponent(token)}` : "");
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

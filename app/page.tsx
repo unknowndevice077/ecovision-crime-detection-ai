@@ -155,6 +155,38 @@ export default function EcoVisionSentinel() {
     }
   }, [router]);
 
+  // The stored ecoUser is a snapshot from login, so a permission an admin
+  // granted or revoked only showed in the sidebar after logging out and in
+  // again (the backend enforced it immediately). Re-read the account on
+  // load and whenever any account changes ("users" channel, plus
+  // useLiveChannel's 60s fallback poll).
+  const refreshCurrentUser = async () => {
+    const token = localStorage.getItem('ecoToken');
+    if (!token) return;
+    try {
+      const res = await fetch(`${apiUrl}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.status === 401) { forceLogoutStaleSession(); return; }
+      if (!res.ok) return;
+      const { user } = await res.json();
+      const fresh = JSON.stringify(user);
+      if (fresh !== localStorage.getItem('ecoUser')) {
+        localStorage.setItem('ecoUser', fresh);
+        setCurrentUser(user);
+      }
+    } catch { /* offline: keep the last known account */ }
+  };
+  useLiveChannel("users", refreshCurrentUser, configLoaded && !!currentUser);
+
+  // A revoked permission takes its tab away from the sidebar; don't leave
+  // the person sitting on a view that now only returns 403s.
+  useEffect(() => {
+    const needs: Record<string, 'view_map' | 'view_records' | 'view_history'> = {
+      'crime-reports': 'view_map', records: 'view_records', alerts: 'view_history',
+    };
+    const key = needs[activeTab];
+    if (key && currentUser && currentUser.role !== 'DEVTEAM' && !can(key)) setActiveTab('dashboard');
+  }, [activeTab, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!configLoaded || !currentUser) return;
     fetchCameras(currentUser);

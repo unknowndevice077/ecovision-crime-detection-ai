@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useLiveChannel } from '../context/WebSocketContext';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
+import { usePermissions } from '../hooks/usePermissions';
 import { SkeletonRow } from './dashboard/Skeleton';
 
 function authHeaders() {
@@ -32,6 +33,9 @@ type VideoRecord = {
 export default function RecordsView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [records, setRecords] = useState<VideoRecord[]>([]);
+  // Deleting evidence is police-admin/DevTeam only (backend delete_record).
+  const { role } = usePermissions();
+  const canDeleteRecords = role === 'PNP_ADMIN' || role === 'DEVTEAM';
   const [crimes, setCrimes] = useState<any[]>([]);
   const [subView, setSubView] = useState<'CLIPS' | 'DVR'>('CLIPS');
   const [activePlayback, setActivePlayback] = useState<VideoRecord | null>(null);
@@ -419,14 +423,14 @@ export default function RecordsView() {
                         >
                           <Download size={11} />
                         </a>
-                        <button
+                        {canDeleteRecords && <button
                           title="Delete this recording (removes the file from disk)"
                           onClick={() => handleDeleteRecord(track)}
                           className="p-1.5 border transition-colors hover:bg-[rgba(229,52,47,0.12)]"
                           style={{ borderColor: 'var(--line-2)', color: 'var(--critical)' }}
                         >
                           <Trash2 size={11} />
-                        </button>
+                        </button>}
                       </div>
                     </div>
 

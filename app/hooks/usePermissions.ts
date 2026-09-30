@@ -92,17 +92,22 @@ export function usePermissions() {
         manage_cameras: false, confirm_dismiss_alerts: true, manage_notify_targets: true,
       };
     }
+    // BUG FOUND 2026-10-01: this forced view_map/manage_cameras/
+    // confirm_dismiss_alerts on even for an overridden BARANGAY_ADMIN (so a
+    // revoked Incident Map still showed and then failed to load), and left
+    // manage_notify_targets out of the automatic set, which the backend
+    // grants every non-overridden admin.
     if (user.role === 'BARANGAY_ADMIN') {
-      const raw = !user.custom_permissions ? {} : (
-        typeof user.permissions === 'string'
-          ? (() => { try { return JSON.parse(user.permissions as string); } catch { return {}; } })()
-          : (user.permissions ?? {})
-      );
-      return {
-        ...raw,
-        view_map: true, manage_cameras: true, confirm_dismiss_alerts: true,
-        view_records: false, view_history: false,
-      };
+      if (!user.custom_permissions) {
+        return {
+          view_map: true, manage_cameras: true, confirm_dismiss_alerts: true, manage_notify_targets: true,
+          view_records: false, view_history: false,
+        };
+      }
+      const raw = typeof user.permissions === 'string'
+        ? (() => { try { return JSON.parse(user.permissions as string); } catch { return {}; } })()
+        : (user.permissions ?? {});
+      return { ...raw, view_records: false, view_history: false };
     }
 
     // PNP_OFFICER can never manage cameras either, whatever the stored blob

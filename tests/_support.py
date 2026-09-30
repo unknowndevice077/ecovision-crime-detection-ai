@@ -26,6 +26,8 @@ WRITABLE = tempfile.mkdtemp(prefix="run_", dir=_TMP_ROOT)
 
 os.environ["ECOVISION_WRITABLE_DIR"] = WRITABLE
 os.environ["TELEGRAM_BOT_TOKEN"] = ""
+# TestClient requests come from host "testclient"; stand in for the AI core.
+os.environ["ECOVISION_TRUSTED_SERVICE_HOSTS"] = "testclient"
 os.environ.pop("DATABASE_URL", None)
 os.environ.pop("SQLITE_PATH", None)
 sys.path.insert(0, str(REPO / "app"))
@@ -33,6 +35,14 @@ sys.path.insert(0, str(REPO / "maincode"))
 
 import backend as B  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+# Never reach real hardware or the live AI core from a test run:
+# /api/panic_trigger asks the AI core (port from runtime_ports.json, default
+# 8001 -- the running dev system's) to snapshot and record a clip, and
+# /siren/* posts to the ESP32 named in config.json. Port 9 (discard) refuses
+# at once; the siren is switched off.
+Path(WRITABLE, "runtime_ports.json").write_text('{"ai_core": 9}', encoding="utf-8")
+B.ESP32_ENABLED = False
 
 _client = None
 PASSWORD = "pw-test-12345"

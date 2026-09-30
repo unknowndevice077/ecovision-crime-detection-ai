@@ -4,6 +4,7 @@ import React, { useMemo, useState } from 'react';
 import { ClipboardList, Send, ShieldCheck, ShieldX, CheckCircle2, Clock, X } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
+import { usePermissions } from '../../hooks/usePermissions';
 
 /* Barangay -> police report requests (#7). One component, two faces --
  * which one renders depends on the caller's own role, same convention as
@@ -57,6 +58,10 @@ export default function ReportRequestsView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const role = readRole();
   const isBarangay = role === 'BARANGAY_ADMIN' || role === 'BARANGAY_STAFF';
+  // Answering hands over crime-history information, so it takes view_history
+  // (backend _require_report_sharer).
+  const { can } = usePermissions();
+  const canRespond = !isBarangay && can('view_history');
 
   const [requests, setRequests] = useState<ReportRequest[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -203,7 +208,7 @@ export default function ReportRequestsView() {
                       <span className="flex items-center gap-1.5 text-[9px] tracking-[0.1em] uppercase" style={{ color: st.color }}>
                         {st.icon} {st.label}
                       </span>
-                      {!isBarangay && req.status === 'pending' && (
+                      {canRespond && req.status === 'pending' && (
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => openRespond(req, 'decline')}
@@ -221,7 +226,7 @@ export default function ReportRequestsView() {
                           </button>
                         </div>
                       )}
-                      {!isBarangay && req.status === 'accepted' && (
+                      {canRespond && req.status === 'accepted' && (
                         <button
                           onClick={() => openRespond(req, 'fulfill')}
                           className="px-2.5 py-1.5 text-[9px] tracking-[0.1em] uppercase border border-[var(--ok)]/30 text-[var(--ok)] hover:bg-[var(--ok)]/10 transition-colors"

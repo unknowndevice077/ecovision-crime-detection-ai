@@ -54,32 +54,6 @@ const SMARTPOLE_LOCATIONS: SmartpoleNode[] = [
   { id: 'sp3', name: 'North Uplink Smartpole Node', street: 'District 18 (Cogon North Terminal)', lat: 11.0145, lng: 124.6055 }
 ];
 
-const SAMPLE_REPORTS = [
-  {
-    id: 'sample-sp1', case_id: 'CASE-C019AA60', type: 'ASSAULT', officer: 'AI_SENTINEL',
-    lat: 11.0176, lng: 124.6031, location_name: 'Cogon Core Smartpole Node',
-    severity: 'CRITICAL', occurred_date: '2026-06-01', occurred_time: '0552',
-    narrative: 'Automated neural detection of ASSAULT.',
-    nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
-    additional_officers: 'None', status: 'PENDING', screenshot_path: 'https://picsum.photos/seed/sp1/640/360'
-  },
-  {
-    id: 'sample-sp2', case_id: 'CASE-B882AC11', type: 'THEFT', officer: 'AI_SENTINEL',
-    lat: 11.0182, lng: 124.6025, location_name: 'Sector B Gate Smartpole Node',
-    severity: 'MEDIUM', occurred_date: '2026-06-02', occurred_time: '1114',
-    narrative: 'Automated neural detection of Theft / Larceny.',
-    nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
-    additional_officers: 'None', status: 'Confirmed', screenshot_path: 'https://picsum.photos/seed/sp2/640/360'
-  },
-  {
-    id: 'sample-sp3', case_id: 'CASE-N993DF44', type: 'PHYSICAL VIOLENCE', officer: 'AI_SENTINEL',
-    lat: 11.0145, lng: 124.6055, location_name: 'North Uplink Smartpole Node',
-    severity: 'HIGH', occurred_date: '2026-05-31', occurred_time: '0245',
-    narrative: 'Automated neural detection of a Physical Violence incident on public lanes.',
-    nature_of_call: 'AI Threat Flag', arrival_reason: 'Automated Tracking',
-    additional_officers: 'None', status: 'Confirmed', screenshot_path: 'https://picsum.photos/seed/sp3/640/360'
-  }
-];
 
 type Incident = {
   id: string; case_id: string; type: string; officer: string;
@@ -277,8 +251,9 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       // here (not silently merged with live data, which is what made the
       // fake incidents invisible before), so the map still demos something
       // instead of going blank.
-      setIncidents(SAMPLE_REPORTS);
-      setActionError('Backend unreachable -- showing sample data.');
+      // No fake incidents on a police map: it used to fall back to sample
+      // crimes with stock photos here. Keep whatever was last loaded.
+      setActionError('Backend unreachable -- showing the last loaded incidents.');
     }
   };
   const buildPoleIcon = (L: any, pole: SmartpoleNode, selectedId: string | null = selectedPoleIdRef.current) => {

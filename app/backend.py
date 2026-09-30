@@ -539,22 +539,42 @@ async def _log_unhandled_exception(request: Request, exc: Exception):
 
 # --- WEBSOCKET REAL-TIME CONNECTION BROADCAST MANAGER ---
 class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
+    """Signed-in dashboards only (2026-10-01): /ws used to accept anyone,
+    and every new incident's type, location, camera and id went to every
+    socket -- to other jurisdictions, and to anyone on the LAN, who could
+    then fetch /static/screenshots/snap_<id>.jpg. A message carrying a
+    barangay_id now goes only to accounts whose jurisdiction covers it."""
 
-    async def connect(self, websocket: WebSocket):
+    def __init__(self):
+        self.active_connections: dict = {}  # WebSocket -> the account's auth payload
+
+    async def connect(self, websocket: WebSocket, payload: dict):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        self.active_connections[websocket] = payload
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+        self.active_connections.pop(websocket, None)
+
+    @staticmethod
+    def _covers(payload: dict, barangay_id: Optional[str]) -> bool:
+        if not barangay_id or payload.get("role") == "DEVTEAM":
+            return True
+        frag, params = scope_clause(payload, "id")
+        conn = get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT 1 FROM barangays WHERE LOWER(id) = ? AND {frag}", [barangay_id.lower()] + params)
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
 
     async def broadcast(self, message: dict):
         dead_connections = []
-        for connection in self.active_connections:
+        barangay_id = message.get("barangay_id")
+        for connection, payload in list(self.active_connections.items()):
             try:
-                await connection.send_json(message)
+                if self._covers(payload, barangay_id):
+                    await connection.send_json(message)
             except Exception:
                 dead_connections.append(connection)
         for dead in dead_connections:
@@ -2335,18 +2355,27 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
 @app.post("/api/incidents")
 async def add_incident(incident: IncidentSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    # Never trust the client's barangay_id for anyone but DEVTEAM -- force
-    # it to the authenticated user's own assignment so a tampered/buggy
-    # request can't pin an incident to a location the user isn't part of.
-    if payload["role"] != "DEVTEAM":
-        if not payload.get("barangay_id"):
-            raise HTTPException(status_code=403, detail="Your account has no assigned location.")
-        effective_barangay_id = payload["barangay_id"]
-    else:
-        effective_barangay_id = incident.barangay_id
     conn = get_conn()
     cursor = conn.cursor()
     try:
+        # Filing is done from the Incident Map, so it takes that screen's
+        # permission (it used to take none). Never trust the client's
+        # barangay_id: a barangay account files into its own barangay
+        # whatever the body says; a police account, which has no barangay of
+        # its own (every police filing used to 403 here), into the named one
+        # only if its station covers it.
+        require_permission(cursor, payload, "view_map")
+        if payload["role"] in BARANGAY_SIDE_ROLES:
+            effective_barangay_id = payload.get("barangay_id")
+        else:
+            effective_barangay_id = (incident.barangay_id or "").strip().lower()
+            frag, fparams = scope_clause(payload, "id")
+            cursor.execute("SELECT 1 FROM barangays WHERE id = ?" + (f" AND {frag}" if frag else ""),
+                           [effective_barangay_id] + fparams)
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="That barangay is outside your jurisdiction.")
+        if not effective_barangay_id:
+            raise HTTPException(status_code=403, detail="Your account has no assigned location.")
         cursor.execute(
             """INSERT INTO incidents
                (id, case_id, type, severity, status, lat, lng, location_name,
@@ -2365,8 +2394,12 @@ async def add_incident(incident: IncidentSchema, authorization: Optional[str] = 
             "INSERT INTO incident_visibility (incident_id, map_hidden) VALUES (?, 0)",
             (incident.id,),
         )
+        log_audit(cursor, payload, "incident.filed", "incident", incident.id,
+                  snapshot={"type": incident.type, "barangay_id": effective_barangay_id, "location": incident.location_name})
         conn.commit()
         return {"status": "persisted"}
+    except HTTPException:
+        raise
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=str(e))
@@ -2621,12 +2654,29 @@ def _ai_one_liner(event: str, conf: float, location_name: Optional[str], ctx: di
     return s
 
 
+# The AI core's endpoints (ai_trigger, ai_register_clip, camera_name) have no
+# user session to authenticate with. They used to rely on the backend being
+# reachable only from localhost -- but backend.host is 0.0.0.0 (the ESP32
+# pole has to reach /api/esp32/register and /api/panic_trigger over the
+# LAN), so anyone on the network could file fake incidents and add clips to
+# the evidence vault. The AI core always calls from this machine
+# (networking.api_url / Electron's BACKEND_URL are 127.0.0.1), so these
+# answer loopback only, plus any host listed in security.trusted_service_hosts
+# or ECOVISION_TRUSTED_SERVICE_HOSTS for an AI core run on another machine.
+TRUSTED_SERVICE_HOSTS = {"127.0.0.1", "::1", "localhost"}     | set(sys_config.get("security", {}).get("trusted_service_hosts", []) or [])     | {h.strip() for h in os.environ.get("ECOVISION_TRUSTED_SERVICE_HOSTS", "").split(",") if h.strip()}
+
+
+def _require_local_service(request: Request):
+    host = request.client.host if request.client else None
+    if host not in TRUSTED_SERVICE_HOSTS:
+        raise HTTPException(status_code=403, detail="Only the AI core on this machine may call this endpoint.")
+
+
 @app.post("/api/ai_trigger")
-async def ai_trigger(data: AiTriggerSchema):
+async def ai_trigger(data: AiTriggerSchema, request: Request):
     # Deliberately NOT behind require_auth -- called by the local AI
-    # pipeline (main.py on 8001), not a browser. Protected only by being
-    # localhost-reachable in this deployment; give it its own service
-    # credential if this backend is ever exposed beyond localhost.
+    # pipeline (main.py on 8001), not a browser. See TRUSTED_SERVICE_HOSTS.
+    _require_local_service(request)
     incident_id = data.id if data.id else str(uuid.uuid4())
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4()).replace('-', '')[:8].upper()}"
     now = datetime.now()
@@ -2670,11 +2720,12 @@ async def ai_trigger(data: AiTriggerSchema):
     await manager.broadcast({
         "channel": "incidents", "status": "CRITICAL", "id": incident_id, "type": data.event,
         "location": data.location_name, "conf": data.confidence, "camera_link_id": data.camera_id,
+        "barangay_id": (data.barangay_id or "").lower(),
     })
     return {"status": "processed", "incident_id": incident_id}
 
 @app.get("/api/camera_name/{camera_id}")
-async def camera_name(camera_id: str):
+async def camera_name(camera_id: str, request: Request):
     """Lets main.py resolve the real, currently-registered name for the
     camera it's pointed at, instead of a name baked into config.json --
     added per request: "barangay adds a camera then adds a name and now the
@@ -2684,7 +2735,7 @@ async def camera_name(camera_id: str):
     live rename doesn't retroactively relabel an already-running session,
     same restart-to-apply rule as every other config change tonight).
 
-    Deliberately unauthenticated, same reasoning as /api/ai_trigger: the
+    Loopback only (see TRUSTED_SERVICE_HOSTS), same reasoning as /api/ai_trigger: the
     caller is the local AI pipeline, not a browser, and a camera's own
     display name isn't sensitive. Give it a service credential if this
     backend is ever exposed beyond localhost.
@@ -2701,6 +2752,7 @@ async def camera_name(camera_id: str):
     round-trip main.py would otherwise need at the exact same point in
     startup, for the exact same "what should THIS camera do" question.
     """
+    _require_local_service(request)
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT name, barangay_id FROM cameras WHERE id = ?", (camera_id,))
@@ -2808,12 +2860,25 @@ async def panic_trigger(data: PanicSchema, request: Request):
     await manager.broadcast({
         "channel": "incidents", "status": "CRITICAL", "id": incident_id, "type": "HARDWARE_PANIC_INTERRUPT",
         "location": "Hardware Node Interface", "conf": 1.0, "camera_link_id": "2",
+        "barangay_id": (data.barangay_id or "").lower(),
     })
     return {"status": "panic_logged", "id": incident_id}
+
+INCIDENT_STATUSES = ("Active", "Confirmed", "Dismissed")
+
+
+def _valid_incident_status(status: Optional[str]) -> str:
+    """The incidents.status CHECK constraint, stated up front: anything else
+    used to reach the UPDATE and come back as a bare 500."""
+    if status not in INCIDENT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(INCIDENT_STATUSES)}")
+    return status
+
 
 @app.patch("/api/incidents/{incident_id}/status")
 async def update_incident_status(incident_id: str, data: StatusUpdateSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
+    _valid_incident_status(data.status)
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
@@ -2878,10 +2943,18 @@ async def archive_incident(incident_id: str, authorization: Optional[str] = Head
     payload = require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
-    # See _incident_owned_by's BUG FOUND 2026-09-03 comment.
-    if not _incident_owned_by(cursor, incident_id, payload):
+    # Hiding an incident from the map is a map action. It used to need no
+    # permission at all, so an account that can't see the map could clear
+    # incidents from it for everyone. See also _incident_owned_by's BUG
+    # FOUND 2026-09-03 comment.
+    try:
+        require_permission(cursor, payload, "view_map")
+        if not _incident_owned_by(cursor, incident_id, payload):
+            raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        _require_incident_type_access(cursor, payload, incident_id, "view_map")
+    except HTTPException:
         conn.close()
-        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        raise
     cursor.execute("UPDATE incident_visibility SET map_hidden = 1 WHERE incident_id = ?", (incident_id,))
     conn.commit()
     updated = cursor.rowcount
@@ -3005,6 +3078,7 @@ async def save_report_draft(incident_id: str, data: ReportDraftSchema, authoriza
 async def confirm_and_report(incident_id: str, data: ConfirmAndReportSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, POLICE_SIDE_ROLES)
+    _valid_incident_status(data.status)
     conn = get_conn()
     cursor = conn.cursor()
     require_permission(cursor, payload, "confirm_dismiss_alerts")
@@ -3170,8 +3244,15 @@ async def siren_deactivate(authorization: Optional[str] = Header(None)):
     return {"status": "deactivate_sent"}
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    # Browsers can't set headers on a WebSocket, so the dashboard passes its
+    # session token as ?token=. Same check as every HTTP endpoint.
+    try:
+        payload = require_auth(f"Bearer {token}" if token else None)
+    except HTTPException:
+        await websocket.close(code=4401)
+        return
+    await manager.connect(websocket, payload)
     try:
         while True:
             await websocket.receive_text()
@@ -3335,13 +3416,14 @@ async def extract_record_segment(record_id: str, data: ExtractRangeSchema,
 async def delete_record(record_id: str, authorization: Optional[str] = Header(None)):
     """Removes a recording and its file.
 
-    Restricted to admin tiers/DEVTEAM rather than anyone with view_records:
-    this destroys evidence, which is a materially different action from
-    watching it. Scoped too, so an admin cannot delete another barangay's
-    footage.
+    Restricted to the police admin tier/DEVTEAM rather than anyone with
+    view_records: this destroys evidence, which is a materially different
+    action from watching it. BARANGAY_ADMIN used to pass too, although the
+    vault is police-only (POLICE_ONLY_PERMISSIONS) and they can't open it.
+    Scoped, so an admin cannot delete footage outside their jurisdiction.
     """
     payload = require_auth(authorization)
-    require_role(payload, ADMIN_OR_DEVTEAM)
+    require_role(payload, {"PNP_ADMIN", "DEVTEAM"})
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -3395,6 +3477,14 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
     payload = require_auth(authorization)
     conn = get_conn()
     cursor = conn.cursor()
+    # Adding to the evidence vault used to need only a login.
+    try:
+        require_permission(cursor, payload, "view_records")
+        if data.associated_incident_id and not _incident_owned_by(cursor, data.associated_incident_id, payload):
+            raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+    except HTTPException:
+        conn.close()
+        raise
     rid = str(uuid.uuid4())
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     fpath = _safe_recordings_path(data.filename)
@@ -3427,7 +3517,7 @@ async def register_clip(data: ManualClipSchema, authorization: Optional[str] = H
         conn.close()
 
 @app.post("/api/ai_register_clip")
-async def ai_register_clip(data: ManualClipSchema):
+async def ai_register_clip(data: ManualClipSchema, request: Request):
     """Auto-captured event clips from the AI pipeline (main.py on 8001).
 
     Deliberately NOT behind require_auth, for the same reason /api/ai_trigger
@@ -3441,6 +3531,7 @@ async def ai_register_clip(data: ManualClipSchema):
     ai_trigger: give it a service credential if this backend is ever exposed
     beyond localhost.
     """
+    _require_local_service(request)
     conn = get_conn()
     cursor = conn.cursor()
     rid = str(uuid.uuid4())
@@ -3494,7 +3585,14 @@ async def update_record_notes(record_id: str, data: RecordNotesSchema, authoriza
     # check at all. Any authenticated account, of any role in any barangay or
     # station, could rewrite the evidence notes on any recording anywhere in
     # the system. Scoped the same way GET /api/records and the extract
-    # endpoint already are, via apply_scope().
+    # endpoint already are, via apply_scope(). The scope alone still let any
+    # account in the area (barangay ones included, who can't open the
+    # police-only vault) edit notes; 2026-10-01 it takes view_records too.
+    try:
+        require_permission(cursor, payload, "view_records")
+    except HTTPException:
+        conn.close()
+        raise
     sql, params = apply_scope(payload, "SELECT id, associated_incident_id FROM video_records", [],
                               extra_where="id = ?", extra_params=[record_id])
     cursor.execute(sql, tuple(params))
@@ -3778,8 +3876,21 @@ async def logout():
 
 @app.get("/api/me")
 async def get_me(authorization: Optional[str] = Header(None)):
+    """The signed-in account as it is now -- the same shape /api/login
+    returns. The dashboard re-reads this when an account changes, so a
+    permission granted or revoked shows in the sidebar without logging out
+    (the backend already enforced the change on the next request)."""
     payload = require_auth(authorization)
-    return {"user": payload}
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (payload["id"],))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Account no longer exists")
+        return {"user": _row_to_user_dict(cursor, row)}
+    finally:
+        conn.close()
 
 # --- DEVTEAM: POLICE STATIONS & JURISDICTIONS ---
 # A station is an organizational unit that COVERS barangays. It owns no
@@ -4102,13 +4213,21 @@ async def delete_station(station_id: str, authorization: Optional[str] = Header(
     # users.station_id is ON DELETE RESTRICT, and chk_user_scope means a PNP
     # user cannot exist without a station -- so refuse with a clear message
     # rather than letting the FK raise something opaque.
-    cursor.execute("SELECT COUNT(*) AS n FROM users WHERE station_id = ?", (station_id,))
-    n = cursor.fetchone()["n"]
-    if n:
+    cursor.execute("SELECT username, deleted_at FROM users WHERE station_id = ?", (station_id,))
+    holders = cursor.fetchall()
+    if holders:
         conn.close()
-        raise HTTPException(
-            status_code=409,
-            detail=f"{n} user(s) are still assigned to this station. Reassign them first.")
+        active = [h["username"] for h in holders if not h["deleted_at"]]
+        removed = [h["username"] for h in holders if h["deleted_at"]]
+        # Removed accounts count too: they can still be restored from the
+        # Audit Log, into this station. Saying only "N users still assigned"
+        # sent DevTeam looking for accounts no list showed.
+        parts = []
+        if active:
+            parts.append(f"{len(active)} account(s) still assigned ({', '.join(active[:5])}) -- reassign them first")
+        if removed:
+            parts.append(f"{len(removed)} removed account(s) ({', '.join(removed[:5])}) can still be restored into it from the Audit Log")
+        raise HTTPException(status_code=409, detail="This station can't be deleted: " + "; ".join(parts) + ".")
     cursor.execute("SELECT * FROM police_stations WHERE id = ?", (station_id,))
     st_row = cursor.fetchone()
     cursor.execute("DELETE FROM police_stations WHERE id = ?", (station_id,))
@@ -6046,10 +6165,22 @@ def _respond_to_report_request(payload: dict, request_id: str, new_status: str, 
     finally:
         conn.close()
 
+def _require_report_sharer(payload: dict):
+    """Answering a request means handing over what's in the crime history,
+    so it takes view_history -- an officer with no permissions at all could
+    accept, decline and fulfil requests before 2026-10-01."""
+    conn = get_conn()
+    try:
+        require_permission(conn.cursor(), payload, "view_history")
+    finally:
+        conn.close()
+
+
 @app.post("/api/report_requests/{request_id}/accept")
 async def accept_report_request(request_id: str, body: ReportRequestResponse, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
     result = _respond_to_report_request(payload, request_id, "accepted", body.note, require_current="pending")
     await manager.broadcast({"channel": "report_requests", "event": "accepted", "id": request_id})
     return result
@@ -6058,6 +6189,7 @@ async def accept_report_request(request_id: str, body: ReportRequestResponse, au
 async def decline_report_request(request_id: str, body: ReportRequestResponse, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
     result = _respond_to_report_request(payload, request_id, "declined", body.note, require_current="pending")
     await manager.broadcast({"channel": "report_requests", "event": "declined", "id": request_id})
     return result
@@ -6070,6 +6202,7 @@ async def fulfill_report_request(request_id: str, body: ReportRequestResponse, a
     grant into the archive itself."""
     payload = require_auth(authorization)
     require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
     if not (body.note or "").strip():
         raise HTTPException(status_code=400, detail="Include the report/information being handed over")
     result = _respond_to_report_request(payload, request_id, "fulfilled", body.note, require_current="accepted")
@@ -6759,6 +6892,10 @@ async def _run_optimize_weights(revert: bool):
     # below can apply that same cleanup when this run stops abnormally
     # (cancelled, or the pipe just closes).
     in_flight_stem = None
+    # Set before the try: a task cancellation (app shutdown mid-run) raises
+    # CancelledError, which "except Exception" doesn't catch, and the
+    # finally block below then crashed on an unbound returncode.
+    returncode = None
     try:
         while True:
             line = await proc.stdout.readline()
