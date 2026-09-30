@@ -120,6 +120,11 @@ They can no longer sign in. DevTeam can restore the account from the Audit Log.`
   const [copied, setCopied] = useState(false);
 
   const handleResetPassword = async (u: ManagedUser) => {
+    // One click used to replace the password straight away, locking the
+    // person out until they're handed the new one.
+    if (!window.confirm(`Reset the password for ${u.full_name || u.username}?
+
+Their current password stops working immediately. You'll be shown the new one once.`)) return;
     setResetBusyId(u.id);
     setError('');
     try {
