@@ -111,8 +111,12 @@ export function permissionStatus(role: string, key: string, customPermissions: b
   return "editable";
 }
 
+// Keys a role's side can never hold aren't listed at all -- a greyed-out
+// "not for this side" row is just noise on a form that can't change it.
 export function permissionRowsFor(role: string, customPermissions: boolean = false) {
-  return PERMISSION_KEYS.map((p) => ({ ...p, status: permissionStatus(role, p.key, customPermissions) }));
+  return PERMISSION_KEYS
+    .map((p) => ({ ...p, status: permissionStatus(role, p.key, customPermissions) }))
+    .filter((p) => p.status !== "banned");
 }
 
 // Strips anything the backend would ignore anyway before a create/save
@@ -132,27 +136,11 @@ export function onlyEditablePermissions(role: string, draft: Record<string, bool
 // shown above the checkbox list instead of leaving the disabled/locked
 // rows to speak for themselves.
 export function permissionNoteFor(role: string, customPermissions: boolean = false): string | null {
-  const rows = permissionRowsFor(role, customPermissions);
-  const bannedKeys = new Set(rows.filter((r) => r.status === "banned").map((r) => r.key));
-  const hasCameraBan = [...bannedKeys].some((k) => BARANGAY_ONLY_PERMISSIONS.has(k));
-  const hasHistoryBan = [...bannedKeys].some((k) => POLICE_ONLY_PERMISSIONS.has(k));
-  const hasAlways = rows.some((r) => r.status === "always");
-
-  const banNotes: string[] = [];
-  if (hasCameraBan) banNotes.push("Camera management is locked for every PNP account -- cameras are barangay property, not police administration.");
-  if (hasHistoryBan) banNotes.push("Crime history and the video record vault are locked for every barangay account -- police-only, regardless of tier.");
-
-  if (banNotes.length && hasAlways) {
-    return `Admin-tier accounts get view/alert access automatically. ${banNotes.join(" ")}`;
-  }
-  if (banNotes.length) {
-    return banNotes.join(" ");
-  }
-  if (hasAlways) {
-    return "Admin-tier accounts get view/alert access automatically. Camera management still needs a grant, same as any standard account.";
+  if (permissionRowsFor(role, customPermissions).some((r) => r.status === "always")) {
+    return "Admin-tier accounts get view/alert access automatically.";
   }
   if (customPermissions) {
-    return "Overridden: this admin's access now comes from these checkboxes only, same as a standard account, until reset back to automatic.";
+    return "Overridden: this admin's access comes from these checkboxes only, same as a standard account, until reset back to automatic.";
   }
   return null;
 }

@@ -154,6 +154,7 @@ export default function PermissionTree({
     <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)]">
       {PERMISSION_KEYS.map(p => {
         const status = role ? permissionStatus(role, p.key, customPermissions) : 'editable';
+        if (status === 'banned') return null;
         const granted = effectiveGranted(role, p.key, perms, customPermissions);
         const editable = status === 'editable' && !disabled;
         const dims = diceable && granted ? dimensionsFor(p.key, role) : [];
@@ -162,8 +163,8 @@ export default function PermissionTree({
         return (
           <div key={p.key}>
             <label
-              className={`flex items-center gap-2.5 px-3 py-2.5 transition-colors ${editable ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed'} ${status === 'banned' ? 'opacity-40' : ''}`}
-              title={status === 'banned' ? `Not available to this account's side -- the backend refuses it regardless.` : status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
+              className={`flex items-center gap-2.5 px-3 py-2.5 transition-colors ${editable ? 'cursor-pointer hover:bg-[var(--panel)]' : 'cursor-not-allowed'}`}
+              title={status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
             >
               <input
                 type="checkbox"
@@ -175,7 +176,6 @@ export default function PermissionTree({
               <div className="min-w-0 flex-1">
                 <p className="text-[10.5px] text-[var(--text)]">
                   {p.label}
-                  {status === 'banned' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--critical)]">not for this side</span>}
                   {status === 'always' && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--ok)]">automatic</span>}
                   {narrowed && <span className="ml-1.5 text-[8px] uppercase tracking-wide text-[var(--accent)]">limited</span>}
                 </p>

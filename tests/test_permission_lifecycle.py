@@ -186,6 +186,47 @@ class PermissionLifecycle(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.c.get("/api/incidents", headers=S.auth(self.chief)).status_code, 200)
 
+    # -- overriding an admin's automatic set at creation ----------------------
+
+    def create_admin(self, **extra):
+        bid, _ = S.make_barangay(1)
+        S.make_station(self.dev, [bid])
+        S.make_incident(bid)
+        body = {"username": S.uid("cap"), "password": S.PASSWORD, "role": "BARANGAY_ADMIN", "assignment": "hall",
+                "full_name": "Override Test", "barangay_id": bid, **extra}
+        return self.c.post("/api/devteam/users", headers=S.auth(self.dev), json=body), body["username"]
+
+    def test_admin_created_with_override_gets_only_what_was_ticked(self):
+        r, name = self.create_admin(override_permissions=True, confirm_password=S.PASSWORD,
+                                    permissions={"confirm_dismiss_alerts": True, "view_map": False})
+        self.assertEqual(r.status_code, 200, r.text)
+        row = S.user_row(name)
+        self.assertEqual(row["custom_permissions"], 1)
+        h = S.auth(row)
+        self.assertEqual(self.c.get("/api/incidents", headers=h).status_code, 403)
+        created = json.loads(S.audit_rows("user.created", row["id"])[0]["target_snapshot"])
+        self.assertTrue(created["permissions_overridden"])
+
+    def test_admin_created_without_override_stays_automatic(self):
+        r, name = self.create_admin(permissions={"view_map": False})
+        self.assertEqual(r.status_code, 200, r.text)
+        row = S.user_row(name)
+        self.assertEqual(row["custom_permissions"], 0)
+        self.assertEqual(self.c.get("/api/incidents", headers=S.auth(row)).status_code, 200)
+
+    def test_create_time_override_needs_the_password_and_an_admin_role(self):
+        r, name = self.create_admin(override_permissions=True, confirm_password="wrong", permissions={})
+        self.assertEqual(r.status_code, 403)
+        self.assertIsNone(S.user_row(name))
+        r = self.c.post("/api/devteam/users", headers=S.auth(self.dev), json={
+            "username": S.uid("x"), "password": S.PASSWORD, "role": "BARANGAY_STAFF", "assignment": "t",
+            "full_name": "X", "barangay_id": self.brgy, "override_permissions": True, "confirm_password": S.PASSWORD})
+        self.assertEqual(r.status_code, 400)
+        r = self.c.post("/api/devteam/users", headers=S.auth(self.dev), json={
+            "username": S.uid("x"), "password": S.PASSWORD, "role": "BARANGAY_STAFF", "assignment": "t",
+            "full_name": "X", "barangay_id": self.brgy, "permissions": {"view_records": True}})
+        self.assertEqual(r.status_code, 400, "a key barangay accounts can never hold")
+
     def test_deleted_account_loses_everything_on_its_existing_token(self):
         u = self.fresh("PNP_OFFICER")
         h = S.auth(u)

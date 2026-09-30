@@ -1593,6 +1593,11 @@ class DevteamCreateUser(BaseModel):
     # Dicing applied right after creation: {permission_key: {resource_type:
     # [ids] | None}} -- see RESOURCE_DIMENSIONS. Omitted = not narrowed.
     resource_scopes: Optional[dict] = None
+    # Admin roles only: start the account on explicit permissions instead of
+    # the automatic admin set, exactly as override_permissions would do
+    # right after creation. Needs the DevTeam password, same bar.
+    override_permissions: bool = False
+    confirm_password: Optional[str] = None
 
 class ResourceScopesUpdate(BaseModel):
     # {permission_key: {resource_type: [ids] | None}}. None clears that
@@ -4756,6 +4761,29 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                 conn.close()
                 raise HTTPException(status_code=400, detail=f"That role is for {custom_role['org_type']} accounts, not {wanted_org}.")
 
+        # An admin's permissions are automatic unless overridden, so rows
+        # sent for a non-overridden admin would be stored but never read.
+        # Overriding at creation needs the same password re-entry as
+        # overriding an existing admin.
+        override = role in ADMIN_ROLES and new_user.override_permissions
+        if new_user.override_permissions and role not in ADMIN_ROLES:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Only admin accounts have automatic permissions to override.")
+        if override:
+            cursor.execute("SELECT password FROM users WHERE id = ?", (payload["id"],))
+            caller = cursor.fetchone()
+            if not caller or not verify_password(new_user.confirm_password or "", caller["password"]):
+                conn.close()
+                raise HTTPException(status_code=403, detail="Incorrect DevTeam password.")
+        explicit_perms = new_user.permissions if (role in STANDARD_ROLES or override) else None
+        try:
+            for key, granted in (explicit_perms or {}).items():
+                if granted:
+                    _check_permission_key_allowed({"role": role}, key)
+        except HTTPException:
+            conn.close()
+            raise
+
         display_title = new_user.display_title or (custom_role["name"] if custom_role else None)
         cursor.returning_execute(
             "INSERT INTO users (username, password, role, barangay_id, station_id, assignment, parent_admin_id, display_title, is_sub_admin, custom_role_id, "
@@ -4768,9 +4796,11 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
              *[profile.get(f) for f in PROFILE_FIELDS]),
         )
         new_id = cursor.lastrowid
+        if override:
+            cursor.execute("UPDATE users SET custom_permissions = 1 WHERE id = ?", (new_id,))
 
-        if new_user.permissions:
-            for key, granted in new_user.permissions.items():
+        if explicit_perms:
+            for key, granted in explicit_perms.items():
                 if granted and key in VALID_PERMISSION_KEYS:
                     cursor.execute(
                         "INSERT INTO user_permissions (user_id, permission_key, granted_by) VALUES (?, ?, ?) ON CONFLICT (user_id, permission_key) DO NOTHING",
@@ -4807,7 +4837,7 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
         log_audit(cursor, payload, "user.created", "user", str(new_id), snapshot={
             "username": new_user.username, "role": role, "barangay_id": barangay_id or None, "station_id": station_id or None,
             "assignment": new_user.assignment, "custom_role_id": custom_role["id"] if custom_role else None,
-            "permissions": new_user.permissions, **profile})
+            "permissions": explicit_perms, "permissions_overridden": override, **profile})
         conn.commit()
         await manager.broadcast({"channel": "users", "event": "user_created", "id": new_id})
         await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})

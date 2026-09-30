@@ -531,7 +531,7 @@ export default function AdminUsersView() {
                 {permissionRowsFor(editingPerms.role).map(p => (
                   <label
                     key={p.key}
-                    title={p.status === 'banned' ? 'The backend refuses this for every PNP account, any tier — checking it would not do anything.' : p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
+                    title={p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
                     className="flex items-center justify-between p-2.5 border transition-colors"
                     style={{
                       background: 'var(--panel-2)', borderColor: 'var(--line)',
@@ -541,12 +541,11 @@ export default function AdminUsersView() {
                   >
                     <span className="text-[11px]" style={{ color: 'var(--text)' }}>
                       {p.label}
-                      {p.status === 'banned' && <span className="ml-1.5 text-[9px] uppercase tracking-wide" style={{ color: 'var(--critical)' }}>locked</span>}
                       {p.status === 'always' && <span className="ml-1.5 text-[9px] uppercase tracking-wide" style={{ color: 'var(--ok)' }}>automatic</span>}
                     </span>
                     <input
                       type="checkbox"
-                      checked={p.status === 'always' ? true : p.status === 'banned' ? false : !!permsDraft[p.key]}
+                      checked={p.status === 'always' ? true : !!permsDraft[p.key]}
                       disabled={p.status !== 'editable'}
                       onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
                       className="w-4 h-4"

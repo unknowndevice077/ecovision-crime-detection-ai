@@ -8,7 +8,7 @@ import {
   CREATABLE_ROLES, PNP_ROLES, CameraRow, CustomRole, FieldInput, ManagedUser, PaneHeader, PendingLocation,
   SectionLabel, SelectInput, Station, authHeaders, camerasInScope, inputClass, labelClass, roleStyle,
 } from './shared';
-import { permissionStatus, PERMISSION_KEYS } from '../../../lib/permissions';
+import { permissionNoteFor, permissionRowsFor, permissionStatus, PERMISSION_KEYS } from '../../../lib/permissions';
 import { positionsForRole } from '../../../lib/positions';
 
 const EMPTY_FORM = {
@@ -29,6 +29,10 @@ export default function CreateUserPane({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [addRoleOpen, setAddRoleOpen] = useState(false);
+  // Admin roles only: start on explicit permissions instead of the
+  // automatic admin set (same as overriding an existing admin later).
+  const [override, setOverride] = useState(false);
+  const [overridePassword, setOverridePassword] = useState('');
   // A role just made in the "+ Add role" modal isn't in customRoles until
   // the list refetch lands -- apply it once it shows up.
   const [pendingRoleId, setPendingRoleId] = useState<string | null>(null);
@@ -38,6 +42,8 @@ export default function CreateUserPane({
   const set = (patch: Partial<typeof EMPTY_FORM>) => setForm(prev => ({ ...prev, ...patch }));
   const isPnp = PNP_ROLES.includes(form.role);
   const isStandard = form.role === 'PNP_OFFICER' || form.role === 'BARANGAY_STAFF';
+  const isAdmin = form.role === 'PNP_ADMIN' || form.role === 'BARANGAY_ADMIN';
+  const overriding = isAdmin && override;
 
   const barangays = useMemo(() => allLocations.filter(l => l.status === 'approved' || !l.status), [allLocations]);
   const coveringStation = useMemo(
@@ -61,6 +67,18 @@ export default function CreateUserPane({
     set({ role, parent_admin_id: '', custom_role_id: '', position: '' });
     setPerms({});
     setScopes({});
+    setOverride(false);
+    setOverridePassword('');
+  };
+
+  // Turning the override on starts from what the admin would get
+  // automatically, so creating without further changes grants the same.
+  const toggleOverride = (on: boolean) => {
+    setOverride(on);
+    setOverridePassword('');
+    const seeded: Record<string, boolean> = {};
+    if (on) permissionRowsFor(form.role).forEach(p => { if (p.status === 'always') seeded[p.key] = true; });
+    setPerms(seeded);
   };
 
   // Picking a role pre-fills the tree with its preset; the operator can
@@ -92,7 +110,9 @@ export default function CreateUserPane({
     }
   }, [customRoles, pendingRoleId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const reset = () => { setForm(EMPTY_FORM); setPerms({}); setScopes({}); setError(''); };
+  const reset = () => {
+    setForm(EMPTY_FORM); setPerms({}); setScopes({}); setError(''); setOverride(false); setOverridePassword('');
+  };
 
   const create = async () => {
     setError('');
@@ -102,18 +122,19 @@ export default function CreateUserPane({
     if (isPnp && !form.station_id) return setError('A police station is required for PNP roles.');
     if (!isPnp && !form.barangay_id) return setError('A barangay is required for barangay roles.');
     if (!isPnp && !coveringStation && !form.station_id) return setError('This barangay has no police station yet -- pick one to cover it.');
-    const problem = scopeProblem(form.role, perms, scopes);
+    const problem = scopeProblem(form.role, perms, scopes, overriding);
     if (problem) return setError(problem);
+    if (overriding && !overridePassword) return setError('Enter your DevTeam password to override automatic permissions.');
 
     // Every editable key sent explicitly (true or false) so a key the
     // operator unticked stays off even when a custom role would grant it.
     const permissions: Record<string, boolean> = {};
     PERMISSION_KEYS.forEach(p => {
-      if (permissionStatus(form.role, p.key) === 'editable') permissions[p.key] = !!perms[p.key];
+      if (permissionStatus(form.role, p.key, overriding) === 'editable') permissions[p.key] = !!perms[p.key];
     });
     // Every dimension sent (null = all) so the form, not the role preset,
     // decides the final narrowing.
-    const resource_scopes = scopesForSave(form.role, perms, scopes);
+    const resource_scopes = scopesForSave(form.role, perms, scopes, overriding);
 
     setBusy(true);
     try {
@@ -131,6 +152,8 @@ export default function CreateUserPane({
           custom_role_id: form.custom_role_id || null,
           permissions,
           resource_scopes,
+          override_permissions: overriding,
+          confirm_password: overriding ? overridePassword : null,
           full_name: form.full_name.trim(),
           birthdate: form.birthdate || null,
           home_address: form.home_address.trim() || null,
@@ -274,8 +297,28 @@ export default function CreateUserPane({
             </div>
           )}
 
+          {isAdmin && (
+            <div className="border border-[var(--panel-2)]">
+              <label className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[var(--panel-2)]/50">
+                <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)]">Override automatic admin permissions</span>
+                <input type="checkbox" checked={override} onChange={e => toggleOverride(e.target.checked)} className="w-3.5 h-3.5 accent-[var(--accent)]" />
+              </label>
+              {override && (
+                <div className="px-3 pb-3 pt-1 border-t border-[var(--panel-2)]">
+                  <label className={labelClass}>Confirm DevTeam password</label>
+                  <input type="password" value={overridePassword} onChange={e => setOverridePassword(e.target.value)}
+                    placeholder="required to create with overridden permissions" className={inputClass} />
+                </div>
+              )}
+            </div>
+          )}
+          {permissionNoteFor(form.role, overriding) && (
+            <p className="text-[9px] leading-relaxed text-[var(--text-3)]">{permissionNoteFor(form.role, overriding)}</p>
+          )}
+
           <PermissionTree
             role={form.role}
+            customPermissions={overriding}
             perms={perms}
             onPermsChange={setPerms}
             scopes={scopes}
