@@ -848,7 +848,7 @@ export default function DevteamView() {
             <Radio size={14} className="text-[var(--accent)]" />
           </div>
           <div className="leading-tight">
-            <h1 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Oversight Console</h1>
+            <h1 className="text-[11px] tracking-[0.2em] uppercase text-[var(--text)]">Developer Console</h1>
             <p className="text-[9px] tracking-[0.15em] text-[var(--text-2)] uppercase">All locations &middot; full authority</p>
           </div>
         </div>

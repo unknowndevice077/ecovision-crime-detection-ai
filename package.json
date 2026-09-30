@@ -79,6 +79,8 @@
     "files": [
       "electron/**/*",
       ".next/**/*",
+      "!.next/dev/**/*",
+      "!.next/cache/**/*",
       "node_modules/**/*",
       "public/**/*",
       "next.config.*",
