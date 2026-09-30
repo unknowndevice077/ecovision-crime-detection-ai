@@ -39,6 +39,14 @@ function bearerOnly() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// An applicant (self-signup admin) is a real account that can't sign in
+// until approved -- lists used to show one exactly like a working admin.
+export function applicationStatusLabel(u: { signup_status?: string | null }): { text: string; color: string } | null {
+  if (u.signup_status === 'pending') return { text: 'awaiting approval', color: 'var(--warn)' };
+  if (u.signup_status === 'rejected') return { text: 'application rejected', color: 'var(--critical)' };
+  return null;
+}
+
 export type ManagedUser = {
   id: number;
   username: string;

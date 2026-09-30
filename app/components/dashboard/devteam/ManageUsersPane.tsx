@@ -5,11 +5,12 @@ import { History, IdCard, KeyRound, Pencil, Save, Search, ShieldCheck, ShieldX, 
 import PermissionTree, { ResourceScopes, narrowedOnly, scopeProblem, scopesForSave } from './PermissionTree';
 import {
   ADMIN_ROLES, CameraRow, CustomRole, EmptyPane, FieldInput, InfoRow, ManagedUser, PNP_ROLES, PaneHeader,
-  PendingLocation, SectionLabel, SelectInput, Station, ageFrom, authHeaders, camerasInScope, inputClass,
+  PendingLocation, SectionLabel, SelectInput, Station, ageFrom, applicationStatusLabel, authHeaders, camerasInScope, inputClass,
   labelClass, roleLabel, roleStyle, useAuthedObjectUrl,
 } from './shared';
 import { onlyEditablePermissions, permissionNoteFor, permissionRowsFor } from '../../../lib/permissions';
 import { positionsForRole } from '../../../lib/positions';
+import { serverDateTime, serverDay } from '../../../lib/time';
 
 type Props = {
   apiUrl: string; users: ManagedUser[]; stations: Station[]; cameras: CameraRow[];
@@ -106,7 +107,7 @@ function AccountActivity({ apiUrl, user }: { apiUrl: string; user: ManagedUser }
                     {!byThem && <span className="text-[var(--text-3)]"> · by {r.actor_username}</span>}
                     {byThem && r.target_type !== 'user' && <span className="text-[var(--text-3)]"> · {r.target_type} {r.target_id}</span>}
                   </span>
-                  <span className="text-[9px] text-[var(--text-3)] shrink-0">{new Date(r.created_at).toLocaleString()}</span>
+                  <span className="text-[9px] text-[var(--text-3)] shrink-0">{serverDateTime(r.created_at)}</span>
                 </div>
               );
             })}
@@ -175,6 +176,9 @@ export default function ManageUsersPane({ apiUrl, users, stations, cameras, allL
                 <div className="min-w-0 flex-1">
                   <p className="text-[11px] text-[var(--text)] truncate">{u.full_name || u.username}</p>
                   <p className="text-[9px] text-[var(--text-2)] truncate">@{u.username} · {u.position || roleLabel(u.role)} · {orgName(u)}</p>
+                  {applicationStatusLabel(u) && (
+                    <p className="text-[8px] uppercase tracking-wide" style={{ color: applicationStatusLabel(u)!.color }}>{applicationStatusLabel(u)!.text}</p>
+                  )}
                 </div>
                 {u.role !== 'DEVTEAM' && (
                   <span
@@ -451,8 +455,8 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
             <InfoRow label={isPnp ? 'Police station' : isDevteam ? 'Organization' : 'Barangay'} value={orgName} />
             <InfoRow label="Reports to" value={parent ? (parent.full_name || parent.username) : null} />
             <InfoRow label="Display title" value={u.display_title} />
-            <InfoRow label="Created" value={u.created_at ? new Date(u.created_at).toLocaleDateString() : null} />
-            <InfoRow label="Last login" value={u.last_login ? new Date(u.last_login).toLocaleString() : 'Never'} />
+            <InfoRow label="Created" value={serverDay(u.created_at) || null} />
+            <InfoRow label="Last login" value={serverDateTime(u.last_login, 'Never')} />
           </div>
         )}
 

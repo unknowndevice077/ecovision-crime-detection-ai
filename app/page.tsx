@@ -5,6 +5,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useRuntimeConfig } from './hooks/useRuntimeConfig';
 import { useLiveChannel } from './context/WebSocketContext';
+import { maskStreamUrl } from './lib/streams';
 import { usePermissions } from './hooks/usePermissions';
 import { useAlertNotifier } from './hooks/useAlertNotifier';
 import { SkeletonRow } from './components/dashboard/Skeleton';
@@ -247,9 +248,10 @@ export default function EcoVisionSentinel() {
     if (!raw) return;
     setApplyState('saving');
     try {
+      const token = localStorage.getItem('ecoToken');
       const res = await fetch(`${aiUrl}/set_camera_source`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ source: raw })
       });
       const data = await res.json();
@@ -292,7 +294,7 @@ const fetchCameras = async (userObj: any) => {
   };
 
   const fetchStats = async () => {
-    if (!currentUser) return;
+    if (!currentUser || !canSeeIncidents) return;
     try {
       const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
       const role = currentUser.role || 'user';
@@ -320,7 +322,13 @@ const fetchCameras = async (userObj: any) => {
     }
   };
 
+  // Incidents are visible with the map, the history or (queue only)
+  // confirm/dismiss -- backend get_incidents. Without any of the three the
+  // queue used to poll a 403 forever and sit on its loading skeleton.
+  const canSeeIncidents = can('view_map') || can('view_history') || can('confirm_dismiss_alerts');
+
   const fetchActiveAlertCache = async () => {
+    if (!canSeeIncidents) { setAlerts([]); setAlertsLoaded(true); return; }
     if (!currentUser) return;
     try {
       const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
@@ -739,7 +747,7 @@ const fetchCameras = async (userObj: any) => {
               someone to get around to triaging the incident that set it
               off. Best-effort like the queue's own siren calls: it POSTs
               straight to /siren/deactivate, no incident involved. */}
-          <button
+          {can('confirm_dismiss_alerts') && <button
             onClick={handleEmergencyStopSiren}
             disabled={sirenStopState === 'busy'}
             title="Immediately silence the physical siren, independent of any incident"
@@ -757,7 +765,7 @@ const fetchCameras = async (userObj: any) => {
             {sirenStopState === 'busy' ? 'Stopping…' :
              sirenStopState === 'done' ? 'Siren stopped' :
              sirenStopState === 'error' ? 'No response' : 'Emergency stop siren'}
-          </button>
+          </button>}
 
           <div className="px-3 py-2.5 border-t" style={{ borderColor: 'var(--line)' }}>
             <div className="label mb-1">{isPolice ? 'Station' : 'Barangay'}</div>
@@ -817,7 +825,7 @@ const fetchCameras = async (userObj: any) => {
                         or RTSP URL is a setup-time control, not something an
                         operator's eye needs competing for space with the feed
                         count and incident count every single shift. */}
-                    <div className="relative">
+                    {can('manage_cameras') && <div className="relative">
                       <button
                         onClick={() => setSrcPanelOpen(o => !o)}
                         title="Camera source"
@@ -885,7 +893,7 @@ const fetchCameras = async (userObj: any) => {
                           )}
                         </div>
                       )}
-                    </div>
+                    </div>}
 
                     <button
                       title="Fullscreen video wall"
@@ -968,6 +976,11 @@ const fetchCameras = async (userObj: any) => {
                       <SkeletonRow />
                       <SkeletonRow />
                       <SkeletonRow />
+                    </div>
+                  ) : !canSeeIncidents ? (
+                    <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
+                      <span className="label text-center">Your account can&apos;t see incidents</span>
+                      <span className="text-[10px] text-center" style={{ color: 'var(--text-3)' }}>Ask your admin for Confirm / Dismiss Alerts or the Incident Map.</span>
                     </div>
                   ) : pendingAlerts.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
@@ -1075,7 +1088,7 @@ const fetchCameras = async (userObj: any) => {
                         className="data text-[10px] truncate px-2 py-1.5 border"
                         style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text-2)' }}
                       >
-                        {cam.url ?? 'Hidden — needs Manage Cameras'}
+                        {cam.url ? maskStreamUrl(cam.url) : 'Hidden — needs Manage Cameras'}
                       </p>
                     </div>
                   ))}
@@ -1202,7 +1215,11 @@ const fetchCameras = async (userObj: any) => {
                 </span>
               </div>
               <div className="flex-1 overflow-y-auto custom-scrollbar" role="log" aria-live="assertive" aria-relevant="additions" aria-label="Incident queue, newest first">
-                {pendingAlerts.length === 0 ? (
+                {!canSeeIncidents ? (
+                  <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
+                    <span className="label text-center">Your account can&apos;t see incidents</span>
+                  </div>
+                ) : pendingAlerts.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
                     <span className="status-dot ok" />
                     <span className="label text-center">Monitoring — no incidents awaiting review</span>

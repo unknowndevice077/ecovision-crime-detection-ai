@@ -5,6 +5,7 @@ import { ClipboardList, Send, ShieldCheck, ShieldX, CheckCircle2, Clock, X } fro
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { usePermissions } from '../../hooks/usePermissions';
+import { serverDateTime } from '../../lib/time';
 
 /* Barangay -> police report requests (#7). One component, two faces --
  * which one renders depends on the caller's own role, same convention as
@@ -193,7 +194,7 @@ export default function ReportRequestsView() {
                       )}
                       <p className="text-[11px]" style={{ color: 'var(--text)' }}>{req.description}</p>
                       <p className="text-[9px] mt-1" style={{ color: 'var(--text-3)' }}>
-                        {new Date(req.requested_at).toLocaleString()}
+                        {serverDateTime(req.requested_at)}
                       </p>
                       {req.response_note && (
                         <div className="mt-2 border px-2.5 py-2" style={{ borderColor: 'var(--line-2)', background: 'var(--panel-2)' }}>
@@ -251,7 +252,7 @@ export default function ReportRequestsView() {
               <span className="text-[10px] tracking-[0.15em] uppercase" style={{ color: 'var(--text)' }}>
                 {respondAction === 'accept' ? 'Accept request' : respondAction === 'decline' ? 'Decline request' : 'Fulfill request'}
               </span>
-              <button onClick={() => setRespondingTo(null)} style={{ color: 'var(--text-3)' }} className="hover:text-[var(--text)] transition-colors">
+              <button title="Close" aria-label="Close" onClick={() => setRespondingTo(null)} style={{ color: 'var(--text-3)' }} className="hover:text-[var(--text)] transition-colors">
                 <X size={15} />
               </button>
             </div>

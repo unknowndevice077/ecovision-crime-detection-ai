@@ -95,6 +95,18 @@ class PermissionLifecycle(unittest.TestCase):
                 self.set_perms(self.dev, u, [])
                 self.assertEqual(self.c.get("/api/incidents", headers=h).status_code, 403)
 
+    def test_confirm_only_account_sees_the_active_queue_and_nothing_else(self):
+        u = self.fresh("BARANGAY_STAFF")
+        self.set_perms(self.captain, u, ["confirm_dismiss_alerts"])
+        seen = self.ids(self.c.get("/api/incidents", headers=S.auth(u)))
+        self.assertIn(self.active, seen)
+        self.assertNotIn(self.closed, seen)
+        officer = self.fresh("PNP_OFFICER")
+        self.set_perms(self.dev, officer, ["confirm_dismiss_alerts"])
+        seen = self.ids(self.c.get("/api/incidents?purpose=history", headers=S.auth(officer)))
+        self.assertIn(self.active, seen)
+        self.assertNotIn(self.closed, seen, "the queue must not open the archive")
+
     def test_view_history_grant_and_revoke(self):
         u = self.fresh("PNP_OFFICER")
         h = S.auth(u)
@@ -170,7 +182,7 @@ class PermissionLifecycle(unittest.TestCase):
         h = S.auth(captain)
         self.assertEqual(self.c.get("/api/incidents", headers=h).status_code, 200)
         r = self.c.post(f"/api/devteam/users/{captain['id']}/override_permissions", headers=S.auth(self.dev),
-                        json={"confirm_password": S.PASSWORD, "permissions": {"confirm_dismiss_alerts": True}})
+                        json={"confirm_password": S.PASSWORD, "permissions": {"manage_notify_targets": True}})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(self.c.get("/api/incidents", headers=h).status_code, 403)
         self.assertTrue(S.audit_rows("user.permissions_overridden", captain["id"]))
@@ -198,7 +210,7 @@ class PermissionLifecycle(unittest.TestCase):
 
     def test_admin_created_with_override_gets_only_what_was_ticked(self):
         r, name = self.create_admin(override_permissions=True, confirm_password=S.PASSWORD,
-                                    permissions={"confirm_dismiss_alerts": True, "view_map": False})
+                                    permissions={"manage_notify_targets": True, "view_map": False})
         self.assertEqual(r.status_code, 200, r.text)
         row = S.user_row(name)
         self.assertEqual(row["custom_permissions"], 1)

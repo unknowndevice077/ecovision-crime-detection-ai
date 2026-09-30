@@ -7,6 +7,7 @@ import {
   EmptyPane, FieldInput, InfoRow, PaneHeader, PendingLocation, PendingSignup, SectionLabel, SelectInput, Station,
   TextAreaInput, ageFrom, roleLabel, roleStyle, useAuthedObjectUrl,
 } from './shared';
+import { serverDateTime, serverDay } from '../../../lib/time';
 
 // Mirror backend.py's MIN_DECISION_REASON and MIN_REGISTRATION_REASON.
 const MIN_REJECT_REASON = 10;
@@ -91,7 +92,7 @@ function fromSignup(s: PendingSignup, status: 'pending' | 'rejected'): Applicati
   };
 }
 
-const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : null);
+const when = (iso: string | null) => serverDateTime(iso) || null;
 
 export default function ApprovalsPane({
   apiUrl, pendingLocations, pendingSignups, rejectedLocations, rejectedSignups, stations, busyIds, onDecide,
@@ -182,7 +183,7 @@ export default function ApprovalsPane({
                 <div className="shrink-0 text-right">
                   {view === 'pending' ? (
                     <>
-                      <p className="text-[9px] text-[var(--text-3)]">{a.submitted ? new Date(a.submitted).toLocaleDateString() : ''}</p>
+                      <p className="text-[9px] text-[var(--text-3)]">{serverDay(a.submitted)}</p>
                       {(!a.hasDocument || !a.hasFacePhoto) && (
                         <p className="text-[8px] uppercase tracking-wide text-[var(--warn)]">{!a.hasDocument ? 'no ID' : 'no photo'}</p>
                       )}
@@ -190,7 +191,7 @@ export default function ApprovalsPane({
                   ) : (
                     <>
                       <p className="text-[8px] uppercase tracking-wide text-[var(--critical)]">rejected</p>
-                      <p className="text-[9px] text-[var(--text-3)]">{a.decidedAt ? new Date(a.decidedAt).toLocaleDateString() : ''}</p>
+                      <p className="text-[9px] text-[var(--text-3)]">{serverDay(a.decidedAt)}</p>
                     </>
                   )}
                 </div>

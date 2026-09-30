@@ -335,6 +335,13 @@ class Accounts(Base):
         self.assertEqual(self.c.post(f"/api/admin/users/{staff['id']}/verification", headers=self.h(self.capA),
                                      json={"decision": "maybe"}).status_code, 400)
 
+    def test_me_can_answers_the_ai_core(self):
+        self.assertTrue(self.ok(self.c.get("/api/me/can/manage_cameras", headers=self.h(self.capA)))["allowed"])
+        self.assertFalse(self.ok(self.c.get("/api/me/can/manage_cameras", headers=self.h(self.pnpA)))["allowed"])
+        self.assertFalse(self.ok(self.c.get("/api/me/can/manage_cameras", headers=self.h(self.staffA)))["allowed"])
+        self.assertEqual(self.c.get("/api/me/can/manage_cameras").status_code, 401)
+        self.assertEqual(self.c.get("/api/me/can/fly", headers=self.h(self.capA)).status_code, 404)
+
     def test_me_returns_the_live_account(self):
         staff = S.make_user(self.dev, "BARANGAY_STAFF", barangay_id=self.brgyA, permissions={})
         h = self.h(staff)

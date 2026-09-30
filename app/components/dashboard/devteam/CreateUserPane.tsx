@@ -339,7 +339,7 @@ export default function CreateUserPane({
           <div className="bg-[var(--panel)] border border-[var(--line)] w-full max-w-md max-h-[88vh] overflow-y-auto custom-scrollbar font-mono">
             <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--panel-2)]">
               <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">New custom role</span>
-              <button onClick={() => setAddRoleOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
+              <button title="Close" aria-label="Close" onClick={() => setAddRoleOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
             <div className="p-5">
               <RoleEditor

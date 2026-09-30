@@ -262,7 +262,7 @@ export default function PermissionTree({
               <span className="flex items-center gap-2 text-[10px] tracking-[0.15em] uppercase text-[var(--warn)]">
                 <AlertTriangle size={13} /> Access to every camera
               </span>
-              <button onClick={() => setConfirmKey(null)}><X size={14} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
+              <button title="Close" aria-label="Close" onClick={() => setConfirmKey(null)}><X size={14} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
             <div className="p-4 space-y-3">
               <p className="text-[11px] leading-relaxed text-[var(--text)]">

@@ -79,7 +79,7 @@ start_parent_watchdog()
 # 0. DEPENDENCY CHECK
 # ──────────────────────────────────────────────────────────────────────────────
 try:
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Header, HTTPException
     from fastapi.responses import StreamingResponse
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
@@ -1495,16 +1495,35 @@ def _switch_source(new_source):
             "is_network": _is_network_source(camera_source)}
 
 
+def _require_camera_manager(authorization: Optional[str]):
+    """Switching the source changes what the detector watches for everyone,
+    so it takes manage_cameras -- checked by the backend, which owns the
+    accounts. Both switch routes used to accept any caller, and the control
+    showed on every account's Live Monitor."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Sign in to change the camera source")
+    try:
+        r = requests.get(f"{sys_config['networking']['api_url'].rstrip('/')}/api/me/can/manage_cameras",
+                         headers={"Authorization": authorization}, timeout=3.0)
+    except requests.RequestException:
+        raise HTTPException(status_code=503, detail="Backend unreachable -- can't check your permission")
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="Session expired -- sign in again")
+    if not (r.ok and r.json().get("allowed")):
+        raise HTTPException(status_code=403, detail="Changing the camera source needs Manage Cameras")
+
+
 @stream_app.post("/set_camera_index")
-def set_camera_index(payload: CameraIndexRequest):
+def set_camera_index(payload: CameraIndexRequest, authorization: Optional[str] = Header(None)):
     """Lets the Monitor view's camera-index picker swap the live capture
     device (e.g. OBS Virtual Camera vs. a webcam) without restarting the
     whole AI process."""
+    _require_camera_manager(authorization)
     return _switch_source(payload.index)
 
 
 @stream_app.post("/set_camera_source")
-def set_camera_source(payload: CameraSourceRequest):
+def set_camera_source(payload: CameraSourceRequest, authorization: Optional[str] = Header(None)):
     """Points the detector at an arbitrary source: a local index ("0"), or a
     network stream ("rtsp://user:pass@10.0.0.12:554/stream1", an HTTP MJPEG
     URL, or a file path for replay).
@@ -1512,6 +1531,7 @@ def set_camera_source(payload: CameraSourceRequest):
     This is what lets the system adopt a barangay's existing IP cameras
     instead of requiring the hardware we tested with -- RTSP is the common
     denominator across effectively every CCTV vendor."""
+    _require_camera_manager(authorization)
     return _switch_source(payload.source)
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -444,7 +444,7 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
                     : 'PNP accounts are scoped to a station, so it has to exist before its commander or officers.'}
                 </p>
               </div>
-              <button onClick={() => setStationModalOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
+              <button title="Close" aria-label="Close" onClick={() => setStationModalOpen(false)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
             <div className="p-5 space-y-3">
               <FieldInput label="Station name *" value={stationForm.name} onChange={v => setStationForm({ ...stationForm, name: v })} placeholder="e.g. Ormoc City Police Station 1" />
@@ -485,7 +485,7 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
                 <span className="text-[11px] tracking-[0.15em] uppercase text-[var(--text)]">Register a barangay</span>
                 <p className="text-[9px] text-[var(--text-3)] mt-1">Covered by <span className="text-[var(--text-2)]">{barangayModalStation.name}</span> from the moment it&apos;s created.</p>
               </div>
-              <button onClick={() => setBarangayModalStation(null)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
+              <button title="Close" aria-label="Close" onClick={() => setBarangayModalStation(null)}><X size={15} className="text-[var(--text-2)] hover:text-[var(--text)]" /></button>
             </div>
             <div className="p-5 space-y-3">
               <div className="grid grid-cols-2 gap-3">

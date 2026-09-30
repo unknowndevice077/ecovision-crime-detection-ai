@@ -18,6 +18,7 @@ import { createPortal } from 'react-dom';
 import { Video, X } from 'lucide-react';
 import { SystemClockText, SystemDateText } from './SystemTime';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
+import { usePermissions } from '../../hooks/usePermissions';
 
 export function gridColsFor(count: number) {
     if (count <= 1) return 'grid-cols-1';
@@ -276,6 +277,7 @@ export function IncidentRow({ alert, onConfirm, onDismiss, cameras }: any) {
    "live" means whatever that one camera currently sees, and is labelled
    that way rather than implied to be a dedicated per-camera stream. */
 function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss }: any) {
+    const canDecide = usePermissions().can('confirm_dismiss_alerts');
     const { aiUrl } = useRuntimeConfig();
     const [liveBroken, setLiveBroken] = useState(false);
 
@@ -373,7 +375,15 @@ function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss 
                     </figure>
                 </div>
 
-                <div className="shrink-0 grid grid-cols-2 gap-1.5 p-2 pt-0">
+                {/* Deciding takes confirm_dismiss_alerts (backend
+                    update_incident_status); a map-only account used to get
+                    both buttons and a 403 after the alert had already been
+                    dropped from its queue. */}
+                {!canDecide ? (
+                    <p className="shrink-0 px-3 pb-3 text-[10px] text-center" style={{ color: 'var(--text-3)' }}>
+                        You can view this alert but not confirm or dismiss it.
+                    </p>
+                ) : <div className="shrink-0 grid grid-cols-2 gap-1.5 p-2 pt-0">
                     <button
                         onClick={onConfirm}
                         aria-label={`Confirm ${alert.type} at ${cameraName}`}
@@ -390,7 +400,7 @@ function IncidentReviewModal({ alert, cameraName, onClose, onConfirm, onDismiss 
                     >
                         Dismiss
                     </button>
-                </div>
+                </div>}
             </div>
         </div>,
         document.body

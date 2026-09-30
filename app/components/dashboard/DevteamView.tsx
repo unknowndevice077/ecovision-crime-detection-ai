@@ -12,7 +12,7 @@ import { useLiveChannel, useWebSocketContext } from '../../context/WebSocketCont
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import {
   DEFAULT_ROLE_STYLE, ROLE_STYLES, CameraRow, CustomRole, EmptyPane, InfoRow, ManagedUser, PaneHeader,
-  PendingLocation, PendingSignup, Station, authHeaders,
+  PendingLocation, PendingSignup, Station, applicationStatusLabel, authHeaders,
 } from './devteam/shared';
 import ManageUsersPane from './devteam/ManageUsersPane';
 import CreateUserPane from './devteam/CreateUserPane';
@@ -20,6 +20,9 @@ import ApprovalsPane, { ApplicationAction, ApplicationTarget } from './devteam/A
 import StationsPane from './devteam/StationsPane';
 import RolesPane from './devteam/RolesPane';
 import DetectionQualityPanel from './devteam/DetectionQualityPanel';
+import { serverDateTime } from '../../lib/time';
+import { maskStreamUrl } from '../../lib/streams';
+import ThemeToggle from '../ThemeToggle';
 
 // Split 2026-09-23 (explicit teacher requirement: separate configuration/
 // CRUD from monitoring in the DevTeam console). Monitoring is read-only --
@@ -610,9 +613,12 @@ export default function DevteamView() {
       return seatUsers.some(u => u.username.toLowerCase().includes(q));
     };
 
-    // Rejected applications live in Approvals > Rejected, not in the directory.
+    // Only approved barangays are places in the directory. Pending and
+    // rejected ones are applications and live in Approvals -- a pending one
+    // used to show here with its applicant labelled ADMIN and a prompt to
+    // assign it a station, which the Stations tab (rightly) refuses.
     const locations: LocationEntry[] = allLocations
-      .filter(loc => loc.status !== 'rejected')
+      .filter(loc => (loc.status || 'approved') === 'approved')
       .map(loc => {
         const barangayAdmins = users.filter(u => u.role === 'BARANGAY_ADMIN' && u.barangay_id === loc.id);
         const barangayStaff = users.filter(u => barangayAdmins.some(a => a.id === u.parent_admin_id));
@@ -743,15 +749,19 @@ export default function DevteamView() {
       if (!map.has(key)) map.set(key, { cameras: [] });
       map.get(key)!.cameras.push(cam);
     });
+    // Applications (pending/rejected barangays) aren't places yet: listed
+    // only if they somehow already have cameras, never as empty groups.
+    const approved = new Set(allLocations.filter(l => (l.status || 'approved') === 'approved').map(l => l.id));
     locationPairs.forEach(p => {
       const key = p.loc || '—';
+      if (!approved.has(key) && !map.has(key)) return;
       const entry = map.get(key) || { cameras: [] };
       entry.precinct = p.precinct;
       entry.barangay = p.barangay;
       map.set(key, entry);
     });
     return Array.from(map.entries()).map(([loc, v]) => ({ loc, ...v }));
-  }, [cameras, locationPairs]);
+  }, [cameras, locationPairs, allLocations]);
 
   // Monitoring "Users" tab (read-only). Editing lives in ManageUsersPane.
   const userOrgName = (u: ManagedUser) => {
@@ -786,10 +796,13 @@ export default function DevteamView() {
           {(u.role === 'PNP_ADMIN' || u.role === 'BARANGAY_ADMIN') && u.custom_permissions && (
             <span className="ml-1.5 text-[8px] tracking-[0.1em] uppercase" style={{ color: 'var(--accent)' }}>· custom perms</span>
           )}
+          {applicationStatusLabel(u) && (
+            <span className="ml-1.5 text-[8px] tracking-[0.1em] uppercase" style={{ color: applicationStatusLabel(u)!.color }}>· {applicationStatusLabel(u)!.text}</span>
+          )}
         </p>
         <p className="text-[10px] text-[var(--text-2)] truncate flex-1 min-w-0">{userOrgName(u)}</p>
         <p className="text-[9px] shrink-0" style={{ color: u.last_login ? 'var(--text-2)' : 'var(--text-3)', width: '140px' }}>
-          {u.last_login ? new Date(u.last_login).toLocaleString() : 'Never logged in'}
+          {serverDateTime(u.last_login, 'Never logged in')}
         </p>
         {/* Identity verification (#8, 2026-09-23) -- pending is the only
             state DevTeam needs to act on here; unverified (never
@@ -800,8 +813,8 @@ export default function DevteamView() {
           {u.role !== 'DEVTEAM' && u.verification_status === 'pending' ? (
             <>
               <button onClick={() => viewVerificationDocument(u.id)} className="text-[9px] underline text-[var(--text-2)] hover:text-[var(--accent)] transition-colors">View ID</button>
-              <button onClick={() => reviewVerification(u.id, 'verified')} className="p-1 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={12} /></button>
-              <button onClick={() => reviewVerification(u.id, 'rejected')} className="p-1 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={12} /></button>
+              <button title="Mark ID as verified" aria-label="Mark ID as verified" onClick={() => reviewVerification(u.id, 'verified')} className="p-1 text-[var(--text-2)] hover:text-[var(--ok)] transition-colors"><ShieldCheck size={12} /></button>
+              <button title="Reject this ID" aria-label="Reject this ID" onClick={() => reviewVerification(u.id, 'rejected')} className="p-1 text-[var(--text-2)] hover:text-[var(--critical)] transition-colors"><ShieldX size={12} /></button>
             </>
           ) : u.role !== 'DEVTEAM' ? (
             <span
@@ -856,6 +869,9 @@ export default function DevteamView() {
           <div className={`flex items-center gap-1.5 text-[9px] tracking-[0.15em] uppercase ${connected ? 'text-[var(--ok)]' : 'text-[var(--critical)]'}`}>
             {connected ? <Wifi size={11} /> : <WifiOff size={11} />} {connected ? 'Synced' : 'Reconnecting'}
           </div>
+          {/* The console covers the whole dashboard, so DevTeam had no way
+              to reach the theme switch in its header. */}
+          <ThemeToggle />
           <button onClick={handleLogout} className="flex items-center gap-1.5 text-[9px] tracking-[0.15em] uppercase text-[var(--text-2)] hover:text-[var(--critical)] transition-colors">
             <LogOut size={12} /> Sign out
           </button>
@@ -1190,7 +1206,7 @@ export default function DevteamView() {
                     <Video size={12} className={cam.status === 'online' ? 'text-[var(--ok)]' : 'text-[var(--critical)]'} />
                     <div className="min-w-0 flex-1">
                       <p className="text-[11px] text-[var(--text)] truncate">{cam.name}</p>
-                      <p className="text-[9px] text-[var(--text-2)] font-mono truncate">{cam.url}</p>
+                      <p className="text-[9px] text-[var(--text-2)] font-mono truncate">{maskStreamUrl(cam.url)}</p>
                     </div>
                     <span className={`text-[8px] font-bold uppercase tracking-wide px-1.5 py-0.5 border ${cam.status === 'online' ? 'border-[var(--ok)]/25 text-[var(--ok)]' : 'border-[var(--critical)]/25 text-[var(--critical)]'}`}>
                       {cam.status}
@@ -1252,7 +1268,7 @@ export default function DevteamView() {
                       <p className="text-[11px] text-[var(--text)] truncate">
                         <span className={tone}>{entry.action}</span> <span className="text-[var(--text-2)]">{label}</span>
                       </p>
-                      <p className="text-[9px] text-[var(--text-3)] truncate">by {entry.actor_username} · {new Date(entry.created_at).toLocaleString()}</p>
+                      <p className="text-[9px] text-[var(--text-3)] truncate">by {entry.actor_username} · {serverDateTime(entry.created_at)}</p>
                     </div>
                   </button>
                 );
@@ -1281,7 +1297,7 @@ export default function DevteamView() {
                     <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                       <InfoRow label="Target" value={`${entry.target_type} ${entry.target_id}`} />
                       <InfoRow label="By" value={entry.actor_username} />
-                      <InfoRow label="When" value={new Date(entry.created_at).toLocaleString()} />
+                      <InfoRow label="When" value={serverDateTime(entry.created_at)} />
                       <InfoRow label="Action" value={entry.action} />
                     </div>
                     {entry.target_snapshot?.reason && (

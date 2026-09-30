@@ -24,10 +24,14 @@ export function SystemClockText() {
     return <>{time}</>;
 }
 
+// Local date (en-CA gives YYYY-MM-DD). This used toISOString(), i.e. the UTC
+// date, next to a local clock: from midnight to 8 AM in Manila the header --
+// and the date stamped on evidence frames in the incident review -- showed
+// yesterday.
 export function SystemDateText() {
-    const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+    const [date, setDate] = useState(() => new Date().toLocaleDateString('en-CA'));
     useEffect(() => {
-        const t = setInterval(() => setDate(new Date().toISOString().slice(0, 10)), 60000);
+        const t = setInterval(() => setDate(new Date().toLocaleDateString('en-CA')), 60000);
         return () => clearInterval(t);
     }, []);
     return <>{date}</>;

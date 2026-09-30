@@ -659,7 +659,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
           style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
         >
           <span>{actionError}</span>
-          <button onClick={() => setActionError('')} className="shrink-0 hover:opacity-70"><X size={11} /></button>
+          <button title="Close" aria-label="Close" onClick={() => setActionError('')} className="shrink-0 hover:opacity-70"><X size={11} /></button>
         </div>
       )}
 

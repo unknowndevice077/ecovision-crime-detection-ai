@@ -2251,14 +2251,20 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     # one endpoint would keep returning 200 with full incident data anyway.
     # Skip the bypass for exactly the admins the override applies to, same
     # condition require_permission() itself uses.
-    if role != "DEVTEAM" and not (role in ADMIN_ROLES and not payload.get("custom_permissions")):
-        cursor.execute(
-            "SELECT 1 FROM user_permissions WHERE user_id = ? AND permission_key IN ('view_map','view_history')",
-            (payload["id"],),
-        )
-        if not cursor.fetchone():
-            conn.close()
-            raise HTTPException(status_code=403, detail="Missing permission: view_map or view_history")
+    #
+    # 2026-10-01: _holds_permission applies exactly that rule (and the
+    # police-only ban), so it replaces the hand-rolled query. It also admits
+    # confirm_dismiss_alerts on its own, for the Live Monitor's incident
+    # queue: an account allowed to confirm/dismiss alerts couldn't see a
+    # single alert to act on without also holding the map. Such an account
+    # gets the active queue only -- no map history, no archive.
+    can_map = _holds_permission(cursor, payload, "view_map")
+    can_history = _holds_permission(cursor, payload, "view_history")
+    can_queue = _holds_permission(cursor, payload, "confirm_dismiss_alerts")
+    if not (can_map or can_history or can_queue):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Missing permission: view_map, view_history or confirm_dismiss_alerts")
+    queue_only = not (can_map or can_history)
 
     # Visibility and redaction are two SEPARATE decisions and were previously
     # tangled into one if/else:
@@ -2298,7 +2304,7 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     # incidents (their live queue/map), never the historical record,
     # regardless of which permission key let them into this endpoint at
     # all or how old that grant is.
-    if role in BARANGAY_SIDE_ROLES:
+    if role in BARANGAY_SIDE_ROLES or queue_only:
         where_clauses.append("status = 'Active'")
     extra_where = " AND ".join(where_clauses)
     extra_params = where_params
@@ -2317,7 +2323,9 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     # permission's narrowing -- falling back to whichever of the two it
     # actually holds, so asking for the other can never widen anything.
     scope_key = "view_history" if purpose == "history" else "view_map"
-    if not _holds_permission(cursor, payload, scope_key):
+    if queue_only:
+        scope_key = "confirm_dismiss_alerts"
+    elif not _holds_permission(cursor, payload, scope_key):
         scope_key = "view_map" if scope_key == "view_history" else "view_history"
     allowed_types = _scoped_resource_ids(cursor, payload, scope_key, "crime_type")
     allowed_cams = _scoped_resource_ids(cursor, payload, "view_map", "camera") if scope_key == "view_map" else None
@@ -3891,6 +3899,21 @@ async def get_me(authorization: Optional[str] = Header(None)):
         return {"user": _row_to_user_dict(cursor, row)}
     finally:
         conn.close()
+
+@app.get("/api/me/can/{permission_key}")
+async def me_can(permission_key: str, authorization: Optional[str] = Header(None)):
+    """Whether the signed-in account holds a permission. For the AI core,
+    which has no user store of its own: it forwards the dashboard's
+    Authorization header here before switching what the detector watches."""
+    payload = require_auth(authorization)
+    if permission_key not in VALID_PERMISSION_KEYS:
+        raise HTTPException(status_code=404, detail=f"Unknown permission '{permission_key}'")
+    conn = get_conn()
+    try:
+        return {"allowed": _holds_permission(conn.cursor(), payload, permission_key)}
+    finally:
+        conn.close()
+
 
 # --- DEVTEAM: POLICE STATIONS & JURISDICTIONS ---
 # A station is an organizational unit that COVERS barangays. It owns no

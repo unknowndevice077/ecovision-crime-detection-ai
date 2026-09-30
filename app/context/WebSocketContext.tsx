@@ -57,7 +57,19 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     // The backend only accepts signed-in sockets (a browser WebSocket can't
     // send an Authorization header, so the token rides in the query).
     const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
-    const wsUrl = apiUrl.replace(/^http/, "ws") + "/ws" + (token ? `?token=${encodeURIComponent(token)}` : "");
+    if (!token) {
+      // Not signed in yet (the login page mounts this provider too): the
+      // backend would refuse the socket, so wait for a token instead of
+      // logging a failed handshake on every visit.
+      wsRef.current = null;
+      setConnected(false);
+      // Short: a login writes the token and navigates straight away, and
+      // anything broadcast before this socket opens (say, an admin changing
+      // this account's permissions) is only caught by the 60s poll.
+      reconnectTimer.current = setTimeout(connect, 500);
+      return;
+    }
+    const wsUrl = apiUrl.replace(/^http/, "ws") + "/ws?token=" + encodeURIComponent(token);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
