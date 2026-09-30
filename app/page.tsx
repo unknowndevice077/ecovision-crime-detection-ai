@@ -1043,7 +1043,7 @@ const fetchCameras = async (userObj: any) => {
                         className="data text-[10px] truncate px-2 py-1.5 border"
                         style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text-2)' }}
                       >
-                        {cam.url}
+                        {cam.url ?? 'Hidden — needs Manage Cameras'}
                       </p>
                     </div>
                   ))}

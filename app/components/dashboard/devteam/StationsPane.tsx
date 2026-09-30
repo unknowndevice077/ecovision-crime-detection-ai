@@ -260,6 +260,14 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
   };
 
   const draft = selected ? (jurisDraft[selected.id] ?? selected.barangay_ids) : [];
+  // Only approved barangays can be covered. A pending one this station
+  // already covers (linked before that rule) is listed so it can be
+  // unticked; rejected ones are in Approvals > Rejected, never here.
+  const coverable = selected
+    ? allLocations.filter(l => (l.status || 'approved') === 'approved'
+        || (l.status === 'pending' && selected.barangay_ids.includes(l.id)))
+    : [];
+  const awaitingReview = allLocations.filter(l => l.status === 'pending').length;
   const dirty = !!selected && draft.slice().sort().join(',') !== selected.barangay_ids.slice().sort().join(',');
   const staff = selected ? users.filter(u => u.station_id === selected.id) : [];
 
@@ -370,24 +378,30 @@ export default function StationsPane({ apiUrl, stations, allLocations, users, fl
 
               <div>
                 <SectionLabel>Jurisdiction — barangays this station can see</SectionLabel>
-                {allLocations.length === 0 ? (
-                  <p className="text-[10px] text-[var(--text-3)]">No barangays registered yet.</p>
+                {coverable.length === 0 ? (
+                  <p className="text-[10px] text-[var(--text-3)]">No approved barangays yet.</p>
                 ) : (
                   <div className="border border-[var(--panel-2)] divide-y divide-[var(--panel-2)] max-h-72 overflow-y-auto custom-scrollbar">
-                    {allLocations.map(loc => (
+                    {coverable.map(loc => (
                       <label key={loc.id} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-[var(--panel)]" title={loc.description || undefined}>
                         <input
                           type="checkbox"
                           checked={draft.includes(loc.id)}
+                          disabled={loc.status === 'pending' && !draft.includes(loc.id)}
                           onChange={() => toggleJurisdiction(selected, loc.id)}
                           className="w-3.5 h-3.5 accent-[var(--accent)] shrink-0"
                         />
                         <span className="text-[10px] text-[var(--text)] truncate">{loc.name || loc.id}</span>
                         {loc.city_municipality && <span className="text-[9px] text-[var(--text-3)] truncate">{loc.city_municipality}</span>}
-                        {loc.status !== 'approved' && <span className="text-[9px] text-[var(--warn)] ml-auto shrink-0">{loc.status}</span>}
+                        {loc.status === 'pending' && <span className="text-[9px] text-[var(--warn)] ml-auto shrink-0" title="Awaiting a decision in Approvals">pending review</span>}
                       </label>
                     ))}
                   </div>
+                )}
+                {awaitingReview > 0 && (
+                  <p className="text-[9px] text-[var(--text-3)] mt-1.5">
+                    {awaitingReview} barangay application{awaitingReview === 1 ? ' is' : 's are'} waiting in Approvals; approve one to make it coverable here.
+                  </p>
                 )}
                 {dirty && (
                   <div className="flex justify-end gap-2 mt-2">

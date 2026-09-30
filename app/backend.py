@@ -938,6 +938,41 @@ def _migrate_schema(conn, cursor):
         conn.rollback()
         print(f"⚠️  [DATABASE] Could not relax custom_roles.org_type: {e}")
 
+    # Application decisions (2026-09-30): who decided, when, and why, kept on
+    # the application itself so the Rejected list can show it without
+    # digging through the audit log. barangays.approved_by/approved_at
+    # already record the decider for either outcome.
+    _ensure_column(conn, cursor, "barangays", "decision_reason", "TEXT")
+    _ensure_column(conn, cursor, "users", "signup_decided_by", "INTEGER")
+    _ensure_column(conn, cursor, "users", "signup_decided_at", "TEXT")
+    _ensure_column(conn, cursor, "users", "signup_decision_reason", "TEXT")
+
+    # BUG FOUND 2026-09-30: the one-admin-per-unit indexes counted every
+    # admin row ever written, so soft-deleting a captain never freed the
+    # seat (every "deleted_at IS NULL" pre-check in the create paths passed,
+    # then the INSERT hit this index), and a rejected applicant held their
+    # barangay or station forever. A seat is held only by an active,
+    # not-rejected admin; reopening a rejected application re-checks it.
+    for name, column, role in (("idx_one_barangay_admin_per_barangay", "barangay_id", "BARANGAY_ADMIN"),
+                               ("idx_one_pnp_admin_per_station", "station_id", "PNP_ADMIN")):
+        try:
+            if DB_KIND == "postgres":
+                cursor.execute("SELECT indexdef AS d FROM pg_indexes WHERE indexname = ?", (name,))
+            else:
+                cursor.execute("SELECT sql AS d FROM sqlite_master WHERE type = 'index' AND name = ?", (name,))
+            row = cursor.fetchone()
+            if row and "signup_status" in (row["d"] or ""):
+                continue
+            cursor.execute(f"DROP INDEX IF EXISTS {name}")
+            cursor.execute(
+                f"CREATE UNIQUE INDEX {name} ON users({column}) WHERE role = '{role}' "
+                "AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') <> 'rejected'")
+            conn.commit()
+            print(f"💾 [DATABASE] Migrated: {name} counts only active, non-rejected admins")
+        except Exception as e:
+            conn.rollback()
+            print(f"⚠️  [DATABASE] Could not rebuild {name}: {e}")
+
 
 # Set per request by audit_every_change() below: a mutable holder so an
 # endpoint's own detailed log_audit() call is visible to the middleware
@@ -1503,6 +1538,7 @@ class ManualClipSchema(BaseModel):
 
 class LocationDecisionSchema(BaseModel):
     reason: Optional[str] = None
+    station_id: Optional[str] = None  # approve only: put the barangay under this station
 
 class RecordNotesSchema(BaseModel):
     notes: str
@@ -1639,9 +1675,12 @@ def _row_to_incident_dict(inc_row, details_row, vis_row) -> dict:
         "camera_id": d.get("camera_id"),
     }
 
-def _row_to_camera_dict(row) -> dict:
+def _row_to_camera_dict(row, include_url: bool = True) -> dict:
+    """include_url=False for anyone who can't manage cameras: a stream URL
+    usually carries the camera's own username and password."""
     d = dict(row)
-    return {"id": d["id"], "name": d["name"], "url": d["url"], "status": d["status"], "barangay_id": d.get("barangay_id")}
+    return {"id": d["id"], "name": d["name"], "url": d["url"] if include_url else None,
+            "status": d["status"], "barangay_id": d.get("barangay_id")}
 
 def _row_to_record_dict(row) -> dict:
     d = dict(row)
@@ -1774,8 +1813,11 @@ async def get_cameras(authorization: Optional[str] = Header(None)):
         if scoped_ids:
             rows = [r for r in rows if r["id"] in scoped_ids]
 
+    # Every account sees its cameras' names (Live Monitor is universal), but
+    # only camera managers get the stream URL -- it holds the credentials.
+    include_url = _holds_permission(cursor, payload, "manage_cameras")
     conn.close()
-    return [_row_to_camera_dict(r) for r in rows]
+    return [_row_to_camera_dict(r, include_url) for r in rows]
 
 def _has_permission(cursor, user_id: int, key: str, role: str) -> bool:
     # BUG FOUND 2026-09-02 (full account/permission sweep, since superseded):
@@ -2897,6 +2939,20 @@ def _upsert_incident_report(cursor, incident_id: str, payload: dict, body: dict,
     return rid
 
 
+def _require_report_reader(cursor, payload: dict, incident_id: str):
+    """Officer reports hold names and narrative, so reading them takes the
+    same access as the incident itself: in jurisdiction, and holding
+    view_history or confirm_dismiss_alerts for this incident's crime type.
+    404 either way, so an outsider can't probe which incident ids exist."""
+    if not _incident_owned_by(cursor, incident_id, payload):
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+    cursor.execute("SELECT type FROM incidents WHERE id = ?", (incident_id,))
+    inc_type = (cursor.fetchone() or {"type": None})["type"]
+    if not any(_holds_permission(cursor, payload, k) and _crime_type_allowed(cursor, payload, k, inc_type)
+               for k in ("confirm_dismiss_alerts", "view_history")):
+        raise HTTPException(status_code=404, detail="Incident not found (or outside your access)")
+
+
 @app.get("/api/incidents/{incident_id}/report_draft")
 async def get_report_draft(incident_id: str, authorization: Optional[str] = Header(None)):
     """The AI's draft for this incident, plus the latest officer report
@@ -2906,13 +2962,7 @@ async def get_report_draft(incident_id: str, authorization: Optional[str] = Head
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        if not _incident_owned_by(cursor, incident_id, payload):
-            raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
-        cursor.execute("SELECT type FROM incidents WHERE id = ?", (incident_id,))
-        inc_type = (cursor.fetchone() or {"type": None})["type"]
-        if not any(_holds_permission(cursor, payload, k) and _crime_type_allowed(cursor, payload, k, inc_type)
-                   for k in ("confirm_dismiss_alerts", "view_history")):
-            raise HTTPException(status_code=404, detail="Incident not found (or outside your access)")
+        _require_report_reader(cursor, payload, incident_id)
         ai = build_ai_report_draft(cursor, incident_id)
         cursor.execute(
             """SELECT r.*, u.username AS reported_by_username
@@ -3033,10 +3083,13 @@ async def list_incident_reports(incident_id: str, authorization: Optional[str] =
     require_role(payload, POLICE_SIDE_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
-    # See _incident_owned_by's BUG FOUND 2026-09-03 comment.
-    if not _incident_owned_by(cursor, incident_id, payload):
+    # Jurisdiction alone used to be enough here, so a PNP officer with no
+    # permissions at all could read every report in the station's area.
+    try:
+        _require_report_reader(cursor, payload, incident_id)
+    except HTTPException:
         conn.close()
-        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        raise
     cursor.execute(
         """SELECT r.*, u.username AS reported_by_username
            FROM incident_reports r JOIN users u ON u.id = r.reported_by
@@ -3053,10 +3106,15 @@ async def add_incident_report(incident_id: str, data: IncidentReportSchema, auth
     require_role(payload, POLICE_SIDE_ROLES)
     conn = get_conn()
     cursor = conn.cursor()
-    # See _incident_owned_by's BUG FOUND 2026-09-03 comment.
-    if not _incident_owned_by(cursor, incident_id, payload):
+    # Filing a report is acting on the alert: same gate as saving a draft.
+    try:
+        require_permission(cursor, payload, "confirm_dismiss_alerts")
+        if not _incident_owned_by(cursor, incident_id, payload):
+            raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        _require_incident_type_access(cursor, payload, incident_id, "confirm_dismiss_alerts")
+    except HTTPException:
         conn.close()
-        raise HTTPException(status_code=404, detail="Incident not found (or outside your jurisdiction)")
+        raise
     report_id = str(uuid.uuid4())
     cursor.execute(
         """INSERT INTO incident_reports
@@ -3506,7 +3564,12 @@ async def signup(request: Request, user: UserSignup):
         else:
             station_id = ""
             cursor.execute("SELECT * FROM barangays WHERE id = ?", (barangay_id,))
-            if not cursor.fetchone():
+            claimed = cursor.fetchone()
+            if claimed and claimed["status"] == "rejected":
+                conn.close()
+                raise HTTPException(status_code=403, detail="This barangay's registration was declined. Contact DevTeam if you believe that's wrong.")
+            new_barangay = not claimed
+            if not claimed:
                 cursor.execute(
                     "INSERT INTO barangays (id, name, status) VALUES (?, ?, 'pending')",
                     (barangay_id, user.barangay_id.strip().title()),
@@ -3516,10 +3579,10 @@ async def signup(request: Request, user: UserSignup):
         # NULL added 2026-09-22 -- a soft-deleted admin's slot must free up
         # for a new signup, same as it did when delete meant delete.
         if is_pnp:
-            cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = ? AND deleted_at IS NULL", (station_id, role))
+            cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = ? AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') <> 'rejected'", (station_id, role))
             dup_msg = "This station already has a PNP Admin account."
         else:
-            cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = ? AND deleted_at IS NULL", (barangay_id, role))
+            cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = ? AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') <> 'rejected'", (barangay_id, role))
             dup_msg = "This location already has a Barangay Admin account."
         if cursor.fetchone():
             conn.close()
@@ -3540,6 +3603,12 @@ async def signup(request: Request, user: UserSignup):
              *[profile.get(f) for f in PROFILE_FIELDS]),
         )
         new_user_id = cursor.lastrowid
+        # The applicant is the actor: there is no session yet, and the
+        # catch-all entry would only say "anonymous" with no target.
+        log_audit(cursor, {"id": new_user_id, "username": user.username}, "user.signup_submitted", "user", new_user_id,
+                  snapshot={"role": role, "station_id": station_id or None, "barangay_id": barangay_id or None,
+                            "new_barangay": (not is_pnp) and new_barangay, "full_name": profile.get("full_name"),
+                            "position": profile.get("position")})
 
         if is_pnp:
             conn.commit()
@@ -3679,7 +3748,9 @@ async def login(request: Request, creds: UserLogin):
             conn.close()
             raise HTTPException(
                 status_code=403,
-                detail="Your location is still pending DevTeam approval. Please check back later.",
+                detail="Your barangay's registration was not approved. Contact DevTeam for details."
+                       if loc and loc["status"] == "rejected" else
+                       "Your location is still pending DevTeam approval. Please check back later.",
             )
 
     # Stamped here, not on every authenticated request -- last_login answers
@@ -3905,12 +3976,22 @@ async def set_station_jurisdiction(station_id: str, data: StationJurisdictionSch
     wanted = [b.strip().lower() for b in data.barangay_ids if b and b.strip()]
     if wanted:
         placeholders = ",".join("?" for _ in wanted)
-        cursor.execute(f"SELECT id FROM barangays WHERE LOWER(id) IN ({placeholders})", tuple(wanted))
-        known = {r["id"].lower() for r in cursor.fetchall()}
+        cursor.execute(f"SELECT id, name, status FROM barangays WHERE LOWER(id) IN ({placeholders})", tuple(wanted))
+        known = {r["id"].lower(): dict(r) for r in cursor.fetchall()}
         unknown = [b for b in wanted if b not in known]
         if unknown:
             conn.close()
             raise HTTPException(status_code=400, detail=f"Unknown barangay ids: {', '.join(unknown)}")
+        # Only an approved barangay can be covered. A pending one linked
+        # before this rule existed may stay until it's decided; a rejected
+        # one never (rejecting unlinks it everywhere).
+        cursor.execute("SELECT barangay_id FROM station_barangays WHERE station_id = ?", (station_id,))
+        linked = {r["barangay_id"].lower() for r in cursor.fetchall()}
+        refused = [f"{known[b]['name']} ({known[b]['status']})" for b in wanted
+                   if known[b]["status"] == "rejected" or (known[b]["status"] == "pending" and b not in linked)]
+        if refused:
+            conn.close()
+            raise HTTPException(status_code=409, detail=f"Only approved barangays can be in a jurisdiction: {', '.join(refused)}")
 
     try:
         cursor.execute("SELECT barangay_id FROM station_barangays WHERE station_id = ?", (station_id,))
@@ -3970,7 +4051,6 @@ async def create_barangay_for_station(station_id: str, body: StationBarangayCrea
         details["psgc_code"] = psgc
         if not details["city_municipality"]:
             raise HTTPException(status_code=400, detail="City / municipality is required")
-        set_clause = ", ".join(f"{f} = ?" for f in BARANGAY_DETAIL_FIELDS)
         reason = _require_registration_authority(cursor, payload, body.reason, body.confirm_password)
         if psgc:
             cursor.execute("SELECT name FROM barangays WHERE psgc_code = ? AND id <> ?", (psgc, barangay_id))
@@ -3985,13 +4065,10 @@ async def create_barangay_for_station(station_id: str, body: StationBarangayCrea
                 raise HTTPException(
                     status_code=409,
                     detail=f'Barangay "{name}" is already registered -- tick it in this station\'s jurisdiction list instead.')
-            # A pending/rejected self-signup location: registering it here
-            # is DevTeam vouching for it, so approve and fill in its record.
-            cursor.execute(
-                f"UPDATE barangays SET name = ?, lat = ?, lng = ?, {set_clause}, "
-                "status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
-                (name, body.lat, body.lng, *[details[f] for f in BARANGAY_DETAIL_FIELDS], payload["id"], barangay_id),
-            )
+            # Registering over an application used to approve it silently,
+            # reversing a rejection with no reason on record. The decision
+            # belongs in Approvals.
+            _usable_barangay(cursor, barangay_id, "registering it")
         else:
             cursor.execute(
                 f"INSERT INTO barangays (id, name, lat, lng, {', '.join(BARANGAY_DETAIL_FIELDS)}, status, approved_by, approved_at) "
@@ -4038,14 +4115,108 @@ async def delete_station(station_id: str, authorization: Optional[str] = Header(
     return {"status": "deleted", "id": station_id}
 
 
-# --- DEVTEAM: LOCATION APPROVAL ---
+# --- DEVTEAM: APPLICATIONS (self-signup admins and the barangays they claim) ---
+#
+# Every application moves through one small state machine:
+#
+#     pending --approve--> approved
+#     pending --reject---> rejected --reopen--> pending
+#
+# Only a pending application can be decided, so a double click, a stale
+# browser tab or a replayed request can't flip a decision after the fact.
+# A decision is never reversed in place: a rejected application goes back to
+# pending (with a written reason and a fresh DevTeam password, the same bar
+# as registering a jurisdiction) and is then decided again, so the audit log
+# holds the whole history. An approved application isn't reopened -- that
+# account is managed from Manage Users like any other.
+#
+# There are two kinds of application. A barangay applicant claims a
+# barangay that isn't approved yet: the application is the barangay row, and
+# deciding it decides the applicant's account with it. A PNP applicant (or a
+# barangay applicant for a barangay that is already approved) has only an
+# account to decide, keyed by user id.
+#
+# Rejected barangays are out of circulation: they can't be in any station's
+# jurisdiction, get new accounts, or be registered over. Rejecting one drops
+# it from every jurisdiction it was in; the audit entry keeps the list.
+
+MIN_DECISION_REASON = 10
+
+
+class ApplicationReopenSchema(BaseModel):
+    reason: Optional[str] = None
+    confirm_password: Optional[str] = None
+
+
+def _decision_reason(data: Optional[LocationDecisionSchema], required: bool) -> Optional[str]:
+    reason = ((data.reason if data else None) or "").strip()
+    if required and len(reason) < MIN_DECISION_REASON:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Give a reason for rejecting (at least {MIN_DECISION_REASON} characters) -- it stays on the application.")
+    return reason or None
+
+
+def _require_state(current: str, wanted: str, what: str = "application"):
+    if current != wanted:
+        raise HTTPException(status_code=409, detail=f"This {what} is {current}, not {wanted} -- reload to see its current state.")
+
+
+def _admin_seat_holder(cursor, role: str, barangay_id: Optional[str], station_id: Optional[str], exclude_id: int):
+    """Username of whoever currently holds this org unit's one admin seat
+    (active and not rejected -- the same rule as the unique index)."""
+    column, value = ("station_id", station_id) if role == "PNP_ADMIN" else ("barangay_id", barangay_id)
+    cursor.execute(
+        f"SELECT username FROM users WHERE {column} = ? AND role = ? AND id <> ? AND deleted_at IS NULL "
+        "AND COALESCE(signup_status, 'approved') <> 'rejected'", (value, role, exclude_id))
+    row = cursor.fetchone()
+    return row["username"] if row else None
+
+
+def _set_signup_decision(cursor, payload: dict, user_id: int, status: str, reason: Optional[str]):
+    if status == "pending":
+        cursor.execute(
+            "UPDATE users SET signup_status = 'pending', signup_decided_by = NULL, signup_decided_at = NULL, "
+            "signup_decision_reason = NULL WHERE id = ?", (user_id,))
+    else:
+        cursor.execute(
+            "UPDATE users SET signup_status = ?, signup_decided_by = ?, signup_decided_at = NOW(), "
+            "signup_decision_reason = ? WHERE id = ?", (status, payload["id"], reason, user_id))
+
+
+def _barangay_application(cursor, barangay_id: str) -> dict:
+    cursor.execute(
+        "SELECT b.*, u.id AS applicant_id, u.signup_status AS applicant_status, u.role AS applicant_role, "
+        "u.deleted_at AS applicant_deleted_at, u.username AS applicant_username "
+        "FROM barangays b LEFT JOIN users u ON u.id = b.requested_by WHERE b.id = ?", (barangay_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return dict(row)
+
+
+def _usable_barangay(cursor, barangay_id: str, purpose: str):
+    """Refuses a barangay that isn't approved, naming where to act on it."""
+    cursor.execute("SELECT name, status FROM barangays WHERE id = ?", (barangay_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail=f"Unknown barangay '{barangay_id}' -- register it from the Stations tab first.")
+    if row["status"] == "pending":
+        raise HTTPException(status_code=409, detail=f"Barangay {row['name']} has an application waiting in Approvals -- decide it there before {purpose}.")
+    if row["status"] == "rejected":
+        raise HTTPException(status_code=409, detail=f"Barangay {row['name']}'s application was rejected. Reopen it from Approvals > Rejected before {purpose}.")
+
+
 @app.get("/api/devteam/locations")
 async def list_locations(authorization: Optional[str] = Header(None), status: Optional[str] = None):
     """Includes the requesting captain's username/role/assignment so DevTeam
     has enough to actually verify the person before approving -- a bare
-    location name + status was not enough to tell who's asking."""
+    location name + status was not enough to tell who's asking. Decided
+    rows also carry who decided, when, and why."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
+    if status and status not in ("pending", "approved", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be pending, approved or rejected")
     conn = get_conn()
     cursor = conn.cursor()
     query = """
@@ -4054,12 +4225,15 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
                u.id_document_path AS requester_has_document, u.face_photo_path AS requester_has_face_photo,
                u.full_name AS requester_full_name, u.birthdate AS requester_birthdate,
                u.home_address AS requester_home_address, u.contact_number AS requester_contact_number,
-               u.position AS requester_position, u.created_at AS requester_created_at
+               u.position AS requester_position, u.created_at AS requester_created_at,
+               u.signup_status AS requester_signup_status, u.deleted_at AS requester_deleted_at,
+               d.username AS decided_by_username, b.approved_at AS decided_at
         FROM barangays b
         LEFT JOIN users u ON u.id = b.requested_by
+        LEFT JOIN users d ON d.id = b.approved_by
     """
     if status:
-        cursor.execute(query + " WHERE b.status = ? ORDER BY b.created_at DESC", (status,))
+        cursor.execute(query + " WHERE b.status = ? ORDER BY COALESCE(b.approved_at, b.created_at) DESC", (status,))
     else:
         cursor.execute(query + " ORDER BY b.created_at DESC")
     rows = [dict(r) for r in cursor.fetchall()]
@@ -4069,62 +4243,113 @@ async def list_locations(authorization: Optional[str] = Header(None), status: Op
         # just "has one been submitted", not a place to leak the path.
         r["requester_has_document"] = bool(r.get("requester_has_document"))
         r["requester_has_face_photo"] = bool(r.get("requester_has_face_photo"))
+        r["requester_deleted"] = bool(r.pop("requester_deleted_at", None))
     conn.close()
     return rows
 
+
 @app.post("/api/devteam/locations/{barangay_id}/approve")
 async def approve_location(barangay_id: str, data: LocationDecisionSchema, authorization: Optional[str] = Header(None)):
+    """Approves the barangay and its applicant together. station_id, when
+    given, puts the barangay in that station's jurisdiction in the same
+    step -- a barangay no station covers is invisible to every PNP account."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
+    reason = _decision_reason(data, required=False)
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
-        (payload["id"], barangay_id),
-    )
-    updated = cursor.rowcount
-    if not updated:
+    try:
+        app_row = _barangay_application(cursor, barangay_id)
+        _require_state(app_row["status"], "pending")
+        station_id = (data.station_id or "").strip().lower() or None
+        if station_id:
+            cursor.execute("SELECT 1 FROM police_stations WHERE id = ?", (station_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=400, detail=f"Unknown station '{station_id}'")
+        cursor.execute(
+            "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW(), decision_reason = ? WHERE id = ?",
+            (payload["id"], reason, barangay_id))
+        if app_row["applicant_id"] and app_row["applicant_status"] == "pending" and not app_row["applicant_deleted_at"]:
+            _set_signup_decision(cursor, payload, app_row["applicant_id"], "approved", reason)
+        if station_id:
+            cursor.execute("SELECT 1 FROM station_barangays WHERE station_id = ? AND barangay_id = ?", (station_id, barangay_id))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO station_barangays (station_id, barangay_id) VALUES (?, ?)", (station_id, barangay_id))
+        cursor.execute("SELECT station_id FROM station_barangays WHERE barangay_id = ?", (barangay_id,))
+        stations = [r["station_id"] for r in cursor.fetchall()]
+        log_audit(cursor, payload, "barangay.approved", "barangay", barangay_id,
+                  snapshot={"name": app_row["name"], "applicant": app_row["applicant_username"],
+                            "reason": reason, "station_id": station_id})
+        conn.commit()
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Location not found")
-    # 2026-09-23 bug fix: approving the LOCATION used to be the only thing
-    # this button did -- the actual login gate is the applicant's own
-    # signup_status (see login()'s comment for why those two had to become
-    # separate things). Flip the requester's account too, in the same
-    # transaction, so this one click still does what it always visually
-    # promised to do.
-    cursor.execute(
-        "UPDATE users SET signup_status = 'approved' WHERE id = (SELECT requested_by FROM barangays WHERE id = ?) AND signup_status = 'pending'",
-        (barangay_id,),
-    )
-    log_audit(cursor, payload, "barangay.approved", "barangay", barangay_id, snapshot={"reason": data.reason})
-    conn.commit()
-    conn.close()
     await manager.broadcast({"channel": "locations", "event": "location_approved", "barangay_id": barangay_id})
-    return {"status": "approved", "barangay_id": barangay_id}
+    return {"status": "approved", "barangay_id": barangay_id, "covered_by": stations}
+
 
 @app.post("/api/devteam/locations/{barangay_id}/reject")
 async def reject_location(barangay_id: str, data: LocationDecisionSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
+    reason = _decision_reason(data, required=True)
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE barangays SET status = 'rejected', approved_by = ?, approved_at = NOW() WHERE id = ?",
-        (payload["id"], barangay_id),
-    )
-    updated = cursor.rowcount
-    if not updated:
+    try:
+        app_row = _barangay_application(cursor, barangay_id)
+        _require_state(app_row["status"], "pending")
+        cursor.execute(
+            "UPDATE barangays SET status = 'rejected', approved_by = ?, approved_at = NOW(), decision_reason = ? WHERE id = ?",
+            (payload["id"], reason, barangay_id))
+        if app_row["applicant_id"] and app_row["applicant_status"] == "pending" and not app_row["applicant_deleted_at"]:
+            _set_signup_decision(cursor, payload, app_row["applicant_id"], "rejected", reason)
+        cursor.execute("SELECT station_id FROM station_barangays WHERE barangay_id = ?", (barangay_id,))
+        dropped = sorted(r["station_id"] for r in cursor.fetchall())
+        cursor.execute("DELETE FROM station_barangays WHERE barangay_id = ?", (barangay_id,))
+        log_audit(cursor, payload, "barangay.rejected", "barangay", barangay_id,
+                  snapshot={"name": app_row["name"], "applicant": app_row["applicant_username"],
+                            "reason": reason, "removed_from_stations": dropped})
+        conn.commit()
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Location not found")
-    cursor.execute(
-        "UPDATE users SET signup_status = 'rejected' WHERE id = (SELECT requested_by FROM barangays WHERE id = ?) AND signup_status = 'pending'",
-        (barangay_id,),
-    )
-    log_audit(cursor, payload, "barangay.rejected", "barangay", barangay_id, snapshot={"reason": data.reason})
-    conn.commit()
-    conn.close()
     await manager.broadcast({"channel": "locations", "event": "location_rejected", "barangay_id": barangay_id})
-    return {"status": "rejected", "barangay_id": barangay_id}
+    return {"status": "rejected", "barangay_id": barangay_id, "removed_from_stations": dropped}
+
+
+@app.post("/api/devteam/locations/{barangay_id}/reopen")
+async def reopen_location(barangay_id: str, data: ApplicationReopenSchema, authorization: Optional[str] = Header(None)):
+    """Rejected -> pending, so the application can be decided again from the
+    normal queue. The previous decision stays in the audit entry."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        app_row = _barangay_application(cursor, barangay_id)
+        _require_state(app_row["status"], "rejected")
+        reason = _require_registration_authority(cursor, payload, data.reason, data.confirm_password)
+        applicant_back = False
+        if app_row["applicant_id"] and app_row["applicant_status"] == "rejected" and not app_row["applicant_deleted_at"]:
+            holder = _admin_seat_holder(cursor, app_row["applicant_role"], barangay_id, None, app_row["applicant_id"])
+            if holder:
+                raise HTTPException(status_code=409, detail=f"'{holder}' now holds this barangay's admin seat, so the old applicant can't be reinstated.")
+            _set_signup_decision(cursor, payload, app_row["applicant_id"], "pending", None)
+            applicant_back = True
+        cursor.execute(
+            "UPDATE barangays SET status = 'pending', approved_by = NULL, approved_at = NULL, decision_reason = NULL WHERE id = ?",
+            (barangay_id,))
+        cursor.execute("SELECT username FROM users WHERE id = ?", (app_row["approved_by"],))
+        decider = cursor.fetchone()
+        log_audit(cursor, payload, "barangay.reopened", "barangay", barangay_id,
+                  snapshot={"name": app_row["name"], "reason": reason, "applicant": app_row["applicant_username"],
+                            "applicant_reinstated": applicant_back,
+                            "previous_decision": {"status": "rejected", "by": decider["username"] if decider else None,
+                                                  "at": app_row["approved_at"], "reason": app_row["decision_reason"]}})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "locations", "event": "location_reopened", "barangay_id": barangay_id})
+    return {"status": "pending", "barangay_id": barangay_id, "applicant_reinstated": applicant_back}
+
 
 # 2026-09-23 bug fix (see login()'s comment for the full report): a
 # self-signup PNP_ADMIN had no equivalent of the barangay flow above at
@@ -4136,82 +4361,134 @@ async def reject_location(barangay_id: str, data: LocationDecisionSchema, author
 # directly on signup_status instead. Generic by user id rather than
 # barangay_id-shaped like the endpoints above, so this covers any
 # self-signup admin account, PNP included.
-@app.get("/api/devteam/pending_signups")
-async def list_pending_signups(authorization: Optional[str] = Header(None)):
-    """PNP applications only -- a pending BARANGAY_ADMIN still shows up in
-    GET /api/devteam/locations?status=pending (unchanged, that flow still
-    creates/owns the barangay row); this is specifically for the kind of
-    self-signup that has no location object of its own to attach to."""
-    payload = require_auth(authorization)
-    require_role(payload, {"DEVTEAM"})
-    conn = get_conn()
-    cursor = conn.cursor()
+def _list_signups(cursor, status: str) -> list:
+    """PNP applications, plus barangay applicants whose barangay is NOT
+    itself in this same state -- a barangay applicant riding on a pending
+    or rejected barangay is listed under that barangay instead."""
     cursor.execute("""
         SELECT u.id, u.username, u.role, u.assignment, u.station_id, u.barangay_id, u.created_at,
                u.verification_status, u.id_document_path, u.face_photo_path,
-               COALESCE(s.name, 'Barangay ' || b.name) AS station_name,
-               u.full_name, u.birthdate, u.home_address, u.contact_number, u.position
+               COALESCE(s.name, 'Barangay ' || b.name) AS station_name, b.status AS barangay_status,
+               u.full_name, u.birthdate, u.home_address, u.contact_number, u.position,
+               u.signup_status, u.signup_decided_at AS decided_at, u.signup_decision_reason AS decision_reason,
+               d.username AS decided_by_username
         FROM users u
         LEFT JOIN police_stations s ON s.id = u.station_id
         LEFT JOIN barangays b ON b.id = u.barangay_id
-        WHERE u.signup_status = 'pending' AND u.deleted_at IS NULL
+        LEFT JOIN users d ON d.id = u.signup_decided_by
+        WHERE u.signup_status = ? AND u.deleted_at IS NULL
           AND (u.role = 'PNP_ADMIN'
-               -- A barangay applicant for an ALREADY-approved barangay
-               -- (e.g. replacing a removed captain) has no pending location
-               -- to show up under, so they're reviewed here instead.
-               OR (u.role = 'BARANGAY_ADMIN' AND COALESCE(b.status, 'approved') <> 'pending'))
-        ORDER BY u.created_at DESC
-    """)
+               OR (u.role = 'BARANGAY_ADMIN' AND COALESCE(b.status, 'approved') <> ?))
+        ORDER BY COALESCE(u.signup_decided_at, u.created_at) DESC
+    """, (status, status))
     rows = [dict(r) for r in cursor.fetchall()]
     for r in rows:
         r["has_document"] = bool(r.pop("id_document_path"))
         r["has_face_photo"] = bool(r.pop("face_photo_path"))
-    conn.close()
     return rows
 
-@app.post("/api/devteam/users/{user_id}/approve_signup")
-async def approve_signup(user_id: int, authorization: Optional[str] = Header(None)):
+
+@app.get("/api/devteam/signups")
+async def list_signups(authorization: Optional[str] = Header(None), status: str = "pending"):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
+    if status not in ("pending", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be pending or rejected")
     conn = get_conn()
-    cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
-        target = cursor.fetchone()
-        if not target:
-            raise HTTPException(status_code=404, detail="User not found")
-        target = dict(target)
-        if target["signup_status"] != "pending":
-            raise HTTPException(status_code=400, detail=f"This application is '{target['signup_status']}', not pending")
-        cursor.execute("UPDATE users SET signup_status = 'approved' WHERE id = ?", (user_id,))
-        log_audit(cursor, payload, "user.signup_approved", "user", str(user_id))
-        conn.commit()
-        await manager.broadcast({"channel": "locations", "event": "signup_approved", "id": user_id})
-        return {"status": "approved"}
+        return _list_signups(conn.cursor(), status)
     finally:
         conn.close()
 
+
+@app.get("/api/devteam/pending_signups")
+async def list_pending_signups(authorization: Optional[str] = Header(None)):
+    """Kept for older frontends; same as /api/devteam/signups?status=pending."""
+    return await list_signups(authorization, "pending")
+
+
+def _signup_application(cursor, user_id: int) -> dict:
+    cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+    target = cursor.fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Application not found")
+    target = dict(target)
+    if target["role"] not in ADMIN_ROLES:
+        raise HTTPException(status_code=400, detail="Only self-signup admin accounts go through Approvals")
+    return target
+
+
+@app.post("/api/devteam/users/{user_id}/approve_signup")
+async def approve_signup(user_id: int, data: Optional[LocationDecisionSchema] = None,
+                         authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    reason = _decision_reason(data, required=False)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        target = _signup_application(cursor, user_id)
+        _require_state(target["signup_status"] or "approved", "pending")
+        if target["role"] == "BARANGAY_ADMIN":
+            # Approving the person onto a barangay nobody approved would give
+            # them a login that the location gate still refuses.
+            _usable_barangay(cursor, target["barangay_id"], "approving its admin")
+        _set_signup_decision(cursor, payload, user_id, "approved", reason)
+        log_audit(cursor, payload, "user.signup_approved", "user", str(user_id),
+                  snapshot={"username": target["username"], "role": target["role"], "reason": reason})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "locations", "event": "signup_approved", "id": user_id})
+    return {"status": "approved"}
+
+
 @app.post("/api/devteam/users/{user_id}/reject_signup")
-async def reject_signup(user_id: int, authorization: Optional[str] = Header(None)):
+async def reject_signup(user_id: int, data: Optional[LocationDecisionSchema] = None,
+                        authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    reason = _decision_reason(data, required=True)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        target = _signup_application(cursor, user_id)
+        _require_state(target["signup_status"] or "approved", "pending")
+        _set_signup_decision(cursor, payload, user_id, "rejected", reason)
+        log_audit(cursor, payload, "user.signup_rejected", "user", str(user_id),
+                  snapshot={"username": target["username"], "role": target["role"], "reason": reason})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "locations", "event": "signup_rejected", "id": user_id})
+    return {"status": "rejected"}
+
+
+@app.post("/api/devteam/users/{user_id}/reopen_signup")
+async def reopen_signup(user_id: int, data: ApplicationReopenSchema, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
     conn = get_conn()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
-        target = cursor.fetchone()
-        if not target:
-            raise HTTPException(status_code=404, detail="User not found")
-        target = dict(target)
-        if target["signup_status"] != "pending":
-            raise HTTPException(status_code=400, detail=f"This application is '{target['signup_status']}', not pending")
-        cursor.execute("UPDATE users SET signup_status = 'rejected' WHERE id = ?", (user_id,))
-        log_audit(cursor, payload, "user.signup_rejected", "user", str(user_id))
+        target = _signup_application(cursor, user_id)
+        _require_state(target["signup_status"] or "approved", "rejected")
+        reason = _require_registration_authority(cursor, payload, data.reason, data.confirm_password)
+        holder = _admin_seat_holder(cursor, target["role"], target["barangay_id"], target["station_id"], user_id)
+        if holder:
+            raise HTTPException(status_code=409, detail=f"'{holder}' now holds this admin seat, so this application can't be reopened.")
+        cursor.execute("SELECT username FROM users WHERE id = ?", (target["signup_decided_by"],))
+        decider = cursor.fetchone()
+        _set_signup_decision(cursor, payload, user_id, "pending", None)
+        log_audit(cursor, payload, "user.signup_reopened", "user", str(user_id),
+                  snapshot={"username": target["username"], "reason": reason,
+                            "previous_decision": {"status": "rejected", "by": decider["username"] if decider else None,
+                                                  "at": target["signup_decided_at"], "reason": target["signup_decision_reason"]}})
         conn.commit()
-        await manager.broadcast({"channel": "locations", "event": "signup_rejected", "id": user_id})
-        return {"status": "rejected"}
     finally:
         conn.close()
+    await manager.broadcast({"channel": "locations", "event": "signup_reopened", "id": user_id})
+    return {"status": "pending"}
 
 # --- ADMIN: MANAGE YOUR OWN USERS ONLY ---
 @app.get("/api/admin/users")
@@ -4363,23 +4640,17 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unknown barangay '{barangay_id}' -- register it from the Stations tab first.")
-            if existing_barangay["status"] != "approved":
-                # BUG FOUND 2026-09-02 (full account sweep): only the brand-new
-                # case was ever promoted to 'approved' -- a barangay_id that
-                # already existed as 'pending' or 'rejected' (an old self-signup
-                # nobody acted on, or one DevTeam explicitly rejected earlier)
-                # kept that status untouched, silently, even though DevTeam
-                # creating an admin account for it here IS the vetting
-                # decision. Login then 403'd with "still pending DevTeam
-                # approval" forever, on a freshly-created account with no error
-                # anywhere pointing at why. Reproduced directly: create a
-                # BARANGAY_ADMIN for a barangay, reject that barangay, create a
-                # second admin for the SAME barangay_id -- login blocked with
-                # no indication the barangay (not the account) was the problem.
-                cursor.execute(
-                    "UPDATE barangays SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ?",
-                    (payload["id"], barangay_id),
-                )
+            # A pending or rejected barangay used to be approved here silently
+            # (2026-09-02: creating an account "was the vetting decision"),
+            # which undid a rejection with no reason on record and stranded
+            # any pending applicant. Since 2026-09-30 that decision is made in
+            # Approvals, and this refuses with a message saying so -- still
+            # never the silent login failure the 09-02 fix was about.
+            try:
+                _usable_barangay(cursor, barangay_id, "creating accounts for it")
+            except HTTPException:
+                conn.close()
+                raise
 
             # BUG FOUND 2026-09-24 (user report): creating a barangay account
             # never connected the barangay to any police station -- that only
@@ -4418,10 +4689,10 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             # isn't one, same as before this feature existed).
             if is_pnp:
                 cursor.execute(
-                    "SELECT id FROM users WHERE station_id = ? AND role = 'PNP_ADMIN' AND deleted_at IS NULL", (station_id,))
+                    "SELECT id FROM users WHERE station_id = ? AND role = 'PNP_ADMIN' AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') = 'approved'", (station_id,))
             else:
                 cursor.execute(
-                    "SELECT id FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN' AND deleted_at IS NULL", (barangay_id,))
+                    "SELECT id FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN' AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') = 'approved'", (barangay_id,))
             existing_admin = cursor.fetchone()
             parent_id = existing_admin["id"] if existing_admin else None
 
@@ -4453,10 +4724,10 @@ async def devteam_create_user(new_user: DevteamCreateUser, authorization: Option
             raise HTTPException(status_code=400, detail=f"Username '{new_user.username}' is already taken.")
         if role in ADMIN_ROLES:
             if is_pnp:
-                cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = 'PNP_ADMIN' AND deleted_at IS NULL", (station_id,))
+                cursor.execute("SELECT 1 FROM users WHERE station_id = ? AND role = 'PNP_ADMIN' AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') <> 'rejected'", (station_id,))
                 dup_detail = "This station already has a PNP Admin account."
             else:
-                cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN' AND deleted_at IS NULL", (barangay_id,))
+                cursor.execute("SELECT 1 FROM users WHERE barangay_id = ? AND role = 'BARANGAY_ADMIN' AND deleted_at IS NULL AND COALESCE(signup_status, 'approved') <> 'rejected'", (barangay_id,))
                 dup_detail = "This barangay already has a Barangay Admin account."
             if cursor.fetchone():
                 conn.close()
@@ -4556,7 +4827,7 @@ async def update_user_permissions(user_id: int, data: PermissionsUpdate, authori
 
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT parent_admin_id FROM users WHERE id = ?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
     target = cursor.fetchone()
     if not target:
         conn.close()
@@ -4564,6 +4835,15 @@ async def update_user_permissions(user_id: int, data: PermissionsUpdate, authori
     if payload["role"] != "DEVTEAM" and target["parent_admin_id"] != payload["id"]:
         conn.close()
         raise HTTPException(status_code=403, detail="You can only edit permissions for your own users")
+    # Unknown keys and keys this account's side can never hold used to be
+    # dropped or stored silently -- the caller saw "updated" either way.
+    try:
+        for key, granted in data.permissions.items():
+            if granted:
+                _check_permission_key_allowed(dict(target), key)
+    except HTTPException:
+        conn.close()
+        raise
 
     cursor.execute("SELECT permission_key FROM user_permissions WHERE user_id = ?", (user_id,))
     perms_before = sorted(r["permission_key"] for r in cursor.fetchall())
@@ -4696,10 +4976,12 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
     # account whose jurisdiction never resolves to anything again.
     if data.barangay_id is not None:
         brgy = data.barangay_id.strip().lower()
-        cursor.execute("SELECT 1 FROM barangays WHERE id = ?", (brgy,))
-        if not cursor.fetchone():
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"Unknown barangay '{brgy}'")
+        if brgy != (target["barangay_id"] or ""):
+            try:
+                _usable_barangay(cursor, brgy, "moving accounts onto it")
+            except HTTPException:
+                conn.close()
+                raise
         fields.append("barangay_id = ?"); values.append(brgy)
     if data.station_id is not None:
         stn = data.station_id.strip().lower()
@@ -5025,6 +5307,23 @@ async def devteam_restore_audit_entry(entry_id: str, authorization: Optional[str
             raise HTTPException(status_code=404, detail="The original row no longer exists -- cannot restore")
         if current["deleted_at"] is None:
             raise HTTPException(status_code=400, detail="This was already restored (or never actually soft-deleted)")
+        if table == "users":
+            # A deleted account's username and admin seat are free for reuse,
+            # so either may have been taken since. Say which, rather than
+            # letting the unique index raise a bare 500.
+            cursor.execute("SELECT * FROM users WHERE id = ?", (entry["target_id"],))
+            u = dict(cursor.fetchone())
+            cursor.execute("SELECT 1 FROM users WHERE username = ? AND id <> ? AND deleted_at IS NULL", (u["username"], u["id"]))
+            if cursor.fetchone():
+                raise HTTPException(status_code=409, detail=f"Username '{u['username']}' now belongs to another account")
+            seat = {"BARANGAY_ADMIN": "barangay_id", "PNP_ADMIN": "station_id"}.get(u["role"])
+            if seat and (u.get("signup_status") or "approved") != "rejected":
+                cursor.execute(
+                    f"SELECT username FROM users WHERE {seat} = ? AND role = ? AND id <> ? AND deleted_at IS NULL "
+                    "AND COALESCE(signup_status, 'approved') <> 'rejected'", (u[seat], u["role"], u["id"]))
+                holder = cursor.fetchone()
+                if holder:
+                    raise HTTPException(status_code=409, detail=f"The {'barangay admin' if seat == 'barangay_id' else 'station admin'} seat is now held by '{holder['username']}'")
 
         cursor.execute(f"UPDATE {table} SET deleted_at = NULL WHERE id = ?", (entry["target_id"],))
         log_audit(cursor, payload, f"{entry['target_type']}.restored", entry["target_type"], entry["target_id"])

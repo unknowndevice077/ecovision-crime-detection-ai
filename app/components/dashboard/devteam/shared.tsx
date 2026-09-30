@@ -82,7 +82,13 @@ export type PendingLocation = {
   requester_contact_number?: string | null;
   requester_position?: string | null;
   requester_created_at?: string | null;
+  requester_signup_status?: string | null;
+  requester_deleted?: boolean;
   created_at: string;
+  // Set once the application is decided (either way).
+  decided_by_username?: string | null;
+  decided_at?: string | null;
+  decision_reason?: string | null;
   psgc_code?: string | null;
   city_municipality?: string | null;
   province?: string | null;
@@ -112,6 +118,11 @@ export type PendingSignup = {
   home_address?: string | null;
   contact_number?: string | null;
   position?: string | null;
+  signup_status?: string;
+  barangay_status?: string | null;
+  decided_by_username?: string | null;
+  decided_at?: string | null;
+  decision_reason?: string | null;
 };
 
 export type Station = {

@@ -16,7 +16,7 @@ import {
 } from './devteam/shared';
 import ManageUsersPane from './devteam/ManageUsersPane';
 import CreateUserPane from './devteam/CreateUserPane';
-import ApprovalsPane from './devteam/ApprovalsPane';
+import ApprovalsPane, { ApplicationAction, ApplicationTarget } from './devteam/ApprovalsPane';
 import StationsPane from './devteam/StationsPane';
 import RolesPane from './devteam/RolesPane';
 import DetectionQualityPanel from './devteam/DetectionQualityPanel';
@@ -126,6 +126,8 @@ export default function DevteamView() {
   const [stations, setStations] = useState<Station[]>([]);
   const [pendingLocations, setPendingLocations] = useState<PendingLocation[]>([]);
   const [pendingSignups, setPendingSignups] = useState<PendingSignup[]>([]);
+  const [rejectedLocations, setRejectedLocations] = useState<PendingLocation[]>([]);
+  const [rejectedSignups, setRejectedSignups] = useState<PendingSignup[]>([]);
   const [allLocations, setAllLocations] = useState<PendingLocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -231,12 +233,14 @@ export default function DevteamView() {
 
   const fetchOverview = async () => {
     try {
-      const [overviewRes, locationsRes, allLocationsRes, stationsRes, signupsRes] = await Promise.all([
+      const [overviewRes, locationsRes, allLocationsRes, stationsRes, signupsRes, rejLocRes, rejSignupRes] = await Promise.all([
         fetch(`${API_URL}/api/devteam/overview`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/locations?status=pending`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/locations`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/devteam/stations`, { headers: authHeaders() }),
-        fetch(`${API_URL}/api/devteam/pending_signups`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/devteam/signups?status=pending`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/devteam/locations?status=rejected`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/devteam/signups?status=rejected`, { headers: authHeaders() }),
       ]);
       if (overviewRes.ok && locationsRes.ok) {
         const overview = await overviewRes.json();
@@ -246,6 +250,8 @@ export default function DevteamView() {
         if (allLocationsRes.ok) setAllLocations(await allLocationsRes.json());
         if (stationsRes.ok) setStations(await stationsRes.json());
         if (signupsRes.ok) setPendingSignups(await signupsRes.json());
+        if (rejLocRes.ok) setRejectedLocations(await rejLocRes.json());
+        if (rejSignupRes.ok) setRejectedSignups(await rejSignupRes.json());
         setLoadFailed(false);
       } else if (overviewRes.status === 401 || locationsRes.status === 401) {
         // BUG FOUND 2026-08-19: a 401 here almost always means the stored
@@ -536,41 +542,35 @@ export default function DevteamView() {
     window.location.href = '/loginpage/login';
   };
 
-  const handleApproval = async (barangayId: string, decision: 'approve' | 'reject') => {
-    const snapshot = pendingLocations;
-    setPendingLocations(prev => prev.filter(l => l.id !== barangayId));
-    setPendingActionIds(prev => new Set(prev).add(barangayId));
+  // One handler for every application decision. A barangay application is
+  // keyed by the barangay id, a PNP one (or a barangay applicant for an
+  // already-approved barangay) by the applicant's user id. Returns the
+  // server's refusal, if any, for the pane to show next to the button --
+  // a 409 here means someone else decided it first, so the lists reload.
+  const decideApplication = async (
+    target: ApplicationTarget, action: ApplicationAction, body: Record<string, unknown>,
+  ): Promise<string | null> => {
+    const url = target.kind === 'location'
+      ? `${API_URL}/api/devteam/locations/${target.id}/${action}`
+      : `${API_URL}/api/devteam/users/${target.id}/${action}_signup`;
+    setPendingActionIds(prev => new Set(prev).add(target.id));
     try {
-      const res = await fetch(`${API_URL}/api/devteam/locations/${barangayId}/${decision}`, {
-        method: "POST", headers: authHeaders(), body: JSON.stringify({}),
-      });
-      if (!res.ok) { setPendingLocations(snapshot); flash(`Could not ${decision}.`); }
-      else { fetchOverview(); flash(`Location ${decision}d.`); }
+      const res = await fetch(url, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 409) fetchOverview();
+        return d.detail || `Could not ${action} this application.`;
+      }
+      fetchOverview();
+      if (action === 'approve') {
+        const uncovered = target.kind === 'location' && Array.isArray(d.covered_by) && d.covered_by.length === 0;
+        flash(uncovered ? 'Approved. No station covers this barangay yet -- assign it in Stations.' : 'Application approved.');
+      } else flash(action === 'reject' ? 'Application rejected.' : 'Application reopened -- it is back in Pending.');
+      return null;
     } catch {
-      setPendingLocations(snapshot); flash('Backend connection failure.');
+      return 'Backend connection failure.';
     } finally {
-      setPendingActionIds(prev => { const n = new Set(prev); n.delete(barangayId); return n; });
-    }
-  };
-
-  // 2026-09-23 bug fix -- the PNP-side counterpart to handleApproval above.
-  // Keyed by user id (not barangay_id -- a PNP applicant has no location
-  // object to key off), calling the new approve_signup/reject_signup
-  // endpoints instead of .../locations/.../approve.
-  const reviewSignup = async (userId: number, decision: 'approve' | 'reject') => {
-    const snapshot = pendingSignups;
-    setPendingSignups(prev => prev.filter(s => s.id !== userId));
-    setPendingActionIds(prev => new Set(prev).add(userId));
-    try {
-      const res = await fetch(`${API_URL}/api/devteam/users/${userId}/${decision === 'approve' ? 'approve_signup' : 'reject_signup'}`, {
-        method: "POST", headers: authHeaders(),
-      });
-      if (!res.ok) { setPendingSignups(snapshot); flash(`Could not ${decision}.`); }
-      else { fetchOverview(); flash(`Application ${decision === 'approve' ? 'approved' : 'rejected'}.`); }
-    } catch {
-      setPendingSignups(snapshot); flash('Backend connection failure.');
-    } finally {
-      setPendingActionIds(prev => { const n = new Set(prev); n.delete(userId); return n; });
+      setPendingActionIds(prev => { const n = new Set(prev); n.delete(target.id); return n; });
     }
   };
 
@@ -610,7 +610,9 @@ export default function DevteamView() {
       return seatUsers.some(u => u.username.toLowerCase().includes(q));
     };
 
+    // Rejected applications live in Approvals > Rejected, not in the directory.
     const locations: LocationEntry[] = allLocations
+      .filter(loc => loc.status !== 'rejected')
       .map(loc => {
         const barangayAdmins = users.filter(u => u.role === 'BARANGAY_ADMIN' && u.barangay_id === loc.id);
         const barangayStaff = users.filter(u => barangayAdmins.some(a => a.id === u.parent_admin_id));
@@ -1144,7 +1146,8 @@ export default function DevteamView() {
       {tab === 'approvals' && (
         <ApprovalsPane
           apiUrl={API_URL} pendingLocations={pendingLocations} pendingSignups={pendingSignups}
-          busyIds={pendingActionIds} onDecideLocation={handleApproval} onDecideSignup={reviewSignup}
+          rejectedLocations={rejectedLocations} rejectedSignups={rejectedSignups} stations={stations}
+          busyIds={pendingActionIds} onDecide={decideApplication}
           reviewVerification={reviewVerification} flash={flash}
         />
       )}

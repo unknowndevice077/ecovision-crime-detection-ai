@@ -419,7 +419,7 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
                       options={stations.map(s => ({ value: s.id, label: s.name }))} />
                   ) : (
                     <SelectInput label="Barangay" value={details.barangay_id} onChange={v => set({ barangay_id: v, parent_admin_id: '' })}
-                      options={allLocations.map(l => ({ value: l.id, label: l.name }))} />
+                      options={allLocations.filter(l => (l.status || 'approved') === 'approved' || l.id === u.barangay_id).map(l => ({ value: l.id, label: l.name }))} />
                   )}
                 </div>
                 {editPnp !== isPnp && (
