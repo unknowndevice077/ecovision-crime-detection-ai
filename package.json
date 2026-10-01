@@ -14,7 +14,7 @@
     "desktop": "electron .",
     "preapp:build": "powershell -Command \"taskkill /F /IM EcoVisionSentinel.exe /IM electron.exe 2>$null; exit 0\"",
     "app:build": "next build && node tools/copy_standalone_assets.js && electron-builder",
-    "installer": "npm run app:build && powershell -ExecutionPolicy Bypass -File tools/build_sfx_installer.ps1"
+    "installer": "npm run app:build && powershell -ExecutionPolicy Bypass -File tools/build_installer.ps1"
   },
   "dependencies": {
     "axios": "^1.6.2",
