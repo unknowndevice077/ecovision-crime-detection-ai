@@ -94,7 +94,7 @@ except ImportError:
 from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
 from x3d_violence_detector import (
     X3DViolenceDetector, SceneViolenceDetector, TiledSceneViolenceDetector, VIOLENCE_MODE,
-    MODEL_PATH as TRACK_MODEL_PATH,
+    MODEL_PATH as TRACK_MODEL_PATH, SCENE_PERSON_CONFIRM,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -640,7 +640,10 @@ if SCENE_MODE_ON and VIOLENCE_ON:
         # sustain even one live camera.
         scene_detector = TiledSceneViolenceDetector(device=TARGET_DEVICE)
     else:
-        scene_detector = SceneViolenceDetector(device=TARGET_DEVICE)
+        # person_confirm: an alarm also needs a crop around a group of people
+        # to look violent (config.json detection.violence.scene_person_confirm;
+        # measured trade-off in SceneViolenceDetector's class docstring).
+        scene_detector = SceneViolenceDetector(device=TARGET_DEVICE, person_confirm=SCENE_PERSON_CONFIRM)
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
 elif not VIOLENCE_ON:
     pass  # already printed "🚫 Physical Violence: disabled" above -- a mode line here would contradict it
@@ -1929,6 +1932,7 @@ frame_count, fps_timer, fps_display, fps_frame_count = 0, time.perf_counter(), 0
 _camera_fail_streak = 0
 _camera_last_ok = time.perf_counter()
 _camera_retry_delay = 2.0
+_confirm_person_boxes = None   # last frame's person boxes, for scene person-crop confirmation
 print("🚀 Sentinel v16.0 — Portable dynamic deployment runtime context pipeline engaged.")
 
 while _running:
@@ -1997,7 +2001,13 @@ while _running:
     # X3D_CHECK_INTERVAL frames and returns its cached verdict in between.
     scene_violent, scene_conf = (False, 0.0)
     if SCENE_MODE_ON and VIOLENCE_ON:
-        scene_violent, scene_conf = scene_detector.update(frame, frame_count)
+        if getattr(scene_detector, "person_confirm", False):
+            # Person boxes are from the PREVIOUS frame: the pose pass runs
+            # below, after this. 33 ms old is immaterial for a 1.5 s clip.
+            scene_violent, scene_conf = scene_detector.update(
+                frame, frame_count, person_boxes=_confirm_person_boxes)
+        else:
+            scene_violent, scene_conf = scene_detector.update(frame, frame_count)
 
     # Robbery runs on the same frame, with its own threshold and confirmation
     # state. Independent of the violence verdict on purpose: a robbery
@@ -2012,6 +2022,12 @@ while _running:
 
     res_half_flag = (USE_CUDA and pose_file_name.endswith(".pt"))
     pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, half=res_half_flag)
+    # Every person box at the 0.25 the confirmation was measured with --
+    # tracked or not, since a brawl breaks tracks all the time.
+    _confirm_person_boxes = None
+    if pose_res[0].boxes is not None and len(pose_res[0].boxes):
+        _pb = pose_res[0].boxes
+        _confirm_person_boxes = _pb.xyxy[_pb.conf >= 0.25].cpu().numpy().tolist()
 
     triggered_alerts_this_frame = []
     active_pip_crop = None

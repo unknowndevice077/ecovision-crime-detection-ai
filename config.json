@@ -44,7 +44,9 @@
       "bystander_merge_radius_mult": 1.3,
       "mode": "scene",
       "scene_confidence_threshold": 0.5,
-      "scene_consecutive_required": 3,
+      "scene_consecutive_required": 2,
+      "scene_person_confirm": true,
+      "_scene_person_confirm": "Added 2026-10-01. Each check also scores crops around the groups of people the pose model found (aspect-matched, so they look like whole frames to the model), and the value that goes through smoothing/confirmation is min(whole-frame confidence, best crop over the last 3 checks): the scene AND some group of real people must both look violent. That removes enough false alarms to drop consecutive 3 -> 2, which is what buys back recall. MEASURED on identical footage, same daynight weights, all six rows from one trace (experiments/crop_recheck in the training repo): spliced_recall_200 (200 held-out fights from 200 different source videos spliced into street footage) + 2 h of the four held-out real cameras (30 min each). whole frame 0.50/3 (previous deployment): 75.0% caught, 5.0 false alarms/hr. whole frame 0.50/2: 83.0%, 12.0/hr. CONFIRMED 0.50/2 (this setting): 79.0%, 3.0/hr -- better on both axes. confirmed 0.50/1: 81.0%, 5.0/hr. confirmed 0.40/2: 82.0%, 8.0/hr. Per camera at this setting: flyover 12 -> 12/hr, market 0, iloilo 0, lyns_restaurant 8 -> 0/hr. Also measured: using the crop to ADD detections ('or') gave the same recall at 3-6x the false alarms, so the crop only ever vetoes. On 75 real CCTV fights / 73 non-fights from SurvFight sources that share nothing with training, single-reading clip FPR falls 31.5% -> 21.9% for recall 81.3% -> 77.3%. The shipped SceneViolenceDetector was checked against the experiment check by check (verify_shipped.py): identical values on 720 checks. COST: one batched X3D forward of 1 + up to 5 clips per check instead of 1. ROLLBACK: set scene_person_confirm to false AND scene_consecutive_required back to 3 -- the two are a pair; confirmation off at 2 is the 12 alarms/hr row above.",
       "_scene_consecutive_required_rollback": "Was 1. Raised to 3 on 2026-08-14. TWO separate things are fixed by this. (1) A MEASUREMENT/CONFIG MISMATCH: eval_false_alarms_corpus.py defaults to --consecutive 2, but main.py:495 builds SceneViolenceDetector() with no consecutive argument, so the live system used this config value of 1. Every false-alarm figure on record -- including the 32.0 alarms/hr for corpus_neg and 41.0 for ucf_neg_motion -- was therefore measured at 2 while deployment ran at 1. Replayed at 1, the deployed model gives 49.0 alarms/hr (flyover 38, market 2, lyns 9), so the published rates understated live behaviour by ~53%. (2) THE SETTING ITSELF: consecutive_required has never been tunable, because 5-second benchmark clips yield too few inference points for need>=3 to succeed arithmetically -- a property of the clips, not the model. Measured instead on continuous footage (build_spliced_recall_set.py: 40 held-out violent test clips spliced into real Davao night street footage with 25 s of ordinary activity either side, replayed through the shipped _smooth_and_confirm): at threshold 0.50, cons=1 and cons=2 and cons=3 all detect 38/40 events (95.0%), while held-out camera alarms fall 49.0 -> 32.0 -> 17.0 per hour. cons=4 drops to 36/40 (90.0%) for 9.0/hr. So 3 is the last free step and 4 is the first one that costs. CAVEATS: 40 events gives about +/-2.5 points of resolution, so 'zero cost' means 'lost none of 40', not 'provably lossless'; and spliced recall is an UPPER bound, because a hard cut between two cameras is itself a large visual change and the violent clips are benchmark footage (several are indoor, some carry YouTube compilation watermarks and one a visible player UI). To roll back, set this to 1 for the previous deployed behaviour, or 2 to match how every historical measurement was taken.",
       "scene_model_path": "weights/x3d_xs_violence_scene_daynight.pt",
       "_scene_model_path_rollback": "daynight deployed 2026-08-18, replacing corpus_neg. Recall UNCHANGED at 95.0% (38/40 on the spliced replay, deployed operating point 0.50/consecutive=3) while real-camera alarms fall 12.75 -> 4.50/hr (flyover 45 -> 6/hr is nearly the whole effect; lyns_restaurant is the one camera that gets WORSE, 6 -> 12/hr -- not a uniform win, see the checkpoint's own .meta.json for the full breakdown including the 0.45 threshold that was measured and rejected). This weights file was accidentally deleted from the repo on 2026-08-18 (an unrelated tool ran against this codebase and removed it) and recovered from D:\\EcoVisionImagesTraining\\x3d_xs_violence_best_daynight.pt -- identity confirmed by an exact match on best_val_acc (0.87791601...) against the surviving x3d_xs_violence_scene_daynight.pt.meta.json and identical architecture (563 keys, 3,010,271 params) to every other deployed scene checkpoint. Previous deployment history (corpus_neg vs ucf_neg_motion etc.) is preserved below for rollback. To roll back to corpus_neg, set scene_model_path to weights/x3d_xs_violence_scene_corpus_neg.pt.",
@@ -59,15 +61,15 @@
         "status": "deployed",
         "headline": {
           "label": "Detection rate",
-          "value": 95.0,
+          "value": 79.0,
           "unit": "%"
         },
         "stats": [
           {
             "label": "Detection rate",
-            "value": 95.0,
+            "value": 79.0,
             "unit": "%",
-            "note": "38 of 40 events on continuous spliced footage",
+            "note": "158 of 200 fights from 200 different source videos, spliced into continuous street footage",
             "good": true
           },
           {
@@ -86,14 +88,14 @@
           },
           {
             "label": "False alarms",
-            "value": 4.5,
+            "value": 3.0,
             "unit": "/hr",
-            "note": "deployed daynight checkpoint across 3 real cameras. NOT uniform: flyover 45 -> 6/hr carries nearly the whole gain, while lyns_restaurant gets WORSE, 6 -> 12/hr. The previous 17.0/hr in this field was the pre-daynight checkpoint and was stale.",
+            "note": "across 4 held-out real cameras, 2 hours. Previous setting on the same footage: 5.0/hr. Not uniform: the flyover camera produces all of it (12/hr); the other three produce none.",
             "good": true
           }
         ],
-        "measured_on": "758-clip held-out test split + 60 min of real Davao street CCTV, daynight checkpoint at threshold 0.50 / consecutive 3",
-        "caveat": "The 45/hr flyover camera is the worst case and the only one whose venue does not also appear in training -- it is the least flattering figure and the most trustworthy. Recall on the deployment cameras themselves is unmeasured: no labelled incident has been recorded on them."
+        "measured_on": "spliced_recall_200 (200 events, 0.5-point resolution) + 2 h of four held-out real cameras, daynight checkpoint at threshold 0.50 / 2 in a row with person-crop confirmation; per-clip figures from the 758-clip test split",
+        "caveat": "The previous 95% headline was measured on the 40-event spliced set and is withdrawn: on the 200-event set the same model and setting catch 75%. Spliced footage is still benchmark video cut into street scenes; recall on the deployment cameras themselves is unmeasured because no labelled incident has been recorded on them."
       }
     },
     "weapon": {

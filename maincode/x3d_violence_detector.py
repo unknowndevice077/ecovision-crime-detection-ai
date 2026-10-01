@@ -75,6 +75,11 @@ _DEFAULT_VIOLENCE_CFG = {
     "tile_grid": 3,
     "tile_overlap": 0.25,
     "tile_check_interval": 20,
+
+    # --- person-crop confirmation (scene mode, see SceneViolenceDetector) ---
+    # Off here so the robbery/vandalism instances and the eval scripts keep
+    # plain whole-frame behaviour; config.json turns it on for violence.
+    "scene_person_confirm": False,
 }
 
 
@@ -119,6 +124,7 @@ SCENE_MODEL_PATH = os.path.normpath(
 TILE_GRID = _VIOLENCE_CFG["tile_grid"]
 TILE_OVERLAP = _VIOLENCE_CFG["tile_overlap"]
 TILE_CHECK_INTERVAL = _VIOLENCE_CFG["tile_check_interval"]
+SCENE_PERSON_CONFIRM = bool(_VIOLENCE_CFG["scene_person_confirm"])
 
 # --- EMA smoothing on raw confidence, per track ---
 EMA_ALPHA = _VIOLENCE_CFG["ema_alpha"]          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
@@ -692,6 +698,59 @@ class X3DViolenceDetector:
             self._log_file.close()
 
 
+def _union_box(boxes):
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
+
+def _boxes_overlap(a, b):
+    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
+
+def _group_person_boxes(boxes):
+    """People standing together, as lists of boxes. Two boxes join when their
+    centres are within BYSTANDER_MERGE_RADIUS_MULT x the larger box's longest
+    side -- the same radius the per-track crop uses to pull in an opponent."""
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = boxes[i], boxes[j]
+            r = BYSTANDER_MERGE_RADIUS_MULT * max(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1])
+            dx = (a[0] + a[2] - b[0] - b[2]) / 2
+            dy = (a[1] + a[3] - b[1] - b[3]) / 2
+            if dx * dx + dy * dy <= r * r:
+                parent[find(i)] = find(j)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(boxes[i])
+    return list(groups.values())
+
+
+def _confirm_crop_box(box, W, H, pad=0.30, min_height_frac=0.20):
+    """A crop around `box` with the FRAME's aspect ratio. The scene model was
+    trained on whole frames squeezed into a square, so it has only ever seen
+    people at that horizontal squash; a square crop un-squashes them and the
+    score collapses (0.99 whole-frame -> 0.3-0.6 on the same fight). At least
+    20% of the frame height, so a 15-pixel person isn't blown up into mush."""
+    x1, y1, x2, y2 = box
+    ar = W / H
+    h = max(y2 - y1, (x2 - x1) / ar) * (1 + 2 * pad)
+    h = min(max(h, min_height_frac * H), H)
+    w = h * ar
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    sx1 = int(round(min(max(cx - w / 2, 0), W - w)))
+    sy1 = int(round(min(max(cy - h / 2, 0), H - h)))
+    return sx1, sy1, sx1 + int(w), sy1 + int(h)
+
+
 class SceneViolenceDetector(X3DViolenceDetector):
     """Whole-frame violence detection -- one verdict for the scene, no tracking.
 
@@ -720,12 +779,34 @@ class SceneViolenceDetector(X3DViolenceDetector):
 
     SCENE_TID = -1   # sentinel key into the inherited per-track dicts
 
-    # This class resizes the whole frame; it never crops to a person.
+    # The model is fed whole frames. With person_confirm on, it is ALSO fed
+    # crops around groups of people, but those keep the frame's aspect ratio
+    # (_confirm_crop_box), so they look like whole frames to the model.
     EXPECTED_INPUT_REPR = "whole_frame"
+
+    # PERSON-CROP CONFIRMATION (person_confirm=True)
+    # The whole-frame verdict alone fires on traffic, crowds and camera
+    # shake. With confirmation on, every check also scores crops around the
+    # groups of people the pose model found, and the number that goes
+    # through smoothing/confirmation is
+    #       min(whole-frame confidence, best crop confidence over the last 3 checks)
+    # -- the scene has to look violent AND some group of actual people has to.
+    # Measured 2026-10-01 (experiments/crop_recheck in the training repo):
+    # 200 held-out fights spliced into street footage + 2 h of four held-out
+    # real cameras, same weights:
+    #     whole frame, 0.50, 3 in a row   75.0% caught   5.0 false alarms/hr
+    #     confirmed,   0.50, 2 in a row   79.0% caught   3.0 false alarms/hr
+    # Confirmation removes enough false alarms to drop to 2-in-a-row, which
+    # is what buys back the recall. The crop never ADDS a detection (the
+    # 'or' variant was measured too: same recall, 3-6x the false alarms).
+    CONFIRM_MAX_GROUPS = 4
+    CONFIRM_RECENT = 3
+    CONFIRM_MAX_HEIGHT = 720   # buffered frames are capped here to bound memory
 
     def __init__(self, model_path: str = None, device: str = None,
                  threshold: float = None, consecutive: int = None,
-                 log_path: str = SCENE_DIAGNOSTIC_LOG_PATH):
+                 log_path: str = SCENE_DIAGNOSTIC_LOG_PATH,
+                 person_confirm: bool = False):
         # Defaults to the whole-frame-trained checkpoint, not the crop one --
         # matching the representation is worth 5.3pp here. Separate log file
         # so it does not interleave with the per-track detector's, which is
@@ -745,6 +826,15 @@ class SceneViolenceDetector(X3DViolenceDetector):
         self._scene_ema = None
         self._scene_hits = 0
         self._scene_confirmed = False
+        self.person_confirm = bool(person_confirm)
+        if self.person_confirm:
+            print("[X3D] Person-crop confirmation ON: an alarm needs the whole "
+                  "frame AND a crop around a group of people to look violent")
+        self._full_buffer = deque(maxlen=BUFFER_SPAN)     # frames for the crops
+        self._confirm_prev_boxes = deque(maxlen=2)        # person boxes at the last 2 checks
+        self._confirm_recent = deque(maxlen=self.CONFIRM_RECENT)
+        self._last_scene_conf = 0.0
+        self._last_crop_conf = 0.0
 
     def reset_scene(self):
         """Between independent clips in a batch eval -- same role
@@ -756,15 +846,76 @@ class SceneViolenceDetector(X3DViolenceDetector):
         self._scene_hits = 0
         self._scene_confirmed = False
         self._real_inference_count.pop(self.SCENE_TID, None)
+        self._full_buffer.clear()
+        self._confirm_prev_boxes.clear()
+        self._confirm_recent.clear()
+        self._last_scene_conf = 0.0
+        self._last_crop_conf = 0.0
 
-    def update(self, frame: np.ndarray, frame_count: int) -> tuple:
-        """Feed one full frame. Returns (is_violent, raw_conf).
+    def _confirmed_conf(self, person_boxes) -> float:
+        """One check with person-crop confirmation: scores the whole frame and
+        a crop around each group of people in ONE batched forward, returns
+        min(whole frame, best crop over the last CONFIRM_RECENT checks)."""
+        frames = list(self._full_buffer)
+        H, W = frames[-1].shape[:2]
+        boxes = [[float(v) for v in b[:4]] for b in (person_boxes if person_boxes is not None else [])]
+
+        groups = _group_person_boxes(boxes)
+        groups.sort(key=lambda g: (len(g), (_union_box(g)[2] - _union_box(g)[0]) * (_union_box(g)[3] - _union_box(g)[1])),
+                    reverse=True)
+        older = [b for pb in self._confirm_prev_boxes for b in pb]
+        crop_boxes = []
+        for g in groups[:self.CONFIRM_MAX_GROUPS]:
+            u = _union_box(g)
+            # People move during the 1.5 s clip: widen to anyone from the last
+            # two checks this group overlaps, or the crop clips a swing.
+            for ob in older:
+                if _boxes_overlap(u, ob):
+                    u = _union_box([u, ob])
+            crop_boxes.append(_confirm_crop_box(u, W, H))
+        if len(groups) > 1:
+            # Crowds: one crop around everyone, unless that is most of the frame anyway.
+            cb = _confirm_crop_box(_union_box(boxes), W, H)
+            if cb[3] - cb[1] < 0.8 * H:
+                crop_boxes.append(cb)
+        self._confirm_prev_boxes.append(boxes)
+
+        # Sample the CLIP_FRAMES frames first, then crop only those -- the
+        # same frames _prepare_clip_array would have picked from the buffer.
+        idx = np.linspace(0, len(frames) - 1, self.clip_frames).astype(int)
+        picked = [frames[i] for i in idx]
+        size = (self.frame_size, self.frame_size)
+        clips = [self._scene_buffer]
+        clips += [[cv2.resize(f[y1:y2, x1:x2], size) for f in picked] for x1, y1, x2, y2 in crop_boxes]
+        res = self._run_inference_batch(clips, tid=self.SCENE_TID)
+
+        scene = res[0][1]
+        crop = max((c for _, c in res[1:]), default=0.0)
+        self._confirm_recent.append(crop)
+        self._last_scene_conf, self._last_crop_conf = scene, crop
+        return min(scene, max(self._confirm_recent))
+
+    def update(self, frame: np.ndarray, frame_count: int, person_boxes=None) -> tuple:
+        """Feed one full frame. Returns (is_violent, conf).
+
+        person_boxes: the pose model's person boxes (x1,y1,x2,y2 in this
+        frame's pixels) -- only read when person_confirm is on, where conf is
+        then the confirmed value min(scene, crop) rather than the raw scene
+        score. None means nobody was found, which confirms nothing.
 
         Note the signature deliberately differs from the parent's
-        (tid, frame, p_box, ...) -- there is no track and no box. Callers
-        must pick the right class rather than relying on polymorphism.
+        (tid, frame, p_box, ...) -- there is no track. Callers must pick the
+        right class rather than relying on polymorphism.
         """
         self._scene_buffer.append(cv2.resize(frame, (self.frame_size, self.frame_size)))
+        if self.person_confirm:
+            h, w = frame.shape[:2]
+            if h > self.CONFIRM_MAX_HEIGHT:
+                s = self.CONFIRM_MAX_HEIGHT / h
+                frame = cv2.resize(frame, (int(w * s), self.CONFIRM_MAX_HEIGHT), interpolation=cv2.INTER_AREA)
+                if person_boxes is not None:
+                    person_boxes = [[v * s for v in b[:4]] for b in person_boxes]
+            self._full_buffer.append(frame)
 
         # No MIN_BUFFER_FOR_INFERENCE gate. The buffer is scene-wide and
         # starts filling on frame 1, so requiring a warm-up here would
@@ -774,7 +925,10 @@ class SceneViolenceDetector(X3DViolenceDetector):
             return self._scene_result
 
         self._scene_last_check = frame_count
-        _, raw_conf = self._run_inference(self._scene_buffer, tid=self.SCENE_TID)
+        if self.person_confirm:
+            raw_conf = self._confirmed_conf(person_boxes)
+        else:
+            _, raw_conf = self._run_inference(self._scene_buffer, tid=self.SCENE_TID)
 
         confirmed, ema, hits = _smooth_and_confirm(
             prev_ema=self._scene_ema,
@@ -802,6 +956,9 @@ class SceneViolenceDetector(X3DViolenceDetector):
             "buffer_fill": len(self._scene_buffer),
             "buffer_target": BUFFER_SPAN,
             "inference_count": self._real_inference_count.get(self.SCENE_TID, 0),
+            "person_confirm": self.person_confirm,
+            "scene_confidence": self._last_scene_conf if self.person_confirm else conf,
+            "crop_confidence": self._last_crop_conf if self.person_confirm else None,
         }
 
 
