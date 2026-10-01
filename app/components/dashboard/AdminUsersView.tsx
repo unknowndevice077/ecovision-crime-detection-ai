@@ -1,11 +1,13 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound, Eye, EyeOff, RefreshCw, Copy, Check } from 'lucide-react';
+import { Users, UserPlus, Trash2, ShieldCheck, X, Save, KeyRound, Eye, EyeOff, RefreshCw, Copy, Check, AlertTriangle } from 'lucide-react';
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonList } from './Skeleton';
-import { permissionRowsFor, permissionNoteFor, onlyEditablePermissions } from '../../lib/permissions';
+import { permissionNoteFor, onlyEditablePermissions } from '../../lib/permissions';
+import PermissionTree, { ResourceScopes, scopeProblem, scopesForSave } from './devteam/PermissionTree';
+import type { CameraRow } from './devteam/shared';
 import { positionsForRole } from '../../lib/positions';
 import { usePermissions } from '../../hooks/usePermissions';
 
@@ -17,6 +19,7 @@ type ManagedUser = {
   assignment: string;
   parent_admin_id: number | null;
   permissions: string; // JSON string from backend
+  resource_scopes?: ResourceScopes;
   verification_status?: string;
   full_name?: string | null;
   position?: string | null;
@@ -85,12 +88,11 @@ export default function AdminUsersView() {
   // OPTIMISTIC DELETE: remove from local state immediately, roll back if
   // the request fails. Previously this waited for the round trip + a full
   // refetch before the row disappeared, which felt laggy for a triage tool.
+  // Asked in an in-app dialog (confirmDeleteUser), not window.confirm --
+  // one click used to remove the account outright.
+  const [confirmDeleteUser, setConfirmDeleteUser] = useState<ManagedUser | null>(null);
   const handleDelete = async (id: number) => {
-    // One click used to remove the account outright.
-    const target = users.find(u => u.id === id);
-    if (!window.confirm(`Remove ${target?.username || 'this account'}?
-
-They can no longer sign in. DevTeam can restore the account from the Audit Log.`)) return;
+    setConfirmDeleteUser(null);
     const snapshot = users;
     setUsers(prev => prev.filter(u => u.id !== id));
     setPendingIds(prev => new Set(prev).add(id));
@@ -119,12 +121,11 @@ They can no longer sign in. DevTeam can restore the account from the Audit Log.`
   const [resetBusyId, setResetBusyId] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // One click used to replace the password straight away, locking the
+  // person out until they're handed the new one. Confirmed in-app first.
+  const [confirmResetUser, setConfirmResetUser] = useState<ManagedUser | null>(null);
   const handleResetPassword = async (u: ManagedUser) => {
-    // One click used to replace the password straight away, locking the
-    // person out until they're handed the new one.
-    if (!window.confirm(`Reset the password for ${u.full_name || u.username}?
-
-Their current password stops working immediately. You'll be shown the new one once.`)) return;
+    setConfirmResetUser(null);
     setResetBusyId(u.id);
     setError('');
     try {
@@ -146,58 +147,27 @@ Their current password stops working immediately. You'll be shown the new one on
     }
   };
 
-  // ── Camera-level access (Phase 2, 2026-09-23) ───────────────────────────
-  // "Dice every permission down to the smallest unit" -- the barangay/PNP
-  // admin's own scoped-down version of DevTeam's Permissions tab: restrict
-  // ONE of their own subordinates to specific cameras only. Reuses
-  // GET /api/cameras as-is for the picker -- it's already org-scoped to
-  // this admin's own token, so no separate "cameras I can grant" endpoint
-  // is needed the way DevTeam's unscoped picker needed one.
-  const [grantCameras, setGrantCameras] = useState<{ id: string; name: string }[]>([]);
-  const [userGrants, setUserGrants] = useState<any[]>([]);
-  const [grantCameraId, setGrantCameraId] = useState('');
-  const [grantBusy, setGrantBusy] = useState(false);
-
-  const fetchUserGrants = async (userId: number) => {
-    try {
-      const res = await fetch(`${API_URL}/api/admin/users/${userId}/resource_permissions`, { headers: authHeaders() });
-      if (res.ok) setUserGrants(await res.json());
-    } catch { /* leave whatever was last shown */ }
-  };
+  // ── Access editor (2026-10-01): the same diced tree DevTeam uses, so a
+  // captain can give "View Crime Map, but only these cameras and these
+  // crime types". Capped server-side at the admin's own reach.
+  const [scopeCameras, setScopeCameras] = useState<CameraRow[]>([]);
+  const [scopesDraft, setScopesDraft] = useState<ResourceScopes>({});
+  const [accessError, setAccessError] = useState('');
+  const [accessBusy, setAccessBusy] = useState(false);
 
   const openPermissions = (u: ManagedUser) => {
     setEditingPerms(u);
+    setAccessError('');
     try {
       setPermsDraft(JSON.parse(u.permissions || "{}"));
     } catch {
       setPermsDraft({});
     }
-    setGrantCameraId('');
-    fetchUserGrants(u.id);
-    if (grantCameras.length === 0) {
-      fetch(`${API_URL}/api/cameras`, { headers: authHeaders() })
-        .then(res => res.ok ? res.json() : [])
-        .then(setGrantCameras)
-        .catch(() => {});
-    }
-  };
-
-  const grantCameraAccess = async () => {
-    if (!editingPerms || !grantCameraId) return;
-    setGrantBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/resource_permissions`, {
-        method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ permission_key: 'view_map', resource_type: 'camera', resource_id: grantCameraId }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) { fetchUserGrants(editingPerms.id); setGrantCameraId(''); }
-      else { setError(d.detail || 'Could not grant.'); setTimeout(() => setError(''), 3000); }
-    } catch {
-      setError('Backend connection failure.'); setTimeout(() => setError(''), 3000);
-    } finally {
-      setGrantBusy(false);
-    }
+    setScopesDraft({ ...(u.resource_scopes || {}) });
+    fetch(`${API_URL}/api/cameras`, { headers: authHeaders() })
+      .then(res => res.ok ? res.json() : [])
+      .then(setScopeCameras)
+      .catch(() => {});
   };
 
   const reviewVerification = async (userId: number, decision: 'verified' | 'rejected') => {
@@ -224,46 +194,38 @@ Their current password stops working immediately. You'll be shown the new one on
     }
   };
 
-  const revokeCameraAccess = async (grant: any) => {
-    if (!editingPerms) return;
-    setGrantBusy(true);
-    try {
-      const res = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/resource_permissions`, {
-        method: 'DELETE', headers: authHeaders(),
-        body: JSON.stringify({ permission_key: grant.permission_key, resource_type: grant.resource_type, resource_id: grant.resource_id }),
-      });
-      if (res.ok) fetchUserGrants(editingPerms.id);
-    } catch { /* leave the list as-is -- user can retry */ }
-    finally {
-      setGrantBusy(false);
-    }
-  };
-
-  // OPTIMISTIC PERMISSIONS SAVE: update the local user's permissions blob
-  // immediately so the "N permissions granted" count updates on close,
-  // instead of waiting on a refetch.
   const savePermissions = async () => {
     if (!editingPerms) return;
-    const snapshot = users;
-    const editablePerms = onlyEditablePermissions(editingPerms.role, permsDraft);
-    const updatedPermsJson = JSON.stringify(editablePerms);
-    setUsers(prev => prev.map(u => u.id === editingPerms.id ? { ...u, permissions: updatedPermsJson } : u));
-    setEditingPerms(null);
+    const problem = scopeProblem(editingPerms.role, permsDraft, scopesDraft);
+    if (problem) { setAccessError(problem); return; }
+    setAccessBusy(true);
+    setAccessError('');
     try {
+      const editablePerms = onlyEditablePermissions(editingPerms.role, permsDraft);
       const res = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/permissions`, {
-        method: "PATCH",
-        headers: authHeaders(),
-        body: JSON.stringify({ permissions: editablePerms }),
+        method: "PATCH", headers: authHeaders(), body: JSON.stringify({ permissions: editablePerms }),
       });
       if (!res.ok) {
-        setUsers(snapshot);
-        setError("Could not save permissions -- reverted.");
-        setTimeout(() => setError(''), 3000);
+        const d = await res.json().catch(() => ({}));
+        setAccessError(d.detail || 'Could not save permissions.');
+        return;
       }
-    } catch (e) {
-      setUsers(snapshot);
-      setError("Backend connection failure -- reverted.");
-      setTimeout(() => setError(''), 3000);
+      const scopeRes = await fetch(`${API_URL}/api/admin/users/${editingPerms.id}/resource_scopes`, {
+        method: 'PUT', headers: authHeaders(),
+        body: JSON.stringify({ scopes: scopesForSave(editingPerms.role, permsDraft, scopesDraft) }),
+      });
+      if (!scopeRes.ok) {
+        const d = await scopeRes.json().catch(() => ({}));
+        setAccessError(d.detail || 'Permissions saved, but the access limits were not.');
+        fetchUsers();
+        return;
+      }
+      setEditingPerms(null);
+      fetchUsers();
+    } catch {
+      setAccessError('Backend connection failure -- nothing was saved.');
+    } finally {
+      setAccessBusy(false);
     }
   };
 
@@ -379,7 +341,7 @@ Their current password stops working immediately. You'll be shown the new one on
                     <KeyRound size={12} />
                   </button>
                   <button
-                    onClick={() => handleResetPassword(u)}
+                    onClick={() => setConfirmResetUser(u)}
                     disabled={resetBusyId === u.id}
                     title="Reset password -- generates a new one, shown once"
                     className="p-1.5 border transition-colors hover:bg-white/5 disabled:opacity-40"
@@ -388,7 +350,7 @@ Their current password stops working immediately. You'll be shown the new one on
                     <RefreshCw size={12} className={resetBusyId === u.id ? 'animate-spin' : ''} />
                   </button>
                   <button
-                    onClick={() => handleDelete(u.id)}
+                    onClick={() => setConfirmDeleteUser(u)}
                     title="Remove user"
                     className="p-1.5 border transition-colors hover:bg-[rgba(229,52,47,0.12)]"
                     style={{ borderColor: 'var(--critical)', color: 'var(--critical)' }}
@@ -552,112 +514,134 @@ Their current password stops working immediately. You'll be shown the new one on
       {/* PERMISSIONS MODAL */}
       {editingPerms && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
-          <div className="border w-full max-w-sm" style={modalShell}>
-            <div className="h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+          <div className="border w-full max-w-lg max-h-[90vh] flex flex-col" style={modalShell} role="dialog" aria-label="Edit access">
+            <div className="shrink-0 h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
               <span className="label flex items-center gap-1.5" style={{ color: 'var(--text)' }}>
-                <ShieldCheck size={12} style={{ color: 'var(--accent)' }} /> Permissions
+                <ShieldCheck size={12} style={{ color: 'var(--accent)' }} /> Access
               </span>
-              <button onClick={() => setEditingPerms(null)} title="Cancel" className="transition-colors hover:text-[var(--text)]" style={{ color: 'var(--text-3)' }}>
+              <button onClick={() => setEditingPerms(null)} title="Cancel" aria-label="Cancel" className="transition-colors hover:text-[var(--text)]" style={{ color: 'var(--text-3)' }}>
                 <X size={15} />
               </button>
             </div>
 
-            <div className="p-4">
-              <div className="data text-[11px] mb-3" style={{ color: 'var(--text-2)' }}>{editingPerms.username}</div>
-
-              {permissionNoteFor(editingPerms.role) && (
-                <p className="text-[10px] leading-relaxed mb-3" style={{ color: 'var(--text-3)' }}>{permissionNoteFor(editingPerms.role)}</p>
-              )}
-
-              <div className="space-y-px mb-4">
-                {permissionRowsFor(editingPerms.role).map(p => (
-                  <label
-                    key={p.key}
-                    title={p.status === 'always' ? 'Admin-tier accounts get this automatically.' : undefined}
-                    className="flex items-center justify-between p-2.5 border transition-colors"
-                    style={{
-                      background: 'var(--panel-2)', borderColor: 'var(--line)',
-                      cursor: p.status === 'editable' ? 'pointer' : 'not-allowed',
-                      opacity: p.status === 'editable' ? 1 : 0.4,
-                    }}
-                  >
-                    <span className="text-[11px]" style={{ color: 'var(--text)' }}>
-                      {p.label}
-                      {p.status === 'always' && <span className="ml-1.5 text-[9px] uppercase tracking-wide" style={{ color: 'var(--ok)' }}>automatic</span>}
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={p.status === 'always' ? true : !!permsDraft[p.key]}
-                      disabled={p.status !== 'editable'}
-                      onChange={e => setPermsDraft({ ...permsDraft, [p.key]: e.target.checked })}
-                      className="w-4 h-4"
-                      style={{ accentColor: 'var(--accent)' }}
-                    />
-                  </label>
-                ))}
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+              <div className="text-[12px] font-bold" style={{ color: 'var(--text)' }}>{editingPerms.full_name || editingPerms.username}</div>
+              <div className="data text-[10px] mb-3" style={{ color: 'var(--text-3)' }}>
+                @{editingPerms.username}{editingPerms.position ? ` · ${editingPerms.position}` : ''}
               </div>
+              <p className="text-[10px] leading-relaxed mb-3" style={{ color: 'var(--text-3)' }}>
+                Tick what this account can use. Where a permission shows a limit, open it to choose exactly which
+                cameras or crime types it covers — for example, the crime map for theft and vandalism only.
+                {permissionNoteFor(editingPerms.role) ? ` ${permissionNoteFor(editingPerms.role)}` : ''}
+              </p>
+              <PermissionTree
+                role={editingPerms.role}
+                perms={permsDraft}
+                onPermsChange={setPermsDraft}
+                scopes={scopesDraft}
+                onScopesChange={setScopesDraft}
+                cameras={scopeCameras}
+                cameraHint="No cameras in your area yet."
+                subject={editingPerms.full_name || editingPerms.username}
+              />
+            </div>
 
-              <button
-                onClick={savePermissions}
-                className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90 flex items-center justify-center gap-2"
-                style={{ background: 'var(--accent)' }}
-              >
-                <Save size={12} /> Save permissions
-              </button>
+            <div className="shrink-0 border-t p-3 space-y-2" style={{ borderColor: 'var(--line)' }}>
+              {accessError && (
+                <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: 'var(--critical)' }}>{accessError}</p>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setEditingPerms(null)}
+                  className="px-3 py-2.5 border text-[10px] font-bold uppercase tracking-wider hover:border-[var(--text-3)]"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={savePermissions}
+                  disabled={accessBusy}
+                  className="flex-1 py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
+                  style={{ background: 'var(--accent)' }}
+                >
+                  <Save size={12} /> {accessBusy ? 'Saving…' : 'Save access'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
-              {/* CAMERA-LEVEL ACCESS -- Phase 2, 2026-09-23. Independent of
-                  the checkbox list above (applies/saves immediately, not on
-                  the Save button) since it's a live restriction, not a
-                  draft. Leaving this empty changes nothing -- see
-                  DevteamView's Permissions tab for the same "opt-in only"
-                  note. */}
-              <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--line)' }}>
-                <div className="label mb-1.5">Camera-level access</div>
-                <p className="text-[9.5px] leading-relaxed mb-2" style={{ color: 'var(--text-3)' }}>
-                  Restrict this account to specific cameras only. No grants below means they see
-                  every camera your account can see.
-                </p>
-                {userGrants.length > 0 && (
-                  <div className="space-y-1 mb-2">
-                    {userGrants.map(g => {
-                      const cam = grantCameras.find(c => c.id === g.resource_id);
-                      return (
-                        <div key={g.id} className="flex items-center justify-between px-2 py-1.5 border" style={{ borderColor: 'var(--line-2)' }}>
-                          <span className="text-[10.5px]" style={{ color: 'var(--text)' }}>{cam ? cam.name : g.resource_id}</span>
-                          <button
-                            onClick={() => revokeCameraAccess(g)}
-                            disabled={grantBusy}
-                            className="text-[9px] uppercase tracking-wider disabled:opacity-40"
-                            style={{ color: 'var(--critical)' }}
-                          >
-                            Revoke
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                <div className="flex items-center gap-1.5">
-                  <select
-                    value={grantCameraId}
-                    onChange={e => setGrantCameraId(e.target.value)}
-                    className="flex-1 data border p-2 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)] transition-colors"
-                    style={inputStyle}
-                  >
-                    <option value="">select a camera…</option>
-                    {grantCameras.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                  <button
-                    onClick={grantCameraAccess}
-                    disabled={grantBusy || !grantCameraId}
-                    className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white disabled:opacity-40 transition-opacity hover:opacity-90 shrink-0"
-                    style={{ background: 'var(--accent)' }}
-                  >
-                    Grant
-                  </button>
-                </div>
+      {/* REMOVE ACCOUNT -- in-app confirmation */}
+      {confirmDeleteUser && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+          <div className="border w-full max-w-sm" style={modalShell} role="alertdialog" aria-label="Remove account">
+            <div className="h-9 flex items-center gap-2 px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <Trash2 size={13} style={{ color: 'var(--critical)' }} />
+              <span className="label" style={{ color: 'var(--text)' }}>Remove account</span>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text)' }}>
+                Remove <b>{confirmDeleteUser.full_name || confirmDeleteUser.username}</b>
+                <span className="data" style={{ color: 'var(--text-3)' }}> (@{confirmDeleteUser.username})</span>?
+              </p>
+              <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
+                They can no longer sign in. Their past actions stay in the audit log, and DevTeam can restore the account if this was a mistake.
+              </p>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setConfirmDeleteUser(null)}
+                  autoFocus
+                  className="px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider hover:border-[var(--text-3)]"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handleDelete(confirmDeleteUser.id)}
+                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white hover:opacity-90"
+                  style={{ background: 'var(--critical)' }}
+                >
+                  Remove account
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RESET PASSWORD -- in-app confirmation */}
+      {confirmResetUser && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+          <div className="border w-full max-w-sm" style={modalShell} role="alertdialog" aria-label="Reset password">
+            <div className="h-9 flex items-center gap-2 px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+              <AlertTriangle size={13} style={{ color: 'var(--warn)' }} />
+              <span className="label" style={{ color: 'var(--text)' }}>Reset password</span>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text)' }}>
+                Reset the password for <b>{confirmResetUser.full_name || confirmResetUser.username}</b>?
+              </p>
+              <ul className="text-[11px] leading-relaxed list-disc pl-4 space-y-1" style={{ color: 'var(--text-2)' }}>
+                <li>Their current password stops working immediately.</li>
+                <li>A new password is generated and shown to you once. Hand it to them in person.</li>
+              </ul>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setConfirmResetUser(null)}
+                  autoFocus
+                  className="px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider hover:border-[var(--text-3)]"
+                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handleResetPassword(confirmResetUser)}
+                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white hover:opacity-90"
+                  style={{ background: 'var(--warn)' }}
+                >
+                  Reset password
+                </button>
               </div>
             </div>
           </div>

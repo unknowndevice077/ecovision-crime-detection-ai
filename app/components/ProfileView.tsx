@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from 'react';
-import { User, Shield, MapPin, Key, ShieldCheck, LogOut, IdCard, Clock, ShieldX } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { User, Shield, MapPin, Key, ShieldCheck, LogOut, IdCard, Clock, ShieldX, Upload, FileText, X } from 'lucide-react';
 import { usePermissions } from '../hooks/usePermissions';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 
@@ -35,6 +35,22 @@ const VERIFICATION_STYLE: Record<string, { label: string; color: string; icon: R
   rejected: { label: 'Rejected — resubmit', color: 'var(--critical)', icon: <ShieldX size={10} /> },
 };
 
+// Mirrors backend.py's _save_verification_document limits, so a wrong file
+// is refused here with the reason instead of after the upload.
+const ID_TYPES = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+const ID_MAX_BYTES = 10 * 1024 * 1024;
+
+const VERIFICATION_HELP: Record<string, string> = {
+  unverified: 'Upload a clear photo or scan of a government-issued ID (PhilSys National ID, UMID, driver’s license, passport, PRC or company/agency ID). Your administrator checks it against your account details.',
+  pending: 'Your ID is waiting for review. If the copy you sent is blurry or cropped, upload a clearer one -- it replaces the first.',
+  rejected: 'Your ID was not accepted. Upload a new, readable copy showing your full name and photo.',
+  verified: 'Your ID has been confirmed.',
+};
+
+function formatBytes(n: number) {
+  return n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /* A labelled read-only field -- the profile screen is a credentials record,
    so every value gets the same label-over-value treatment as the incident
    log rather than bespoke card styling per item. */
@@ -61,6 +77,25 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadDone, setUploadDone] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [idPreview, setIdPreview] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!idFile || !idFile.type.startsWith('image/')) { setIdPreview(''); return; }
+    const url = URL.createObjectURL(idFile);
+    setIdPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [idFile]);
+
+  const chooseIdFile = (file: File | null) => {
+    setUploadError('');
+    if (!file) return;
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    if (!ID_TYPES.includes(ext)) { setUploadError('Use a JPG, PNG, WEBP or PDF file.'); return; }
+    if (file.size > ID_MAX_BYTES) { setUploadError(`That file is ${formatBytes(file.size)}; the limit is 10 MB.`); return; }
+    setUploadDone(false);
+    setIdFile(file);
+  };
 
   const submitIdDocument = async () => {
     if (!idFile) return;
@@ -218,29 +253,76 @@ export default function ProfileView({ currentUser, onLogout }: ProfileViewProps)
                 {verifStyle.icon} {verifStyle.label}
               </span>
             </div>
-            {(verifStatus === 'verified') ? (
-              <p className="text-[10px] leading-relaxed" style={{ color: 'var(--text-3)' }}>
-                Your ID has been confirmed.
-              </p>
-            ) : (
-              <div className="flex items-center gap-2">
+            <p className="text-[11px] leading-relaxed mb-2.5" style={{ color: 'var(--text-2)' }}>
+              {uploadDone ? 'ID submitted. It is now waiting for your administrator to review it.' : VERIFICATION_HELP[verifStatus] || VERIFICATION_HELP.unverified}
+            </p>
+            {verifStatus !== 'verified' && (
+              <>
                 <input
+                  ref={fileInputRef}
                   type="file"
-                  accept=".jpg,.jpeg,.png,.webp,.pdf"
-                  onChange={e => setIdFile(e.target.files?.[0] || null)}
-                  disabled={uploadBusy}
-                  className="flex-1 data text-[10px] border px-2 py-1.5 outline-none"
-                  style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
+                  accept={ID_TYPES.join(',')}
+                  className="hidden"
+                  aria-label="Choose an ID file"
+                  onChange={e => { chooseIdFile(e.target.files?.[0] || null); e.target.value = ''; }}
                 />
-                <button
-                  onClick={submitIdDocument}
-                  disabled={uploadBusy || !idFile}
-                  className="px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-wider text-white disabled:opacity-40 transition-opacity hover:opacity-90 shrink-0"
-                  style={{ background: 'var(--accent)' }}
-                >
-                  {uploadBusy ? 'Uploading…' : 'Submit'}
-                </button>
-              </div>
+                {idFile ? (
+                  <div className="border p-2.5 space-y-2.5" style={{ background: 'var(--bg)', borderColor: 'var(--line-2)' }}>
+                    <div className="flex items-center gap-2.5">
+                      {idPreview ? (
+                        <img src={idPreview} alt="Selected ID" className="w-16 h-11 object-cover border shrink-0" style={{ borderColor: 'var(--line)' }} />
+                      ) : (
+                        <div className="w-16 h-11 flex items-center justify-center border shrink-0" style={{ borderColor: 'var(--line)', color: 'var(--text-3)' }}>
+                          <FileText size={18} />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[11px] font-bold truncate" style={{ color: 'var(--text)' }}>{idFile.name}</div>
+                        <div className="data text-[10px]" style={{ color: 'var(--text-3)' }}>{formatBytes(idFile.size)}</div>
+                      </div>
+                      <button
+                        onClick={() => setIdFile(null)}
+                        disabled={uploadBusy}
+                        title="Remove this file"
+                        aria-label="Remove this file"
+                        className="p-1 hover:text-[var(--text)] shrink-0"
+                        style={{ color: 'var(--text-3)' }}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploadBusy}
+                        className="px-2.5 py-1.5 border text-[10px] font-bold uppercase tracking-wider hover:border-[var(--text-3)]"
+                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                      >
+                        Choose another
+                      </button>
+                      <button
+                        onClick={submitIdDocument}
+                        disabled={uploadBusy}
+                        className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white disabled:opacity-40 hover:opacity-90"
+                        style={{ background: 'var(--accent)' }}
+                      >
+                        {uploadBusy ? 'Uploading…' : 'Submit for review'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full flex flex-col items-center justify-center gap-1.5 py-4 border border-dashed transition-colors hover:border-[var(--accent)]"
+                    style={{ background: 'var(--bg)', borderColor: 'var(--line-2)' }}
+                  >
+                    <span className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white" style={{ background: 'var(--accent)' }}>
+                      <Upload size={12} /> {verifStatus === 'unverified' && !uploadDone ? 'Upload ID' : 'Upload a new ID'}
+                    </span>
+                    <span className="label">JPG, PNG, WEBP or PDF · up to 10 MB</span>
+                  </button>
+                )}
+              </>
             )}
             {uploadError && (
               <p className="text-[10px] mt-1.5" style={{ color: 'var(--critical)' }}>{uploadError}</p>

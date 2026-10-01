@@ -1018,6 +1018,7 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                 <CrimeReportsView
                   onUpdate={fetchStats}
                   currentUserRole={currentUser.role}
+                  canManageCameras={can('manage_cameras')}
                   onDeepLink={(crimeId: string) => {
                     // view_map and view_records are separate permissions --
                     // a user can have one without the other, and this link

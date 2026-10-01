@@ -28,11 +28,8 @@ function authHeaders() {
 // from any OTHER barangay filing a report or registering a camera here had
 // it silently saved under Cogon's jurisdiction instead of their own. Their
 // own barangay's incident/camera views would never show it; Cogon's would,
-// wrongly. Distinct from the SMARTPOLE_LOCATIONS/map-marker limitation
-// documented a few lines below (an openly-acknowledged fixed demo set) --
-// this is the actual database row's owner, which has real scoping
-// consequences via apply_scope()/scope_clause(), not just what pin renders
-// on a map. Matches the same "fell back to cogon for every account" bug
+// wrongly. This is the actual database row's owner, which has real scoping
+// consequences via apply_scope()/scope_clause(). Matches the same "fell back to cogon for every account" bug
 // class already fixed in page.tsx's fetchCameras/fetchStats.
 function currentUserBarangayId(): string {
   if (typeof window === "undefined") return "cogon";
@@ -44,15 +41,25 @@ function currentUserBarangayId(): string {
   }
 }
 
+// A smartpole is a registered camera pinned on the map (cameras.lat/lng,
+// 2026-10-01). These used to be three hardcoded Cogon poles that ignored
+// what was actually registered.
 type SmartpoleNode = {
-  id: string; name: string; street: string; lat: number; lng: number;
+  id: string; name: string; street: string; lat: number; lng: number; barangay_id: string;
 };
 
-const SMARTPOLE_LOCATIONS: SmartpoleNode[] = [
-  { id: 'sp1', name: 'Cogon Core Smartpole Node', street: 'Cogon Combado (Central Grid)', lat: 11.0176, lng: 124.6031 },
-  { id: 'sp2', name: 'Sector B Gate Smartpole Node', street: 'Brgy. Cogon Hall Boundary', lat: 11.0182, lng: 124.6025 },
-  { id: 'sp3', name: 'North Uplink Smartpole Node', street: 'District 18 (Cogon North Terminal)', lat: 11.0145, lng: 124.6055 }
-];
+type CameraRow = {
+  id: string; name: string; barangay_id: string;
+  lat: number | null; lng: number | null; location_label: string | null;
+};
+
+// Placing a pole: pick a spot, confirm it, then describe it. moveId set
+// means re-pinning an existing camera rather than registering one.
+type Placement = {
+  step: 'pick' | 'confirm' | 'details';
+  lat?: number; lng?: number;
+  moveId?: string;
+};
 
 
 type Incident = {
@@ -63,6 +70,7 @@ type Incident = {
   additional_officers: string; status: string;
   screenshot_path?: string;
   map_hidden?: number | boolean;
+  camera_id?: string | null;
 };
 
 // Officer's report body -- stored whole as incident_reports.report_body.
@@ -71,7 +79,7 @@ type Incident = {
 type ReportBody = {
   incident_type: string; severity: string; nature_of_incident: string; narrative: string;
   complainant: string; victim_details: string; suspect_description: string; witnesses: string;
-  property_damaged: string; evidence_secured: string; scene_lighting: string;
+  property_damaged: string; evidence_secured: string;
   action_taken: string; disposition: string; additional_officers: string;
   reporting_officer: string; rank: string; badge_number: string; supervisor: string;
 };
@@ -79,7 +87,7 @@ type ReportBody = {
 const EMPTY_REPORT: ReportBody = {
   incident_type: '', severity: '', nature_of_incident: '', narrative: '',
   complainant: '', victim_details: '', suspect_description: '', witnesses: '',
-  property_damaged: '', evidence_secured: '', scene_lighting: '',
+  property_damaged: '', evidence_secured: '',
   action_taken: '', disposition: '', additional_officers: '',
   reporting_officer: '', rank: '', badge_number: '', supervisor: '',
 };
@@ -93,8 +101,9 @@ type AiDraft = {
     people_in_frame?: number; attribution?: string; track_id?: number;
     weapons: { name: string; conf: number }[];
   };
-  scene: { lighting?: string; brightness?: number };
-  evidence: { snapshot?: string; snapshot_sha256?: string; clips: { filename: string; duration?: string; sha256?: string }[] };
+  // Clips are named "Assault 1", "Assault 2"...; file names and integrity
+  // hashes stay in the record, not in what the officer reads.
+  evidence: { snapshot?: string; clips: { label: string; length?: string | null }[] };
   narrative: string; suspect_description: string; recommended_action: string;
 };
 
@@ -116,9 +125,9 @@ const POLICE_REPORT_ROLES = new Set(['PNP_ADMIN', 'PNP_OFFICER', 'DEVTEAM']);
 function aiToBody(ai: AiDraft): ReportBody {
   const evidence: string[] = [];
   if (ai.evidence.snapshot) {
-    evidence.push(`Evidence frame captured at detection${ai.evidence.snapshot_sha256 ? ` (SHA-256 ${ai.evidence.snapshot_sha256.slice(0, 16)}…)` : ''}`);
+    evidence.push('Still image captured at the moment of detection');
   }
-  ai.evidence.clips.forEach(c => evidence.push(`Video clip ${c.filename}${c.duration ? ` (${c.duration})` : ''}`));
+  ai.evidence.clips.forEach(c => evidence.push(`Video clip "${c.label}"${c.length ? ` (${c.length})` : ''}`));
   return {
     ...EMPTY_REPORT,
     incident_type: ai.incident_type || '',
@@ -128,7 +137,6 @@ function aiToBody(ai: AiDraft): ReportBody {
     narrative: ai.narrative,
     suspect_description: ai.suspect_description,
     evidence_secured: evidence.join('\n'),
-    scene_lighting: ai.scene.lighting || '',
   };
 }
 
@@ -136,23 +144,34 @@ interface CrimeReportsViewProps {
   onUpdate: () => void;
   onDeepLink?: (crimeId: string) => void;
   currentUserRole?: string;
+  // From the account's real permissions (usePermissions), not its role:
+  // Add smartpole / Move pin show only for accounts that can manage
+  // cameras. The backend enforces the same (manage_cameras + ownership).
+  canManageCameras?: boolean;
 }
 
-// Cameras are barangay property; the backend hard-bans PNP_ADMIN and
-// PNP_OFFICER from managing them regardless of tier (backend.py's
-// BARANGAY_ONLY_PERMISSIONS check runs before the admin bypass). "Add
-// smartpole" used to be shown to everyone and just 403 for police
-// accounts with that exact message -- hiding the control for a role that
-// can never use it beats showing it and having it fail.
-const PNP_SIDE_ROLES = new Set(['PNP_ADMIN', 'PNP_OFFICER']);
-
-export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole }: CrimeReportsViewProps) {
-  const canManageCameras = !PNP_SIDE_ROLES.has(currentUserRole || '');
+export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole, canManageCameras = false }: CrimeReportsViewProps) {
   const { apiUrl: API_URL } = useRuntimeConfig();
+  const [cameras, setCameras] = useState<CameraRow[]>([]);
+  const poles = useMemo<SmartpoleNode[]>(() => cameras
+    .filter(c => c.lat != null && c.lng != null)
+    .map(c => ({ id: c.id, name: c.name, street: c.location_label || '', lat: c.lat as number, lng: c.lng as number, barangay_id: c.barangay_id })),
+  [cameras]);
+  const unplacedCameras = useMemo(() => cameras.filter(c => c.lat == null || c.lng == null), [cameras]);
+  // Leaflet handlers are bound once; they read the live lists via refs.
+  const polesRef = useRef<SmartpoleNode[]>([]);
+  polesRef.current = poles;
   const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
   const selectedPole = useMemo<SmartpoleNode | null>(() => {
-    return selectedPoleId ? SMARTPOLE_LOCATIONS.find(p => p.id === selectedPoleId) ?? null : null;
-  }, [selectedPoleId]);
+    return selectedPoleId ? poles.find(p => p.id === selectedPoleId) ?? null : null;
+  }, [selectedPoleId, poles]);
+  const [placement, setPlacement] = useState<Placement | null>(null);
+  const placementRef = useRef<Placement | null>(null);
+  placementRef.current = placement;
+  const draftMarkerRef = useRef<any>(null);
+  const [placeMode, setPlaceMode] = useState<'new' | 'existing'>('new');
+  const [placeExistingId, setPlaceExistingId] = useState('');
+  const [newSmartpoleLabel, setNewSmartpoleLabel] = useState('');
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [poleDateFilter, setPoleDateFilter] = useState("");
   const [poleTypeFilter, setPoleTypeFilter] = useState("ALL");
@@ -161,22 +180,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
   const [filingTarget, setFilingTarget] = useState<Incident | null>(null);
   const [actionError, setActionError] = useState('');
 
-  // BUG FOUND 2026-09-22 (user report: "brgy cant add smartpoles"). This
-  // used to collect the two fields via two chained window.prompt() calls.
-  // Electron's renderer never implements window.prompt() -- unlike
-  // alert()/confirm(), which it does support via native dialogs -- so
-  // inside the actual packaged app the call just returns null immediately
-  // with no dialog ever appearing. `if (!name) return;` then silently bails
-  // with zero feedback: the button visibly does nothing. Invisible during
-  // this app's own dev-loop testing because that always runs in a real
-  // browser tab (Chrome/the Browser tool), never through Electron's
-  // BrowserWindow, so prompt() worked there. A controlled in-app modal
-  // replaces both prompts -- same POST /api/cameras call as before, just
-  // collecting the two fields through real form inputs instead of an API
-  // Electron's renderer doesn't have.
-  const [showAddSmartpoleModal, setShowAddSmartpoleModal] = useState(false);
-  const [newSmartpoleName, setNewSmartpoleName] = useState('Sector D Terminal');
-  const [newSmartpolePath, setNewSmartpolePath] = useState('rtsp://192.168.1.50/live');
+  // In-app form, never window.prompt(): Electron's renderer doesn't
+  // implement prompt(), so the 2026-09-22 version of this button did
+  // nothing in the packaged app.
+  const [newSmartpoleName, setNewSmartpoleName] = useState('');
+  const [newSmartpolePath, setNewSmartpolePath] = useState('');
   const [addSmartpoleBusy, setAddSmartpoleBusy] = useState(false);
 
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
@@ -207,8 +215,10 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       // Expunged from this view only -- Crime History still has it.
       if (inc.map_hidden === 1 || inc.map_hidden === true) return false;
       if (selectedPole) {
-        const match = inc.location_name.toLowerCase().includes(selectedPole.name.toLowerCase()) ||
-                      inc.location_name.toLowerCase().includes(selectedPole.street.toLowerCase());
+        // The incident's real camera link; older rows without one fall
+        // back to the pole's name appearing in the location text.
+        const match = inc.camera_id ? inc.camera_id === selectedPole.id
+          : (inc.location_name || '').toLowerCase().includes(selectedPole.name.toLowerCase());
         if (!match) return false;
       }
       if (poleDateFilter && !inc.occurred_date.includes(poleDateFilter)) return false;
@@ -279,13 +289,13 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
     if (!L || !mapRef.current) return;
     const previousSelectedId = selectedPoleIdRef.current;
     if (previousSelectedId && poleMarkersRef.current[previousSelectedId]) {
-      const previousPole = SMARTPOLE_LOCATIONS.find(p => p.id === previousSelectedId);
+      const previousPole = polesRef.current.find(p => p.id === previousSelectedId);
       if (previousPole) {
         poleMarkersRef.current[previousSelectedId].setIcon(buildPoleIcon(L, previousPole, null));
       }
     }
     if (newSelectedId) {
-      const nextPole = SMARTPOLE_LOCATIONS.find(p => p.id === newSelectedId);
+      const nextPole = polesRef.current.find(p => p.id === newSelectedId);
       if (nextPole && poleMarkersRef.current[newSelectedId]) {
         poleMarkersRef.current[newSelectedId].setIcon(buildPoleIcon(L, nextPole, newSelectedId));
       }
@@ -296,7 +306,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
     const L = (window as any).L;
     if (!L || !mapRef.current) return;
 
-    SMARTPOLE_LOCATIONS.forEach(pole => {
+    polesRef.current.forEach(pole => {
       const marker = poleMarkersRef.current[pole.id];
       if (!marker) return;
       marker.setIcon(buildPoleIcon(L, pole));
@@ -335,15 +345,24 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       });
   };
 
+  // Redrawn whenever the camera list changes (add, move, delete -- pushed
+  // live on the "cameras" channel).
+  const fittedRef = useRef(false);
   const createPoleMarkers = () => {
     const L = (window as any).L;
     if (!L || !mapRef.current) return;
 
-    SMARTPOLE_LOCATIONS.forEach(pole => {
-      const marker = L.marker([pole.lat, pole.lng], { icon: buildPoleIcon(L, pole, null), zIndexOffset: 1000 })
+    Object.values(poleMarkersRef.current).forEach((m: any) => m.remove());
+    poleMarkersRef.current = {};
+    polesRef.current.forEach(pole => {
+      const marker = L.marker([pole.lat, pole.lng], {
+        icon: buildPoleIcon(L, pole), zIndexOffset: 1000,
+        title: pole.street ? `${pole.name} — ${pole.street}` : pole.name,
+      })
         .addTo(mapRef.current)
         .on('click', (e: any) => {
           L.DomEvent.stopPropagation(e);
+          if (placementRef.current) return;
           if (selectedPoleIdRef.current === pole.id) return;
 
           updatePoleSelectionIcons(pole.id);
@@ -355,7 +374,93 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
         });
       poleMarkersRef.current[pole.id] = marker;
     });
+    // First load: frame the account's own poles instead of a fixed spot.
+    if (!fittedRef.current && polesRef.current.length) {
+      fittedRef.current = true;
+      const pts = polesRef.current.map(p => [p.lat, p.lng]);
+      if (pts.length === 1) mapRef.current.setView(pts[0], 17);
+      else mapRef.current.fitBounds(pts, { padding: [40, 40], maxZoom: 17 });
+    }
   };
+
+  const fetchCameras = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/cameras`, { headers: authHeaders() });
+      if (res.ok) setCameras(await res.json());
+    } catch { /* keep the last list; the incident fetch reports connectivity */ }
+  }, [API_URL]);
+  useLiveChannel("cameras", fetchCameras);
+
+  useEffect(() => {
+    createPoleMarkers();
+    if (selectedPoleId && !poles.some(p => p.id === selectedPoleId)) {
+      selectedPoleIdRef.current = null;
+      setSelectedPoleId(null);
+    }
+  }, [poles]);
+
+  // ── Placing a pole ────────────────────────────────────────────────────
+  const clearDraftMarker = () => {
+    draftMarkerRef.current?.remove();
+    draftMarkerRef.current = null;
+  };
+
+  const dropDraftPin = (lat: number, lng: number) => {
+    const L = (window as any).L;
+    if (!L || !mapRef.current) return;
+    clearDraftMarker();
+    const icon = L.divIcon({
+      className: 'draft-pole-icon',
+      html: `<div style="position:relative;width:30px;height:42px;">
+        <div style="position:absolute;left:3px;top:0;width:24px;height:24px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);
+          background:var(--accent);border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.6);"></div>
+        <div style="position:absolute;left:13px;top:31px;width:4px;height:4px;border-radius:50%;background:var(--accent);
+          box-shadow:0 0 0 4px rgba(45,111,247,0.3);"></div></div>`,
+      iconSize: [30, 42], iconAnchor: [15, 33],
+    });
+    const m = L.marker([lat, lng], { icon, draggable: true, zIndexOffset: 2000, title: 'Drag to adjust' }).addTo(mapRef.current);
+    m.on('dragend', () => {
+      const ll = m.getLatLng();
+      setPlacement(prev => prev ? { ...prev, lat: ll.lat, lng: ll.lng, step: 'confirm' } : prev);
+    });
+    draftMarkerRef.current = m;
+  };
+
+  const onMapClick = (e: any) => {
+    const current = placementRef.current;
+    if (!current || current.step === 'details') return;
+    const { lat, lng } = e.latlng;
+    dropDraftPin(lat, lng);
+    setPlacement({ ...current, step: 'confirm', lat, lng });
+  };
+  const onMapClickRef = useRef(onMapClick);
+  onMapClickRef.current = onMapClick;
+
+  const startPlacement = (moveId?: string) => {
+    setActionError('');
+    setIsManualFilingActive(false);
+    setPlaceMode(unplacedCameras.length && !moveId ? 'existing' : 'new');
+    setPlaceExistingId(unplacedCameras[0]?.id || '');
+    setNewSmartpoleName('');
+    setNewSmartpolePath('');
+    setNewSmartpoleLabel(moveId ? (cameras.find(c => c.id === moveId)?.location_label || '') : '');
+    setPlacement({ step: 'pick', moveId });
+  };
+
+  const cancelPlacement = () => {
+    clearDraftMarker();
+    setPlacement(null);
+    setActionError('');
+  };
+
+  useEffect(() => {
+    const el = mapContainerRef.current;
+    if (el) el.style.cursor = placement?.step === 'pick' ? 'crosshair' : '';
+    if (!placement) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') cancelPlacement(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [placement]);
 
   useEffect(() => {
     refreshIncidentMarkers();
@@ -388,7 +493,9 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
           center: [11.0176, 124.6031], zoom: 17, zoomControl: false, attributionControl: false, doubleClickZoom: false
         });
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(mapRef.current);
+        mapRef.current.on('click', (e: any) => onMapClickRef.current(e));
         createPoleMarkers();
+        refreshIncidentMarkers();
       }
     };
 
@@ -445,7 +552,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       officer: "MANUAL_ENTRY",
       lat: selectedPole.lat,
       lng: selectedPole.lng,
-      location_name: selectedPole.name,
+      location_name: selectedPole.street ? `${selectedPole.name}, ${selectedPole.street}` : selectedPole.name,
+      camera_id: selectedPole.id,
       severity: manualSeverity,
       occurred_date: now.toISOString().split('T')[0],
       occurred_time: now.toTimeString().split(' ')[0].replace(/:/g, '').substring(0,4),
@@ -454,7 +562,8 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
       arrival_reason: "Field Request",
       additional_officers: "None",
       status: "Active",
-      barangay_id: currentUserBarangayId()
+      // The pole's own barangay: a police account has none of its own.
+      barangay_id: selectedPole.barangay_id || currentUserBarangayId()
     };
     const res = await fetch(`${API_URL}/api/incidents`, {
       method: "POST",
@@ -558,27 +667,38 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
 
   const closeModal = () => { setShowFilingModal(false); setFilingTarget(null); };
 
-  const submitAddSmartpole = async () => {
-    const name = newSmartpoleName.trim();
-    const path = newSmartpolePath.trim();
-    if (!name || !path) return;
+  // Saves a confirmed spot: re-pins an existing camera, or registers a new
+  // one already placed.
+  const placingExisting = !placement?.moveId && placeMode === 'existing' && unplacedCameras.length > 0;
+  const placementReady = !!placement?.moveId || (placingExisting
+    ? !!placeExistingId : !!(newSmartpoleName.trim() && newSmartpolePath.trim()));
+  const savePlacement = async () => {
+    if (!placement || placement.lat == null || placement.lng == null || !placementReady) return;
+    const location = { lat: placement.lat, lng: placement.lng, location_label: newSmartpoleLabel.trim() || null };
+    const existingId = placement.moveId || (placingExisting ? placeExistingId : '');
     setAddSmartpoleBusy(true);
     setActionError('');
     try {
-      const res = await fetch(`${API_URL}/api/cameras`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ name, url: path, barangay_id: currentUserBarangayId() }),
-      });
-      if (res.ok) {
-        onUpdate();
-        setShowAddSmartpoleModal(false);
-      } else {
-        const body = await res.json().catch(() => ({}));
-        setActionError(body.detail || 'Could not register that camera.');
+      const res = existingId
+        ? await fetch(`${API_URL}/api/cameras/${existingId}/location`, {
+            method: 'PUT', headers: authHeaders(), body: JSON.stringify(location),
+          })
+        : await fetch(`${API_URL}/api/cameras`, {
+            method: 'POST', headers: authHeaders(),
+            body: JSON.stringify({ name: newSmartpoleName.trim(), url: newSmartpolePath.trim(),
+                                   barangay_id: currentUserBarangayId(), location }),
+          });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setActionError(typeof body.detail === 'string' ? body.detail : 'The smartpole was not saved.');
+        return;
       }
+      clearDraftMarker();
+      setPlacement(null);
+      await fetchCameras();
+      onUpdate();
     } catch {
-      setActionError('Backend connection failure -- camera was not registered.');
+      setActionError('Backend connection failure -- the smartpole was not saved.');
     } finally {
       setAddSmartpoleBusy(false);
     }
@@ -616,20 +736,18 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
         <div className="flex items-center gap-2">
           <span className="label">Jump to</span>
           <select
-            title="Navigate directly to a specific area"
+            title="Go to a smartpole"
+            value=""
+            disabled={!poles.length}
             onChange={(e) => {
-              const val = e.target.value;
-              if (val === 'cogon') handleBarangayJump(11.0176, 124.6031);
-              else if (val === 'valencia') handleBarangayJump(11.0055, 124.6122);
-              else if (val === 'district18') handleBarangayJump(11.0145, 124.6055);
+              const pole = poles.find(p => p.id === e.target.value);
+              if (pole) handleBarangayJump(pole.lat, pole.lng);
             }}
-            className="data border px-2 py-1.5 text-[11px] outline-none cursor-pointer focus:border-[var(--accent)] transition-colors"
+            className="data border px-2 py-1.5 text-[11px] outline-none cursor-pointer focus:border-[var(--accent)] transition-colors disabled:opacity-50"
             style={{ ...fieldStyle, color: 'var(--text-2)' }}
           >
-            <option value="">Select area…</option>
-            <option value="cogon">Brgy. Cogon</option>
-            <option value="valencia">Brgy. Valencia</option>
-            <option value="district18">District 18 HQ</option>
+            <option value="">{poles.length ? 'Select smartpole…' : 'No smartpoles pinned'}</option>
+            {poles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
 
           {canManageCameras && (
@@ -637,16 +755,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
           <div className="w-px h-5" style={{ background: 'var(--line-2)' }} />
 
           <button
-            onClick={() => {
-              setActionError('');
-              setNewSmartpoleName('Sector D Terminal');
-              setNewSmartpolePath('rtsp://192.168.1.50/live');
-              setShowAddSmartpoleModal(true);
-            }}
+            onClick={() => placement ? cancelPlacement() : startPlacement()}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90"
-            style={{ background: 'var(--accent)' }}
+            style={{ background: placement ? 'var(--text-3)' : 'var(--accent)' }}
           >
-            <Plus size={12} /> Add smartpole
+            {placement ? <><X size={12} /> Cancel placing</> : <><Plus size={12} /> Add smartpole</>}
           </button>
           </>
           )}
@@ -670,6 +783,142 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
           style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
         >
           <div ref={mapContainerRef} className="w-full h-full z-0" />
+
+          {!poles.length && !placement && (
+            <div className="absolute left-1/2 top-3 -translate-x-1/2 z-[400] px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider"
+              style={{ background: 'var(--panel)', borderColor: 'var(--line-2)', color: 'var(--text-2)' }}>
+              No smartpoles pinned yet{canManageCameras ? ' — use Add smartpole to place one' : ''}
+            </div>
+          )}
+
+          {placement?.step === 'pick' && (
+            <div className="absolute left-1/2 top-3 -translate-x-1/2 z-[400] flex items-center gap-3 px-3 py-2 border"
+              style={{ background: 'var(--panel)', borderColor: 'var(--accent)' }}>
+              <span className="text-[11px] font-bold uppercase tracking-wide" style={{ color: 'var(--text)' }}>
+                {placement.moveId ? 'Click the map where this smartpole now stands' : 'Click the map where the smartpole stands'}
+              </span>
+              <span className="label">Esc to cancel</span>
+            </div>
+          )}
+
+          {placement && placement.step !== 'pick' && placement.lat != null && placement.lng != null && (
+            <div className="absolute right-3 top-3 z-[400] w-[300px] border shadow-xl"
+              style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}
+              role="dialog" aria-label="Confirm smartpole location">
+              <div className="h-9 flex items-center justify-between px-3 border-b" style={{ borderColor: 'var(--line)' }}>
+                <span className="label" style={{ color: 'var(--text)' }}>
+                  {placement.step === 'confirm' ? 'Confirm location' : placement.moveId ? 'Move smartpole' : 'Smartpole details'}
+                </span>
+                <button title="Cancel" aria-label="Cancel" onClick={cancelPlacement} className="hover:text-[var(--text)]" style={{ color: 'var(--text-3)' }}>
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="p-3 space-y-3">
+                {placement.step === 'confirm' ? (
+                  <>
+                    <p className="text-[13px] font-bold" style={{ color: 'var(--text)' }}>Is the smartpole located here?</p>
+                    <p className="data text-[11px]" style={{ color: 'var(--text-2)' }}>
+                      {placement.lat.toFixed(6)}, {placement.lng.toFixed(6)}
+                    </p>
+                    <p className="label leading-relaxed normal-case">
+                      Zoom in and check the pin sits on the pole itself. Drag the pin to adjust, or click elsewhere on the map.
+                      Alerts from this camera will be placed at this spot.
+                    </p>
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button
+                        onClick={() => { clearDraftMarker(); setPlacement({ step: 'pick', moveId: placement.moveId }); }}
+                        className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border hover:border-[var(--text-3)]"
+                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                      >
+                        No, pick again
+                      </button>
+                      <button
+                        onClick={() => setPlacement({ ...placement, step: 'details' })}
+                        className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white hover:opacity-90"
+                        style={{ background: 'var(--accent)' }}
+                      >
+                        Yes, it&apos;s here
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="data text-[10px]" style={{ color: 'var(--text-3)' }}>
+                      Pinned at {placement.lat.toFixed(6)}, {placement.lng.toFixed(6)}
+                    </p>
+                    {placement.moveId ? (
+                      <p className="text-[11px]" style={{ color: 'var(--text-2)' }}>
+                        Moving <b style={{ color: 'var(--text)' }}>{cameras.find(c => c.id === placement.moveId)?.name}</b>
+                      </p>
+                    ) : unplacedCameras.length > 0 && (
+                      <div className="grid grid-cols-2 border" style={{ borderColor: 'var(--line-2)' }}>
+                        {(['existing', 'new'] as const).map(m => (
+                          <button key={m} onClick={() => setPlaceMode(m)}
+                            className="py-1.5 text-[10px] font-bold uppercase tracking-wider"
+                            style={placeMode === m ? { background: 'var(--accent)', color: '#fff' } : { color: 'var(--text-2)' }}>
+                            {m === 'existing' ? 'Registered camera' : 'New smartpole'}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {placingExisting ? (
+                      <label className="block">
+                        <span className={labelClass}>Camera not yet on the map</span>
+                        <select value={placeExistingId} onChange={e => setPlaceExistingId(e.target.value)}
+                          className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)]"
+                          style={{ ...fieldStyle, color: 'var(--text)' }}>
+                          {unplacedCameras.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                      </label>
+                    ) : !placement.moveId && (
+                      <>
+                        <label className="block">
+                          <span className={labelClass}>Smartpole name</span>
+                          <input type="text" value={newSmartpoleName} autoFocus
+                            onChange={e => setNewSmartpoleName(e.target.value)} placeholder="e.g. Plaza North Pole"
+                            className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)]"
+                            style={{ ...fieldStyle, color: 'var(--text)' }} />
+                        </label>
+                        <label className="block">
+                          <span className={labelClass}>Camera stream (RTSP)</span>
+                          <input type="text" value={newSmartpolePath}
+                            onChange={e => setNewSmartpolePath(e.target.value)} placeholder="rtsp://user:pass@192.168.1.50/live"
+                            className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)]"
+                            style={{ ...fieldStyle, color: 'var(--text)' }} />
+                        </label>
+                      </>
+                    )}
+                    <label className="block">
+                      <span className={labelClass}>Street / landmark (optional)</span>
+                      <input type="text" value={newSmartpoleLabel}
+                        onChange={e => setNewSmartpoleLabel(e.target.value)} placeholder="e.g. Corner Real St. & Bonifacio"
+                        className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)]"
+                        style={{ ...fieldStyle, color: 'var(--text)' }} />
+                    </label>
+                    {actionError && (
+                      <div className="px-2.5 py-1.5 border text-[10px] font-bold uppercase tracking-wider"
+                        style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}>
+                        {actionError}
+                      </div>
+                    )}
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button onClick={() => setPlacement({ ...placement, step: 'confirm' })}
+                        className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border hover:border-[var(--text-3)]"
+                        style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}>
+                        Back
+                      </button>
+                      <button onClick={savePlacement} disabled={addSmartpoleBusy || !placementReady}
+                        className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white hover:opacity-90 disabled:opacity-50"
+                        style={{ background: 'var(--accent)' }}>
+                        {addSmartpoleBusy ? 'Saving…' : placement.moveId ? 'Save new location'
+                          : placingExisting ? 'Pin camera here' : 'Register smartpole'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ═══ INCIDENT FEED ══════════════════════════════════════════════ */}
@@ -713,10 +962,22 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
           </div>
 
           {/* Pole subtitle */}
-          <div className="shrink-0 px-2.5 py-1.5 border-b" style={{ borderColor: 'var(--line)', background: 'var(--bg)' }}>
-            <span className="data text-[10px] truncate block" style={{ color: 'var(--text-3)' }}>
-              {selectedPole ? selectedPole.street : 'Monitoring all areas'}
+          <div className="shrink-0 px-2.5 py-1.5 border-b flex items-center gap-2" style={{ borderColor: 'var(--line)', background: 'var(--bg)' }}>
+            <span className="data text-[10px] truncate block flex-1" style={{ color: 'var(--text-3)' }}>
+              {selectedPole
+                ? (selectedPole.street || `${selectedPole.lat.toFixed(5)}, ${selectedPole.lng.toFixed(5)}`)
+                : 'Monitoring all areas'}
             </span>
+            {selectedPole && canManageCameras && !placement && (
+              <button
+                onClick={() => startPlacement(selectedPole.id)}
+                title="Move this smartpole's pin"
+                className="shrink-0 text-[9px] font-bold uppercase tracking-wider hover:text-[var(--text)]"
+                style={{ color: 'var(--text-2)' }}
+              >
+                Move pin
+              </button>
+            )}
           </div>
 
           {isManualFilingActive && selectedPole && (
@@ -855,9 +1116,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                       </div>
                     ) : null}
 
-                    <p className="text-[10px] leading-snug select-text" style={{ color: 'var(--text-2)' }}>
-                      {inc.narrative}
-                    </p>
+                    {inc.narrative && (
+                      <p className="text-[10px] leading-snug select-text" style={{ color: 'var(--text-2)' }}>
+                        {inc.narrative}
+                      </p>
+                    )}
 
                     <div
                       className="flex gap-2 pt-1.5 border-t justify-end items-center"
@@ -924,85 +1187,9 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
         </div>
       )}
 
-      {/* ADD SMARTPOLE MODAL -- replaces the old window.prompt() flow, which
-          Electron's renderer never actually implements (see the 2026-09-22
-          note on showAddSmartpoleModal's declaration above). */}
-      {showAddSmartpoleModal && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.82)' }}>
-          <div className="border w-full max-w-md" style={{ background: 'var(--panel)', borderColor: 'var(--line-2)' }}>
-            <div className="h-11 flex justify-between items-center px-3 border-b" style={{ borderColor: 'var(--line)' }}>
-              <div className="flex items-center gap-2.5">
-                <Plus size={14} style={{ color: 'var(--accent)' }} />
-                <span className="text-[12px] font-bold uppercase tracking-wide text-[var(--text)]">Register Smartpole</span>
-              </div>
-              <button
-                title="Cancel"
-                aria-label="Cancel"
-                onClick={() => setShowAddSmartpoleModal(false)}
-                className="transition-colors hover:text-[var(--text)]"
-                style={{ color: 'var(--text-3)' }}
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              <div>
-                <span className={labelClass}>Identifier label</span>
-                <input
-                  type="text"
-                  value={newSmartpoleName}
-                  onChange={(e) => setNewSmartpoleName(e.target.value)}
-                  autoFocus
-                  className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)] transition-colors"
-                  style={{ ...fieldStyle, color: 'var(--text)' }}
-                />
-              </div>
-              <div>
-                <span className={labelClass}>RTSP stream path</span>
-                <input
-                  type="text"
-                  value={newSmartpolePath}
-                  onChange={(e) => setNewSmartpolePath(e.target.value)}
-                  className="w-full data border px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)] transition-colors"
-                  style={{ ...fieldStyle, color: 'var(--text)' }}
-                />
-              </div>
-              <p className="label">
-                It will appear in the Cameras tab immediately -- this map's pole markers are a fixed demo set for now and won't show it yet.
-              </p>
-              {actionError && (
-                <div
-                  className="px-2.5 py-1.5 border text-[10px] font-bold uppercase tracking-wider"
-                  style={{ background: 'rgba(229,52,47,0.08)', borderColor: 'var(--critical)', color: 'var(--critical)' }}
-                >
-                  {actionError}
-                </div>
-              )}
-              <div className="flex justify-end gap-2 pt-1">
-                <button
-                  onClick={() => setShowAddSmartpoleModal(false)}
-                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-colors hover:border-[var(--text-3)]"
-                  style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={submitAddSmartpole}
-                  disabled={addSmartpoleBusy || !newSmartpoleName.trim() || !newSmartpolePath.trim()}
-                  className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-                  style={{ background: 'var(--accent)' }}
-                >
-                  {addSmartpoleBusy ? 'Registering…' : 'Register'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* REPORT WORKSPACE (2026-09-29). Left: what the AI actually recorded
-          (evidence frame, detector, confidence, people, weapons, measured
-          lighting, hashes). Right: the officer's report, prefilled from the
+          (evidence frame, detector, confidence, people, weapons, the
+          evidence clips by name). Right: the officer's report, prefilled from the
           AI draft and fully editable -- fields the officer changed are
           tagged EDITED so a reviewer can see what the AI said vs. what the
           officer confirmed. Save draft keeps it unofficial; Confirm & file
@@ -1102,9 +1289,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                         {aiDraft.detection.weapons.length > 0 && (
                           <FactRow label="Weapons" value={aiDraft.detection.weapons.map(w => `${w.name} (${Math.round(w.conf * 100)}%)`).join(', ')} tone="var(--critical)" />
                         )}
-                        {aiDraft.scene.lighting && (
-                          <FactRow label="Lighting" value={`${aiDraft.scene.lighting}${aiDraft.scene.brightness != null ? ` · ${aiDraft.scene.brightness}/255` : ''}`} />
-                        )}
                         <FactRow label="Camera" value={aiDraft.location.camera_name || '—'} />
                         <FactRow label="Barangay" value={[aiDraft.location.barangay, aiDraft.location.city_municipality].filter(Boolean).join(', ') || '—'} />
                       </div>
@@ -1112,13 +1296,11 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                       <div className="border p-3 space-y-1.5" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
                         <span className="label block">Evidence on file</span>
                         {aiDraft.evidence.snapshot ? (
-                          <p className="data text-[10px] break-all" style={{ color: 'var(--text-2)' }}>
-                            Frame · SHA-256 {aiDraft.evidence.snapshot_sha256 ? `${aiDraft.evidence.snapshot_sha256.slice(0, 24)}…` : 'not hashed'}
-                          </p>
-                        ) : <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>No evidence frame.</p>}
+                          <p className="text-[10.5px]" style={{ color: 'var(--text-2)' }}>Still image from the moment of detection</p>
+                        ) : <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>No still image.</p>}
                         {aiDraft.evidence.clips.map(c => (
-                          <p key={c.filename} className="data text-[10px] break-all" style={{ color: 'var(--text-2)' }}>
-                            Clip {c.filename}{c.duration ? ` · ${c.duration}` : ''}
+                          <p key={c.label} className="text-[10.5px]" style={{ color: 'var(--text-2)' }}>
+                            {c.label}{c.length ? <span style={{ color: 'var(--text-3)' }}> · {c.length}</span> : null}
                           </p>
                         ))}
                       </div>
@@ -1166,8 +1348,6 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                     </div>
                     <ReportField label="Narrative" required rows={9} value={reportBody.narrative} ai={aiBaseline?.narrative} disabled={reportLocked}
                       onChange={v => setReportField('narrative', v)} />
-                    <ReportField label="Scene lighting (measured from evidence frame)" value={reportBody.scene_lighting} ai={aiBaseline?.scene_lighting} disabled={reportLocked}
-                      onChange={v => setReportField('scene_lighting', v)} placeholder="Not measurable — no evidence frame" />
                   </ReportSection>
 
                   <ReportSection icon={<Info size={11} />} title="Persons involved">

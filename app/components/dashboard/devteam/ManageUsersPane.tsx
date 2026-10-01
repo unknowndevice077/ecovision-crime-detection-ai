@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from 'react';
-import { History, IdCard, KeyRound, Pencil, Save, Search, ShieldCheck, ShieldX, Trash2, Upload, User, Users2, X } from 'lucide-react';
+import { AlertTriangle, History, IdCard, KeyRound, Pencil, Save, Search, ShieldCheck, ShieldX, Trash2, Upload, User, Users2, X } from 'lucide-react';
 import PermissionTree, { ResourceScopes, narrowedOnly, scopeProblem, scopesForSave } from './PermissionTree';
 import {
   ADMIN_ROLES, CameraRow, CustomRole, EmptyPane, FieldInput, InfoRow, ManagedUser, PNP_ROLES, PaneHeader,
@@ -54,7 +54,7 @@ const normScopes = (s: ResourceScopes) => JSON.stringify(
     .map(([k, dims]) => [k, Object.entries(dims).sort(([a], [b]) => a.localeCompare(b)).map(([d, ids]) => [d, [...(ids || [])].sort()])]));
 
 const detailsFrom = (u: ManagedUser) => ({
-  username: u.username, password: '', assignment: u.assignment || '', display_title: u.display_title || '',
+  username: u.username, password: '', password_confirm: '', assignment: u.assignment || '', display_title: u.display_title || '',
   full_name: u.full_name || '', birthdate: u.birthdate || '', home_address: u.home_address || '',
   contact_number: u.contact_number || '', position: u.position || '',
   barangay_id: u.barangay_id || '', station_id: u.station_id || '',
@@ -255,14 +255,27 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
   const customRole = customRoles.find(r => r.id === u.custom_role_id);
   const age = ageFrom(u.birthdate);
 
-  const saveDetails = async () => {
+  // A typed-in password used to be saved with the rest of the form, no
+  // questions asked. It now has to be typed twice and confirmed in a
+  // dialog that says what happens to the person.
+  const [confirmPassword, setConfirmPassword] = useState(false);
+  const passwordProblem = !details.password ? ''
+    : details.password.length < 8 ? 'The new password needs at least 8 characters.'
+    : details.password !== details.password_confirm ? 'The two passwords don\'t match.' : '';
+
+  const saveDetails = async (passwordConfirmed = false) => {
+    if (details.password) {
+      if (passwordProblem) { flash(passwordProblem); return; }
+      if (!passwordConfirmed) { setConfirmPassword(true); return; }
+    }
+    setConfirmPassword(false);
     setDetailsBusy(true);
     const body: Record<string, any> = {
       username: details.username.trim(), assignment: details.assignment.trim(), display_title: details.display_title.trim(),
       full_name: details.full_name, birthdate: details.birthdate, home_address: details.home_address,
       contact_number: details.contact_number, position: details.position,
     };
-    if (details.password.trim()) body.password = details.password.trim();
+    if (details.password) body.password = details.password;
     if (!isDevteam) {
       const pnpNow = PNP_ROLES.includes(details.role);
       if (details.role !== u.role) body.role = details.role;
@@ -399,6 +412,15 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
               <FieldInput label="Username" value={details.username} onChange={v => set({ username: v })} />
               <FieldInput label="New password" type="password" value={details.password} onChange={v => set({ password: v })} placeholder="blank = keep current" />
             </div>
+            {details.password && (
+              <div className="grid grid-cols-2 gap-3">
+                <div />
+                <div>
+                  <FieldInput label="Confirm new password" type="password" value={details.password_confirm} onChange={v => set({ password_confirm: v })} placeholder="type it again" />
+                  {passwordProblem && <p className="text-[9px] mt-1 text-[var(--warn)]">{passwordProblem}</p>}
+                </div>
+              </div>
+            )}
             <FieldInput label="Full name" value={details.full_name} onChange={v => set({ full_name: v })} />
             <div className="grid grid-cols-2 gap-3">
               <FieldInput label="Birthdate" type="date" value={details.birthdate} onChange={v => set({ birthdate: v })} />
@@ -440,7 +462,7 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
                 </div>
               </>
             )}
-            <button onClick={saveDetails} disabled={detailsBusy}
+            <button onClick={() => saveDetails()} disabled={detailsBusy}
               className="w-full py-2.5 bg-[var(--accent)] text-[#fff] text-[10px] font-bold tracking-[0.15em] uppercase disabled:opacity-50 hover:opacity-90 flex items-center justify-center gap-2">
               <Save size={12} /> {detailsBusy ? 'Saving…' : 'Save details'}
             </button>
@@ -557,6 +579,37 @@ function UserDetail({ apiUrl, user: u, users, stations, cameras, allLocations, c
         )}
 
         <AccountActivity apiUrl={apiUrl} user={u} />
+
+        {confirmPassword && (
+          <div className="fixed inset-0 z-[140] flex items-center justify-center p-4 bg-[var(--bg)]/85">
+            <div className="bg-[var(--panel)] border border-[var(--warn)]/40 w-full max-w-sm" role="alertdialog" aria-label="Change password">
+              <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--panel-2)]">
+                <AlertTriangle size={13} className="text-[var(--warn)]" />
+                <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text)]">Change password</span>
+              </div>
+              <div className="p-4 space-y-3">
+                <p className="text-[12px] leading-relaxed text-[var(--text)]">
+                  Change the password for <b>{u.full_name || u.username}</b> <span className="text-[var(--text-3)]">(@{u.username})</span>?
+                </p>
+                <ul className="text-[11px] leading-relaxed list-disc pl-4 space-y-1 text-[var(--text-2)]">
+                  <li>Their current password stops working as soon as you save.</li>
+                  <li>You will need to give them the new one yourself.</li>
+                  <li>The change is recorded in the Audit Log under your name.</li>
+                </ul>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button onClick={() => setConfirmPassword(false)} autoFocus
+                    className="px-3 py-1.5 border border-[var(--line)] text-[10px] uppercase tracking-wide text-[var(--text-2)] hover:text-[var(--text)]">
+                    Cancel
+                  </button>
+                  <button onClick={() => saveDetails(true)}
+                    className="px-3 py-1.5 bg-[var(--warn)] text-[#fff] text-[10px] uppercase tracking-wide hover:opacity-90">
+                    Change password
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {!isDevteam && (
           <div className="border border-[var(--critical)]/25 p-4">

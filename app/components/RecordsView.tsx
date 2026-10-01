@@ -28,7 +28,14 @@ type VideoRecord = {
   associated_incident_id?: string | null;
   crime_time_marker?: string;
   notes: string;
+  // "Assault 1", "Assault 2"... for an incident's clips (backend
+  // _label_records); null for footage with no incident.
+  label?: string | null;
+  incident_type?: string | null;
+  case_id?: string | null;
 };
+
+const recordTitle = (r: VideoRecord) => r.label || r.filename;
 
 export default function RecordsView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
@@ -141,7 +148,7 @@ export default function RecordsView() {
   };
 
   const handleDeleteRecord = async (rec: VideoRecord) => {
-    if (!window.confirm(`Delete "${rec.filename}"?\n\nThis removes the video file from disk as well. It cannot be undone.`)) return;
+    if (!window.confirm(`Delete "${recordTitle(rec)}"?\n\nThis removes the video file from disk as well. It cannot be undone.`)) return;
     try {
       const res = await fetch(`${API_URL}/api/records/${rec.id}`, {
         method: "DELETE",
@@ -170,7 +177,8 @@ export default function RecordsView() {
     // hidden from both tabs.
     if (subView === 'CLIPS' ? r.type === 'FULL_24_7' : r.type !== 'FULL_24_7') return false;
     if (filterDate && !r.recorded_at.includes(filterDate)) return false;
-    if (subView === 'CLIPS' && filterCrimeType !== 'ALL' && !r.filename.toUpperCase().includes(filterCrimeType)) return false;
+    if (subView === 'CLIPS' && filterCrimeType !== 'ALL'
+        && (r.incident_type || r.filename).toUpperCase().indexOf(filterCrimeType) === -1) return false;
     return true;
   });
 
@@ -257,7 +265,7 @@ export default function RecordsView() {
             <span className="label" style={{ color: 'var(--text)' }}>Playback</span>
             {activePlayback && (
               <span className="data text-[10px] truncate max-w-[60%]" style={{ color: 'var(--text-2)' }}>
-                {activePlayback.filename}
+                {recordTitle(activePlayback)}{activePlayback.case_id ? ` · ${activePlayback.case_id}` : ''}
               </span>
             )}
           </div>
@@ -399,7 +407,10 @@ export default function RecordsView() {
                   >
                     <div className="flex justify-between items-start gap-2">
                       <div className="min-w-0">
-                        <div className="data text-[11px] font-bold text-[var(--text)] truncate">{track.filename}</div>
+                        <div className="text-[11px] font-bold text-[var(--text)] truncate">
+                          {recordTitle(track)}
+                          {track.case_id && <span className="data font-normal ml-1.5" style={{ color: 'var(--text-3)' }}>{track.case_id}</span>}
+                        </div>
                         <div className="data text-[9px] mt-0.5" style={{ color: 'var(--text-3)' }}>
                           {track.recorded_at} · {track.duration}
                         </div>

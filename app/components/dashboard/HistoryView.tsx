@@ -8,6 +8,7 @@ import {
 import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonRow } from './Skeleton';
+import IncidentDetail from './IncidentDetail';
 
 function authHeaders() {
   const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
@@ -24,6 +25,7 @@ export default function HistoryView() {
   const [typeFilter, setTypeFilter] = useState("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortDescending, setSortDescending] = useState(true);
+  const [openRecord, setOpenRecord] = useState<any | null>(null);
 
   const loadLogs = async () => {
     try {
@@ -142,8 +144,10 @@ export default function HistoryView() {
               <option value="ASSAULT">Assault</option>
               <option value="ARMED THREAT">Armed threat</option>
               <option value="ROBBERY">Robbery</option>
+              <option value="THEFT">Theft</option>
+              <option value="PHYSICAL VIOLENCE">Physical violence</option>
               <option value="VANDALISM">Vandalism</option>
-              <option value="MANUAL_PANIC">Panic trigger</option>
+              <option value="HARDWARE_PANIC_INTERRUPT">Panic button</option>
             </select>
           </div>
 
@@ -188,9 +192,12 @@ export default function HistoryView() {
           processedData.map((record) => {
             const confirmed = record.status === 'Confirmed';
             return (
-              <div
+              <button
+                type="button"
                 key={record.id}
-                className="grid grid-cols-[110px_1fr_150px_92px_104px] gap-2 px-2.5 py-2 border-b items-start transition-colors hover:bg-white/[0.02]"
+                onClick={() => setOpenRecord(record)}
+                title={`Open the full record for ${record.case_id}`}
+                className="w-full text-left grid grid-cols-[110px_1fr_150px_92px_104px] gap-2 px-2.5 py-2 border-b items-start transition-colors hover:bg-white/[0.04] cursor-pointer"
                 style={{ borderColor: 'var(--line)' }}
               >
                 <span className="data text-[10px] pt-px" style={{ color: 'var(--text-2)' }}>
@@ -231,11 +238,12 @@ export default function HistoryView() {
                     {confirmed ? 'Confirmed' : 'Dismissed'}
                   </span>
                 </div>
-              </div>
+              </button>
             );
           })
         )}
       </div>
+      {openRecord && <IncidentDetail incident={openRecord} onClose={() => setOpenRecord(null)} />}
     </div>
   );
 }

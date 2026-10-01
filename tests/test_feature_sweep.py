@@ -72,6 +72,39 @@ class Cameras(Base):
         self.ok(self.c.delete(f"/api/cameras/{cid}", headers=self.h(self.capA)))
         self.assertNotIn(cid, self.ids(self.c.get("/api/cameras", headers=self.h(self.capA))))
 
+    def test_smartpole_pinned_on_the_map(self):
+        loc = {"lat": 11.0181, "lng": 124.6043, "location_label": "Corner Real St."}
+        cid = self.ok(self.c.post("/api/cameras", headers=self.h(self.capA), json={
+            "name": "Plaza pole", "url": "rtsp://u:p@10.0.0.9/s", "barangay_id": self.brgyA, "location": loc}))["id"]
+        seen = {x["id"]: x for x in self.ok(self.c.get("/api/cameras", headers=self.h(self.pnpA)))}[cid]
+        self.assertEqual((seen["lat"], seen["lng"], seen["location_label"]), (11.0181, 124.6043, "Corner Real St."))
+        # AI alerts from it land on the pole, not on the old fixed point.
+        iid = S.ai_alert(self.brgyA, cid)
+        inc = {x["id"]: x for x in self.ok(self.c.get("/api/incidents", headers=self.h(self.pnpA)))}[iid]
+        self.assertEqual((inc["lat"], inc["lng"]), (11.0181, 124.6043))
+        # Moving it: owner only, logged with before and after.
+        move = {"lat": 11.019, "lng": 124.605}
+        self.assertEqual(self.c.put(f"/api/cameras/{cid}/location", headers=self.h(self.capB), json=move).status_code, 403)
+        self.assertEqual(self.c.put(f"/api/cameras/{cid}/location", headers=self.h(self.pnpA), json=move).status_code, 403)
+        self.assertEqual(self.c.put(f"/api/cameras/{cid}/location", headers=self.h(self.capA),
+                                    json={"lat": 95, "lng": 124.6}).status_code, 422)
+        self.ok(self.c.put(f"/api/cameras/{cid}/location", headers=self.h(self.capA), json=move))
+        entry = S.audit_rows("camera.located", cid)
+        self.assertTrue(entry)
+        self.assertEqual(snap(entry[-1])["from"]["lat"], 11.0181)
+        self.assertEqual(self.c.put("/api/cameras/nope/location", headers=self.h(self.capA), json=move).status_code, 404)
+
+    def test_report_filed_at_a_pole_must_be_in_that_barangay(self):
+        body = {"id": S.uid("m"), "case_id": S.uid("CASE"), "type": "THEFT", "officer": "MANUAL_ENTRY",
+                "lat": 11.0, "lng": 124.6, "location_name": "pole", "severity": "LOW",
+                "occurred_date": "2026-10-01", "occurred_time": "0900", "narrative": "n", "nature_of_call": "x",
+                "arrival_reason": "x", "additional_officers": "None", "status": "Active", "barangay_id": self.brgyA}
+        self.assertEqual(self.c.post("/api/incidents", headers=self.h(self.capA),
+                                     json={**body, "camera_id": self.camsB[0]}).status_code, 400)
+        self.ok(self.c.post("/api/incidents", headers=self.h(self.capA), json={**body, "camera_id": self.camsA[0]}))
+        inc = {x["id"]: x for x in self.ok(self.c.get("/api/incidents", headers=self.h(self.pnpA)))}[body["id"]]
+        self.assertEqual(inc["camera_id"], self.camsA[0])
+
     def test_cannot_add_a_camera_to_another_barangay(self):
         r = self.c.post("/api/cameras", headers=self.h(self.capA), json={"name": "x", "url": "rtsp://x", "barangay_id": self.brgyB})
         self.assertIn(r.status_code, (403, 404))
@@ -200,8 +233,11 @@ class Incidents(Base):
         iid = S.ai_alert(self.brgyA, self.camsA[0])
         police = {x["id"]: x for x in self.ok(self.c.get("/api/incidents", headers=self.h(self.pnpA)))}[iid]
         barangay = {x["id"]: x for x in self.ok(self.c.get("/api/incidents", headers=self.h(self.capA)))}[iid]
-        self.assertNotIn("RESTRICTED", police["narrative"])
-        self.assertIn("RESTRICTED", barangay["narrative"])
+        self.assertTrue(police["narrative"])
+        # Withheld outright -- no placeholder hinting that a narrative exists.
+        for field in ("narrative", "nature_of_call", "arrival_reason", "additional_officers"):
+            self.assertIsNone(barangay[field], field)
+        self.assertNotIn("RESTRICTED", json.dumps(barangay))
 
     def test_panic_button_files_a_critical_incident(self):
         r = self.ok(self.c.post("/api/panic_trigger", json={"event": "PANIC", "device": "pole-1", "barangay_id": self.brgyA}))
@@ -277,6 +313,37 @@ class ReportRequests(Base):
         mine = {x["id"]: x for x in self.ok(self.c.get("/api/report_requests", headers=self.h(self.capA)))}
         self.assertEqual(mine[rid]["status"], "fulfilled")
         self.assertIn("Blotter", mine[rid]["response_note"])
+
+    def test_structured_request_reaches_the_station_with_every_field(self):
+        body = {"description": "Certified blotter copy for the plaza altercation", "report_type": "blotter_copy",
+                "crime_type": "assault", "period_from": "2026-09-18", "period_to": "2026-09-18",
+                "location": "Plaza", "persons_involved": "Complainant: M. Santos", "reference": "BLT-014",
+                "purpose": "katarungang_pambarangay", "urgency": "urgent", "needed_by": "2099-01-01"}
+        rid = self.ok(self.c.post("/api/report_requests", headers=self.h(self.capA), json=body))["id"]
+        got = {x["id"]: x for x in self.ok(self.c.get("/api/report_requests", headers=self.h(self.pnpA)))}[rid]
+        d = got["details"]
+        self.assertEqual((d["report_type"], d["crime_type"], d["urgency"], d["needed_by"], d["reference"]),
+                         ("blotter_copy", "ASSAULT", "urgent", "2099-01-01", "BLT-014"))
+        self.assertTrue(got["requested_by_name"])
+        self.assertTrue(got["barangay_name"])
+        opts = self.ok(self.c.get("/api/report_requests/options", headers=self.h(self.capA)))
+        self.assertIn("blotter_copy", {o["value"] for o in opts["report_types"]})
+
+    def test_structured_request_is_validated(self):
+        base = {"description": "Statistics for the quarter", "report_type": "crime_statistics", "purpose": "bpoc"}
+        for bad, why in [({"report_type": "everything"}, "unknown type"),
+                         ({"purpose": "gossip"}, "unknown purpose"),
+                         ({"purpose": "other"}, "other needs a description"),
+                         ({"crime_type": "JAYWALKING"}, "unknown crime"),
+                         ({"urgency": "asap"}, "bad urgency"),
+                         ({"period_from": "2026-09-30", "period_to": "2026-09-01"}, "period backwards"),
+                         ({"period_from": "2099-01-01"}, "future period"),
+                         ({"needed_by": "2000-01-01"}, "needed-by in the past"),
+                         ({"needed_by": "next week"}, "not a date"),
+                         ({"location": "x" * 201}, "too long")]:
+            r = self.c.post("/api/report_requests", headers=self.h(self.capA), json={**base, **bad})
+            self.assertEqual(r.status_code, 400, why)
+        self.ok(self.c.post("/api/report_requests", headers=self.h(self.capA), json=base))
 
     def test_decline_and_officer_without_history_cannot_answer(self):
         rid = self.ok(self.c.post("/api/report_requests", headers=self.h(self.capA), json={"description": "Report on the robbery"}))["id"]

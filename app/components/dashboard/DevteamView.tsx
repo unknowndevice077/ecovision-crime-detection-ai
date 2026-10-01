@@ -119,7 +119,46 @@ type AuditEntry = {
   target_id: string;
   target_snapshot: Record<string, any> | null;
   created_at: string;
+  actor_barangay?: string | null;
+  actor_station?: string | null;
+  actor_current_username?: string | null;
 };
+
+// What the audit filters can take, from what's actually been logged.
+type AuditFacets = {
+  actions: { action: string; count: number }[];
+  categories: string[];
+  target_types: string[];
+  actors: { id: number; username: string; full_name: string | null; role: string | null; n: number }[];
+  barangays: { id: string; name: string }[];
+  stations: { id: string; name: string }[];
+};
+
+const EMPTY_AUDIT_FILTERS = { user_id: '', org: '', category: '', action: '', target_type: '', date_from: '', date_to: '', q: '' };
+type AuditFilters = typeof EMPTY_AUDIT_FILTERS;
+
+function AuditSelect({ label, value, onChange, options = [], groups, all }: {
+  label: string; value: string; onChange: (v: string) => void; all: string;
+  options?: { value: string; label: string }[];
+  groups?: { label: string; options: { value: string; label: string }[] }[];
+}) {
+  return (
+    <label className="block min-w-0">
+      <span className="block text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-0.5">{label}</span>
+      <select value={value} onChange={e => onChange(e.target.value)}
+        className={`w-full bg-[var(--bg)] border px-1.5 py-1 text-[10px] outline-none cursor-pointer focus:border-[var(--accent)] ${value ? 'border-[var(--accent)] text-[var(--text)]' : 'border-[var(--line)] text-[var(--text-2)]'}`}>
+        <option value="">{all}</option>
+        {groups
+          ? groups.filter(g => g.options.length).map(g => (
+              <optgroup key={g.label} label={g.label}>
+                {g.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </optgroup>
+            ))
+          : options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </label>
+  );
+}
 
 export default function DevteamView() {
   const { apiUrl: API_URL } = useRuntimeConfig();
@@ -326,18 +365,53 @@ export default function DevteamView() {
   // live-incident data.
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [auditLoaded, setAuditLoaded] = useState(false);
-  const [auditActionFilter, setAuditActionFilter] = useState('');
+  const [auditFilters, setAuditFilters] = useState<AuditFilters>(EMPTY_AUDIT_FILTERS);
+  const [auditFacets, setAuditFacets] = useState<AuditFacets | null>(null);
+  const [auditError, setAuditError] = useState('');
   const [auditBusyIds, setAuditBusyIds] = useState<Set<string>>(new Set());
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
 
-  const fetchAuditLog = async (action?: string) => {
+  // Filters replace the old single search box (2026-10-01): by account, by
+  // barangay or station, by kind of action, by what it touched, and by date.
+  const fetchAuditLog = async (filters: AuditFilters = auditFilters) => {
+    const qs = new URLSearchParams({ limit: '500' });
+    if (filters.user_id) qs.set('user_id', filters.user_id);
+    if (filters.org.startsWith('b:')) qs.set('barangay_id', filters.org.slice(2));
+    if (filters.org.startsWith('s:')) qs.set('station_id', filters.org.slice(2));
+    if (filters.action) qs.set('action', filters.action);
+    else if (filters.category) qs.set('category', filters.category);
+    if (filters.target_type) qs.set('target_type', filters.target_type);
+    if (filters.date_from) qs.set('date_from', filters.date_from);
+    if (filters.date_to) qs.set('date_to', filters.date_to);
+    if (filters.q.trim()) qs.set('q', filters.q.trim());
     try {
-      const qs = action ? `?q=${encodeURIComponent(action)}&limit=500` : '?limit=500';
-      const res = await fetch(`${API_URL}/api/devteam/audit_log${qs}`, { headers: authHeaders() });
-      if (res.ok) setAuditEntries(await res.json());
-    } catch { /* leave whatever was last shown */ }
+      const res = await fetch(`${API_URL}/api/devteam/audit_log?${qs}`, { headers: authHeaders() });
+      const d = await res.json().catch(() => null);
+      if (res.ok) { setAuditEntries(d); setAuditError(''); }
+      else setAuditError((d && d.detail) || 'Could not load the audit log.');
+    } catch { setAuditError('Backend connection failure.'); }
     finally { setAuditLoaded(true); }
   };
+
+  const fetchAuditFacets = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/devteam/audit_log/facets`, { headers: authHeaders() });
+      if (res.ok) setAuditFacets(await res.json());
+    } catch { /* filters fall back to free text */ }
+  };
+
+  const setAuditFilter = (patch: Partial<AuditFilters>) => {
+    const next = { ...auditFilters, ...patch };
+    // Picking a category clears an action from a different one.
+    if (patch.category !== undefined && next.action && !next.action.startsWith(`${patch.category}.`)) next.action = '';
+    setAuditFilters(next);
+    if (patch.q === undefined) fetchAuditLog(next);
+  };
+  const auditFilterCount = Object.entries(auditFilters).filter(([, v]) => v).length;
+  // However the tab was reached, its filter choices load with it.
+  useEffect(() => {
+    if (tab === 'audit' && !auditFacets) fetchAuditFacets();
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Phase 2: resource-scoped permissions + custom roles (2026-09-23) ────
   // "Dice every permission down to the smallest unit" -- the user's own
@@ -363,7 +437,7 @@ export default function DevteamView() {
     try {
       const res = await fetch(`${API_URL}/api/devteam/audit_log/${entry.id}/restore`, { method: 'POST', headers: authHeaders() });
       const d = await res.json().catch(() => ({}));
-      if (res.ok) { flash(`${entry.target_type} ${entry.target_id} restored.`); fetchAuditLog(auditActionFilter || undefined); fetchOverview(); }
+      if (res.ok) { flash(`${entry.target_type} ${entry.target_id} restored.`); fetchAuditLog(); fetchOverview(); }
       else flash(d.detail || 'Could not restore.');
     } catch {
       flash('Backend connection failure.');
@@ -950,7 +1024,7 @@ export default function DevteamView() {
                   badge: stations.length,
                 } : t === 'audit' ? {
                   icon: <Undo2 size={12} />, label: 'Audit Log',
-                  onClick: () => { setTab('audit'); fetchAuditLog(auditActionFilter || undefined); },
+                  onClick: () => { setTab('audit'); fetchAuditLog(); fetchAuditFacets(); },
                 } : null;
               if (!def) return null;
               return (
@@ -1231,29 +1305,65 @@ export default function DevteamView() {
               title="Audit log"
               right={<span className="text-[9px] text-[var(--text-3)]">{auditEntries.length} entr{auditEntries.length === 1 ? 'y' : 'ies'}</span>}
             />
-            <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--line)]">
-              <Search size={12} className="text-[var(--text-2)] shrink-0" />
-              <input
-                value={auditActionFilter}
-                onChange={e => setAuditActionFilter(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') fetchAuditLog(auditActionFilter.trim() || undefined); }}
-                placeholder="search action, person or details, e.g. confirmed, login_failed, juan (enter)"
-                className="bg-transparent text-[11px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
-              />
-              {auditActionFilter && (
-                <button
-                  onClick={() => { setAuditActionFilter(''); fetchAuditLog(); }}
-                  className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-2)] hover:text-[var(--text)] shrink-0"
-                >
-                  Clear
-                </button>
-              )}
+            <div className="shrink-0 border-b border-[var(--line)] p-3 space-y-2">
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+                <AuditSelect label="Account" value={auditFilters.user_id} onChange={v => setAuditFilter({ user_id: v })}
+                  options={(auditFacets?.actors || []).map(a => ({ value: String(a.id), label: `${a.full_name || a.username} (@${a.username}) · ${a.n}` }))} all="Everyone" />
+                <AuditSelect label="Barangay / station" value={auditFilters.org} onChange={v => setAuditFilter({ org: v })} all="All"
+                  groups={[
+                    { label: 'Police stations', options: (auditFacets?.stations || []).map(x => ({ value: `s:${x.id}`, label: x.name })) },
+                    { label: 'Barangays', options: (auditFacets?.barangays || []).map(x => ({ value: `b:${x.id}`, label: x.name })) },
+                  ]} />
+                <AuditSelect label="Category" value={auditFilters.category} onChange={v => setAuditFilter({ category: v })} all="All categories"
+                  options={(auditFacets?.categories || []).map(c => ({ value: c, label: c.replace(/_/g, ' ') }))} />
+                <AuditSelect label="Action" value={auditFilters.action} onChange={v => setAuditFilter({ action: v })} all="All actions"
+                  options={(auditFacets?.actions || [])
+                    .filter(a => !auditFilters.category || a.action.startsWith(`${auditFilters.category}.`))
+                    .map(a => ({ value: a.action, label: `${a.action} · ${a.count}` }))} />
+                <AuditSelect label="Affects" value={auditFilters.target_type} onChange={v => setAuditFilter({ target_type: v })} all="Anything"
+                  options={(auditFacets?.target_types || []).map(t => ({ value: t, label: t.replace(/_/g, ' ') }))} />
+                <div className="grid grid-cols-2 gap-1.5">
+                  <label className="block">
+                    <span className="block text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-0.5">From</span>
+                    <input type="date" value={auditFilters.date_from} max={auditFilters.date_to || undefined}
+                      onChange={e => setAuditFilter({ date_from: e.target.value })}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] px-1.5 py-1 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]" />
+                  </label>
+                  <label className="block">
+                    <span className="block text-[8px] tracking-[0.15em] uppercase text-[var(--text-3)] mb-0.5">To</span>
+                    <input type="date" value={auditFilters.date_to} min={auditFilters.date_from || undefined}
+                      onChange={e => setAuditFilter({ date_to: e.target.value })}
+                      className="w-full bg-[var(--bg)] border border-[var(--line)] px-1.5 py-1 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]" />
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 flex items-center gap-2 border border-[var(--line)] bg-[var(--bg)] px-2 py-1">
+                  <Search size={11} className="text-[var(--text-3)] shrink-0" />
+                  <input
+                    value={auditFilters.q}
+                    onChange={e => setAuditFilter({ q: e.target.value })}
+                    onKeyDown={e => { if (e.key === 'Enter') fetchAuditLog(); }}
+                    placeholder="Also contains… (Enter)"
+                    className="bg-transparent text-[10.5px] text-[var(--text)] outline-none w-full placeholder:text-[var(--text-3)]"
+                  />
+                </div>
+                {auditFilterCount > 0 && (
+                  <button
+                    onClick={() => { setAuditFilters(EMPTY_AUDIT_FILTERS); fetchAuditLog(EMPTY_AUDIT_FILTERS); }}
+                    className="text-[9px] tracking-[0.1em] uppercase text-[var(--accent)] hover:opacity-80 shrink-0"
+                  >
+                    Clear {auditFilterCount} filter{auditFilterCount === 1 ? '' : 's'}
+                  </button>
+                )}
+              </div>
+              {auditError && <p className="text-[10px] text-[var(--critical)]">{auditError}</p>}
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar divide-y divide-[var(--panel-2)]">
               {!auditLoaded ? (
                 <EmptyPane text="Loading…" />
               ) : auditEntries.length === 0 ? (
-                <EmptyPane text="No audit entries yet" />
+                <EmptyPane text={auditFilterCount ? 'Nothing matches these filters' : 'No audit entries yet'} />
               ) : auditEntries.map(entry => {
                 const label = entry.target_snapshot?.full_name || entry.target_snapshot?.username || entry.target_snapshot?.name || entry.target_id;
                 const tone = entry.action.endsWith('.deleted') ? 'text-[var(--critical)]'
@@ -1268,7 +1378,14 @@ export default function DevteamView() {
                       <p className="text-[11px] text-[var(--text)] truncate">
                         <span className={tone}>{entry.action}</span> <span className="text-[var(--text-2)]">{label}</span>
                       </p>
-                      <p className="text-[9px] text-[var(--text-3)] truncate">by {entry.actor_username} · {serverDateTime(entry.created_at)}</p>
+                      <p className="text-[9px] text-[var(--text-3)] truncate">
+                        by {entry.actor_username}
+                        {entry.actor_current_username && entry.actor_current_username !== entry.actor_username
+                          ? ` (now ${entry.actor_current_username})` : ''}
+                        {entry.actor_station ? ` · ${auditFacets?.stations.find(x => x.id === entry.actor_station)?.name || entry.actor_station}`
+                          : entry.actor_barangay ? ` · ${auditFacets?.barangays.find(x => x.id === entry.actor_barangay)?.name || entry.actor_barangay}` : ''}
+                        {' · '}{serverDateTime(entry.created_at)}
+                      </p>
                     </div>
                   </button>
                 );

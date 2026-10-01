@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS cameras (
     url         TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'online' CHECK (status IN ('online','offline')),
     barangay_id TEXT REFERENCES barangays(id) ON DELETE CASCADE,
+    lat         REAL,
+    lng         REAL,
+    location_label TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_cameras_barangay ON cameras(barangay_id);

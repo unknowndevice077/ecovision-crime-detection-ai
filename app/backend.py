@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional
 from db import get_conn, IntegrityError, DB_KIND, table_exists
 import uvicorn
@@ -361,6 +361,11 @@ SCREENSHOTS_DIR = os.path.join(WRITABLE_DIR, "static", "screenshots")
 # sensitive, unlike a camera screenshot, so it's only ever served through
 # the authenticated get_verification_document endpoint.
 VERIFICATION_DOCS_DIR = os.path.join(WRITABLE_DIR, "verification_docs")
+# Files police attach when answering a report request (a scanned blotter
+# page, a certification). Served only through the authenticated download
+# endpoint, never a static mount -- same reasoning as ID documents.
+REQUEST_FILES_DIR = os.path.join(WRITABLE_DIR, "report_request_files")
+os.makedirs(REQUEST_FILES_DIR, exist_ok=True)
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(VERIFICATION_DOCS_DIR, exist_ok=True)
@@ -967,6 +972,49 @@ def _migrate_schema(conn, cursor):
     _ensure_column(conn, cursor, "users", "signup_decided_at", "TEXT")
     _ensure_column(conn, cursor, "users", "signup_decision_reason", "TEXT")
 
+    # Smartpole locations (2026-10-01): the Incident Map drew three
+    # hardcoded Cogon poles whatever was registered, so a new pole never
+    # appeared and every AI alert landed on one fixed coordinate. A camera
+    # now carries where it physically stands, pinned on the map when it is
+    # added; NULL means "not placed yet" and simply isn't drawn.
+    _ensure_column(conn, cursor, "cameras", "lat", "REAL")
+    _ensure_column(conn, cursor, "cameras", "lng", "REAL")
+    _ensure_column(conn, cursor, "cameras", "location_label", "TEXT")
+
+    # Structured report requests (2026-10-01): a request used to be one
+    # free-text line, so the station had to write back to ask what was
+    # wanted, for what period, and why. The fields live in one JSON column
+    # (validated by ReportRequestCreate); description stays the readable
+    # summary every older row already has.
+    _ensure_column(conn, cursor, "report_requests", "details", "TEXT")
+
+    # Audit filters (2026-10-01): which barangay / station the actor
+    # belonged to WHEN they acted, so "everything Station 1 did" stays right
+    # after someone is moved. Older rows fall back to the actor's current
+    # assignment in the query.
+    # What police hand back on a request (2026-10-01): a snapshot of the
+    # report fields they chose to share, plus attached files.
+    _ensure_column(conn, cursor, "report_requests", "shared_report", "TEXT")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS report_request_files (
+            id            TEXT PRIMARY KEY,
+            request_id    TEXT NOT NULL,
+            stored_name   TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            content_type  TEXT,
+            size_bytes    INTEGER,
+            uploaded_by   INTEGER,
+            uploaded_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_report_request_files_request ON report_request_files(request_id)")
+    conn.commit()
+    _ensure_column(conn, cursor, "audit_log", "actor_barangay_id", "TEXT")
+    _ensure_column(conn, cursor, "audit_log", "actor_station_id", "TEXT")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_user_id)")
+    conn.commit()
+
     # BUG FOUND 2026-09-30: the one-admin-per-unit indexes counted every
     # admin row ever written, so soft-deleting a captain never freed the
     # seat (every "deleted_at IS NULL" pre-check in the create paths passed,
@@ -1016,8 +1064,8 @@ def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: s
     crashing the whole audit write over one awkward field."""
     try:
         cursor.execute(
-            "INSERT INTO audit_log (id, actor_user_id, actor_username, action, target_type, target_id, target_snapshot) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO audit_log (id, actor_user_id, actor_username, action, target_type, target_id, target_snapshot, "
+            "actor_barangay_id, actor_station_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(uuid.uuid4()),
                 payload.get("id"),
@@ -1026,6 +1074,8 @@ def log_audit(cursor, payload: dict, action: str, target_type: str, target_id: s
                 target_type,
                 str(target_id),
                 json.dumps(snapshot, default=str) if snapshot is not None else None,
+                (payload.get("barangay_id") or None),
+                (payload.get("station_id") or None),
             ),
         )
         state = _audit_request_state.get()
@@ -1498,11 +1548,35 @@ class IncidentSchema(BaseModel):
     status: str
     confidence: Optional[float] = 1.0
     barangay_id: str
+    # The smartpole the report was filed at, when filed from a pole.
+    camera_id: Optional[str] = None
+
+class CameraLocationSchema(BaseModel):
+    lat: float
+    lng: float
+    location_label: Optional[str] = None
+
+    @field_validator("lat")
+    @classmethod
+    def _lat_range(cls, v):
+        if not -90 <= v <= 90:
+            raise ValueError("latitude must be between -90 and 90")
+        return v
+
+    @field_validator("lng")
+    @classmethod
+    def _lng_range(cls, v):
+        if not -180 <= v <= 180:
+            raise ValueError("longitude must be between -180 and 180")
+        return v
 
 class CameraSchema(BaseModel):
     name: str
     url: str
     barangay_id: str
+    # Where the pole stands, pinned on the Incident Map. Optional: the
+    # Cameras tab registers a stream without a location, placed later.
+    location: Optional[CameraLocationSchema] = None
 
 class NotifyTargetSchema(BaseModel):
     # Exactly one of these two should be set -- mirrors CameraSchema's own
@@ -1676,12 +1750,54 @@ def _clean_profile(model, required: tuple = ()) -> dict:
             raise HTTPException(status_code=400, detail="Birthdate must be for someone 18 or older")
     return out
 
+REPORT_REQUEST_TYPES = {
+    "blotter_copy": "Certified copy of a police blotter entry",
+    "incident_report": "Incident / spot report",
+    "case_status": "Status of an investigation or case",
+    "crime_statistics": "Crime statistics for the barangay",
+    "incident_certification": "Certification that an incident was reported",
+    "other": "Other report",
+}
+REPORT_REQUEST_PURPOSES = {
+    "katarungang_pambarangay": "Katarungang Pambarangay (mediation / conciliation)",
+    "bpoc": "Barangay Peace and Order Council meeting or plan",
+    "resident_request": "Requested by a resident",
+    "legal_or_insurance": "Legal, court or insurance requirement",
+    "records": "Barangay records",
+    "other": "Other",
+}
+REPORT_REQUEST_URGENCY = {"routine", "urgent"}
+# Crime types a request can be about -- the incident types the system files.
+REPORT_REQUEST_CRIMES = {"ANY", "ASSAULT", "ARMED THREAT", "ROBBERY", "THEFT", "PHYSICAL VIOLENCE",
+                         "VANDALISM", "HARDWARE_PANIC_INTERRUPT", "OTHER"}
+
+
 class ReportRequestCreate(BaseModel):
     incident_id: Optional[str] = None
     description: str
+    # Structured fields (2026-10-01). Optional so older callers that send
+    # only a description keep working; the app's form always sends them.
+    report_type: Optional[str] = None
+    crime_type: Optional[str] = None
+    period_from: Optional[str] = None
+    period_to: Optional[str] = None
+    location: Optional[str] = None
+    persons_involved: Optional[str] = None
+    reference: Optional[str] = None
+    purpose: Optional[str] = None
+    purpose_detail: Optional[str] = None
+    urgency: Optional[str] = "routine"
+    needed_by: Optional[str] = None
 
 class ReportRequestResponse(BaseModel):
     note: Optional[str] = None
+    # Fulfil with a report (2026-10-01): which incident's report, which of
+    # its fields the barangay gets, and the summary as police chose to word
+    # it for them. The values themselves are read from the record
+    # server-side, so only the summary can differ from what was filed.
+    incident_id: Optional[str] = None
+    share_fields: Optional[list] = None
+    summary: Optional[str] = None
 
 class VerificationReview(BaseModel):
     decision: str  # 'verified' | 'rejected'
@@ -1712,7 +1828,8 @@ def _row_to_camera_dict(row, include_url: bool = True) -> dict:
     usually carries the camera's own username and password."""
     d = dict(row)
     return {"id": d["id"], "name": d["name"], "url": d["url"] if include_url else None,
-            "status": d["status"], "barangay_id": d.get("barangay_id")}
+            "status": d["status"], "barangay_id": d.get("barangay_id"),
+            "lat": d.get("lat"), "lng": d.get("lng"), "location_label": d.get("location_label")}
 
 def _row_to_record_dict(row) -> dict:
     d = dict(row)
@@ -1951,17 +2068,63 @@ async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(No
         conn.close()
         raise HTTPException(status_code=403, detail="Can only add cameras for your own barangay")
     cam_id = str(uuid.uuid4())
+    loc = cam.location
+    label = ((loc.location_label or "").strip() or None) if loc else None
     try:
         cursor.execute(
-            "INSERT INTO cameras (id, name, url, status, barangay_id) VALUES (?, ?, ?, 'online', ?)",
-            (cam_id, cam.name, cam.url, cam.barangay_id.lower()),
+            "INSERT INTO cameras (id, name, url, status, barangay_id, lat, lng, location_label)"
+            " VALUES (?, ?, ?, 'online', ?, ?, ?, ?)",
+            (cam_id, cam.name, cam.url, cam.barangay_id.lower(),
+             loc.lat if loc else None, loc.lng if loc else None, label),
         )
-        log_audit(cursor, payload, "camera.created", "camera", cam_id,
-                  snapshot={"name": cam.name, "barangay_id": cam.barangay_id.lower()})
+        snapshot = {"name": cam.name, "barangay_id": cam.barangay_id.lower()}
+        if loc:
+            snapshot.update(lat=loc.lat, lng=loc.lng, location_label=label)
+        log_audit(cursor, payload, "camera.created", "camera", cam_id, snapshot=snapshot)
         conn.commit()
+        await manager.broadcast({"channel": "cameras", "event": "camera_created", "id": cam_id,
+                                 "barangay_id": cam.barangay_id.lower()})
         return {"status": "created", "id": cam_id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+def _require_own_camera(cursor, payload: dict, cam_id: str):
+    """manage_cameras plus ownership: a camera in the caller's own barangay
+    and, if they've been diced down to specific cameras, one of those."""
+    require_permission(cursor, payload, "manage_cameras")
+    cursor.execute("SELECT * FROM cameras WHERE id = ?", (cam_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such camera.")
+    if payload.get("role") != "DEVTEAM":
+        if (row["barangay_id"] or "").lower() != (payload.get("barangay_id") or "").lower():
+            raise HTTPException(status_code=403, detail="Can only change cameras for your own barangay")
+        scoped = _scoped_camera_ids(cursor, payload, "manage_cameras")
+        if scoped is not None and cam_id not in scoped:
+            raise HTTPException(status_code=403, detail="Your camera access doesn't include this camera")
+    return row
+
+@app.put("/api/cameras/{cam_id}/location")
+async def set_camera_location(cam_id: str, loc: CameraLocationSchema, authorization: Optional[str] = Header(None)):
+    """Pin (or move) a smartpole on the Incident Map."""
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        row = _require_own_camera(cursor, payload, cam_id)
+        label = (loc.location_label or "").strip() or None
+        cursor.execute("UPDATE cameras SET lat = ?, lng = ?, location_label = ? WHERE id = ?",
+                       (loc.lat, loc.lng, label, cam_id))
+        log_audit(cursor, payload, "camera.located", "camera", cam_id, snapshot={
+            "name": row["name"],
+            "from": {"lat": row["lat"], "lng": row["lng"], "location_label": row["location_label"]},
+            "to": {"lat": loc.lat, "lng": loc.lng, "location_label": label}})
+        conn.commit()
+        await manager.broadcast({"channel": "cameras", "event": "camera_located", "id": cam_id,
+                                 "barangay_id": (row["barangay_id"] or "").lower()})
+        return {"status": "located", "id": cam_id, "lat": loc.lat, "lng": loc.lng, "location_label": label}
     finally:
         conn.close()
 
@@ -1999,6 +2162,9 @@ async def delete_camera(cam_id: str, authorization: Optional[str] = Header(None)
                   snapshot={k: v for k, v in dict(cam_row).items() if k != "url"})
     conn.commit()
     conn.close()
+    if cam_row:
+        await manager.broadcast({"channel": "cameras", "event": "camera_deleted", "id": cam_id,
+                                 "barangay_id": (cam_row["barangay_id"] or "").lower()})
     return {"status": "deleted"}
 
 
@@ -2362,10 +2528,11 @@ async def get_incidents(authorization: Optional[str] = Header(None), filter_bara
     for inc in inc_rows:
         record = _row_to_incident_dict(inc, details_by_id.get(inc["id"]), vis_by_id.get(inc["id"]))
         if redact:
-            record["narrative"] = "🔒 [RESTRICTED] Investigative logs masked for non-police profiles."
-            record["nature_of_call"] = "CONFIDENTIAL // RESTRICTED"
-            record["arrival_reason"] = "CONFIDENTIAL // RESTRICTED"
-            record["additional_officers"] = "CONFIDENTIAL"
+            # Left out, not replaced with a "[RESTRICTED]" placeholder: a
+            # placeholder tells the reader there is a police narrative they
+            # aren't allowed to read, which is itself information.
+            for field in ("narrative", "nature_of_call", "arrival_reason", "additional_officers"):
+                record[field] = None
         results.append(record)
     conn.close()
     return results
@@ -2394,14 +2561,19 @@ async def add_incident(incident: IncidentSchema, authorization: Optional[str] = 
                 raise HTTPException(status_code=403, detail="That barangay is outside your jurisdiction.")
         if not effective_barangay_id:
             raise HTTPException(status_code=403, detail="Your account has no assigned location.")
+        if incident.camera_id:
+            cursor.execute("SELECT barangay_id FROM cameras WHERE id = ?", (incident.camera_id,))
+            cam_row = cursor.fetchone()
+            if not cam_row or (cam_row["barangay_id"] or "").lower() != effective_barangay_id.lower():
+                raise HTTPException(status_code=400, detail="That smartpole isn't in the barangay this report is filed in.")
         cursor.execute(
             """INSERT INTO incidents
                (id, case_id, type, severity, status, lat, lng, location_name,
-                occurred_date, occurred_time, confidence, officer, barangay_id, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL')""",
+                occurred_date, occurred_time, confidence, officer, barangay_id, source, camera_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL', ?)""",
             (incident.id, incident.case_id, incident.type, incident.severity, incident.status,
              incident.lat, incident.lng, incident.location_name, incident.occurred_date, incident.occurred_time,
-             incident.confidence, incident.officer, effective_barangay_id.lower()),
+             incident.confidence, incident.officer, effective_barangay_id.lower(), incident.camera_id),
         )
         cursor.execute(
             """INSERT INTO incident_details (incident_id, narrative, nature_of_call, arrival_reason, additional_officers)
@@ -2488,21 +2660,47 @@ def _format_12h(hhmmss: str) -> str:
         return str(hhmmss)
 
 
-def _scene_lighting(screenshot_url: Optional[str]) -> Optional[dict]:
-    """Mean brightness (HSV value channel) of the evidence frame itself."""
-    if not screenshot_url or screenshot_url.startswith("http"):
+def incident_type_title(event: Optional[str]) -> str:
+    """ASSAULT -> Assault, PHYSICAL VIOLENCE -> Physical violence."""
+    event = (event or "").strip().upper()
+    if event == "HARDWARE_PANIC_INTERRUPT":
+        return "Panic alert"
+    return event.replace("_", " ").capitalize() or "Incident"
+
+
+def _clip_seconds(duration) -> Optional[float]:
+    """Clip durations are stored as "00:08" (recorder) or "3.0s" (cutter)."""
+    d = str(duration or "").strip().lower()
+    try:
+        if d.endswith("s"):
+            return float(d[:-1])
+        parts = [float(x) for x in d.split(":")]
+        total = 0.0
+        for x in parts:
+            total = total * 60 + x
+        return total if parts else None
+    except ValueError:
         return None
-    img = cv2.imread(os.path.join(SCREENSHOTS_DIR, os.path.basename(screenshot_url)))
-    if img is None:
+
+
+def clip_length_phrase(duration) -> Optional[str]:
+    secs = _clip_seconds(duration)
+    if secs is None:
         return None
-    v = float(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 2].mean())
-    if v >= 140:
-        label = "well lit (daylight or strong lighting)"
-    elif v >= 80:
-        label = "moderately lit (dusk or artificial lighting)"
-    else:
-        label = "poorly lit (night / low light)"
-    return {"label": label, "brightness": round(v, 1)}
+    secs = int(round(secs))
+    if secs < 60:
+        return f"{secs} second{'s' if secs != 1 else ''}"
+    m, s_ = divmod(secs, 60)
+    return f"{m} min {s_} s" if s_ else f"{m} min"
+
+
+def label_incident_clips(event: Optional[str], clips: list) -> list:
+    """Evidence clips are named for people, not by file: "Assault 1",
+    "Assault 2"... in recording order. The file name and hash stay in the
+    record (chain of custody) but aren't what an officer reads."""
+    title = incident_type_title(event)
+    return [{**c, "label": f"{title} {i}", "length": clip_length_phrase(c.get("duration"))}
+            for i, c in enumerate(clips, start=1)]
 
 
 def _people_phrase(n: int) -> str:
@@ -2549,7 +2747,7 @@ def build_ai_report_draft(cursor, incident_id: str) -> Optional[dict]:
     conf = inc.get("confidence")
     band = _confidence_band(conf)
     tod = _time_of_day(inc.get("occurred_time") or "")
-    lighting = _scene_lighting(inc.get("screenshot_path"))
+    clips = label_incident_clips(event, clips)
     people = ctx.get("people_in_frame")
     weapons = [w for w in (ctx.get("weapons") or []) if isinstance(w, dict) and w.get("name")]
     detector = ctx.get("detector")
@@ -2570,7 +2768,7 @@ def build_ai_report_draft(cursor, incident_id: str) -> Optional[dict]:
     elif source == "AI_AUTOMATION":
         s = f"On {when}, the EcoVision AI surveillance system flagged {what} at {place}."
         if conf is not None:
-            s += f" The alert was raised{f' by the {detector}' if detector else ''} with {round(conf * 100)}% confidence ({band})."
+            s += f" The system's confidence in this alert was {round(conf * 100)}% ({band})."
         paras.append(s)
     else:
         paras.append(f"On {when}, {what} was filed manually by an operator for {place}.")
@@ -2588,23 +2786,16 @@ def build_ai_report_draft(cursor, incident_id: str) -> Optional[dict]:
             f"{w['name']} ({round(float(w.get('conf', 0)) * 100)}%)" for w in weapons) + ".")
     elif source == "AI_AUTOMATION" and event != "ARMED THREAT" and ctx:
         obs.append("No weapon was detected.")
-    if lighting:
-        obs.append(f"Analysis of the evidence frame indicates the scene was {lighting['label']}.")
     if obs:
         paras.append(" ".join(obs))
 
     ev = []
     if inc.get("screenshot_path"):
-        h = inc.get("screenshot_sha256")
-        ev.append(f"A still frame was captured at the moment of detection{f' (SHA-256 {h[:16]}…)' if h else ''}.")
-    for c in clips:
-        line = f"Video clip {c['filename']}"
-        if c.get("duration"):
-            line += f" ({c['duration']})"
-        line += " is on file"
-        if c.get("sha256"):
-            line += f" (SHA-256 {c['sha256'][:16]}…)"
-        ev.append(line + ".")
+        ev.append("A still image was captured at the moment of detection.")
+    if clips:
+        names = [c["label"] + (f" ({c['length']})" if c.get("length") else "") for c in clips]
+        listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+        ev.append(f"{len(clips)} video clip{'s are' if len(clips) != 1 else ' is'} on file: {listed}.")
     if ev:
         paras.append(" ".join(ev))
 
@@ -2645,12 +2836,9 @@ def build_ai_report_draft(cursor, incident_id: str) -> Optional[dict]:
             "track_id": ctx.get("track_id"),
             "weapons": weapons,
         },
-        "scene": {"lighting": lighting["label"] if lighting else None,
-                  "brightness": lighting["brightness"] if lighting else None},
         "evidence": {
             "snapshot": inc.get("screenshot_path"),
-            "snapshot_sha256": inc.get("screenshot_sha256"),
-            "clips": clips,
+            "clips": [{"label": c["label"], "length": c.get("length"), "recorded_at": c.get("recorded_at")} for c in clips],
         },
         "narrative": "\n\n".join(paras),
         "suspect_description": suspect,
@@ -2708,12 +2896,20 @@ async def ai_trigger(data: AiTriggerSchema, request: Request):
 
     conn = get_conn()
     cursor = conn.cursor()
+    # The alert's map pin goes where the camera that saw it stands. Falls
+    # back to the old fixed point for a camera not yet placed on the map.
+    lat, lng = 11.0504, 124.6062
+    if data.camera_id:
+        cursor.execute("SELECT lat, lng FROM cameras WHERE id = ?", (data.camera_id,))
+        cam_row = cursor.fetchone()
+        if cam_row and cam_row["lat"] is not None and cam_row["lng"] is not None:
+            lat, lng = cam_row["lat"], cam_row["lng"]
     cursor.execute(
         """INSERT INTO incidents
            (id, case_id, type, severity, status, lat, lng, location_name,
             occurred_date, occurred_time, confidence, officer, barangay_id, source, camera_id)
            VALUES (?, ?, ?, 'HIGH', 'Active', ?, ?, ?, ?, ?, ?, 'AI_AUTOMATION', ?, 'AI_AUTOMATION', ?)""",
-        (incident_id, case_id, data.event, 11.0504, 124.6062, data.location_name,
+        (incident_id, case_id, data.event, lat, lng, data.location_name,
          now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), data.confidence, data.barangay_id.lower(),
          data.camera_id),
     )
@@ -3293,8 +3489,39 @@ async def get_video_records(authorization: Optional[str] = Header(None)):
     cursor.execute(sql, tuple(params))
     rows = cursor.fetchall()
     rows = _filter_records_by_crime_type(cursor, payload, rows)
+    records = _label_records(cursor, [_row_to_record_dict(r) for r in rows])
     conn.close()
-    return [_row_to_record_dict(r) for r in rows]
+    return records
+
+
+def _label_records(cursor, records: list) -> list:
+    """Adds what a person reads in place of the file name: a clip of an
+    incident is "<Type> <n>" -- "Assault 1", "Assault 2" -- numbered in
+    recording order across ALL of that incident's clips (not just the ones
+    this caller can see, so the numbers match the report). Footage with no
+    incident keeps its file name."""
+    inc_ids = list({r["associated_incident_id"] for r in records if r.get("associated_incident_id")})
+    if not inc_ids:
+        return [{**r, "label": None, "incident_type": None} for r in records]
+    ph = ",".join("?" for _ in inc_ids)
+    cursor.execute(f"SELECT id, type, case_id FROM incidents WHERE id IN ({ph})", tuple(inc_ids))
+    incs = {r["id"]: dict(r) for r in cursor.fetchall()}
+    cursor.execute(f"SELECT id, associated_incident_id FROM video_records WHERE associated_incident_id IN ({ph}) "
+                   "ORDER BY recorded_at, id", tuple(inc_ids))
+    position: dict = {}
+    counters: dict = {}
+    for r in cursor.fetchall():
+        n = counters[r["associated_incident_id"]] = counters.get(r["associated_incident_id"], 0) + 1
+        position[r["id"]] = n
+    out = []
+    for r in records:
+        inc = incs.get(r.get("associated_incident_id"))
+        if inc and r["id"] in position:
+            out.append({**r, "label": f"{incident_type_title(inc['type'])} {position[r['id']]}",
+                        "incident_type": (inc["type"] or "").upper(), "case_id": inc.get("case_id")})
+        else:
+            out.append({**r, "label": None, "incident_type": (inc or {}).get("type")})
+    return out
 
 
 def _filter_records_by_crime_type(cursor, payload: dict, rows: list) -> list:
@@ -4312,6 +4539,8 @@ async def delete_station(station_id: str, authorization: Optional[str] = Header(
 # it from every jurisdiction it was in; the audit entry keeps the list.
 
 MIN_DECISION_REASON = 10
+# A password an admin or DevTeam sets for someone else.
+MIN_PASSWORD_LENGTH = 8
 
 
 class ApplicationReopenSchema(BaseModel):
@@ -4678,6 +4907,18 @@ async def list_my_users(authorization: Optional[str] = Header(None)):
         cursor.execute("SELECT * FROM users WHERE parent_admin_id = ? AND deleted_at IS NULL", (payload["id"],))
     rows = cursor.fetchall()
     result = _rows_to_user_dicts_batch(cursor, rows)
+    # Each account's dicing, for the Personnel permission editor.
+    ids = [u["id"] for u in result]
+    scopes_by_user: dict = {}
+    if ids:
+        ph = ",".join("?" for _ in ids)
+        cursor.execute(f"SELECT user_id, permission_key, resource_type, resource_id FROM permission_grants "
+                       f"WHERE user_id IN ({ph}) AND resource_type IN ('camera', 'crime_type', 'channel')", tuple(ids))
+        for r in cursor.fetchall():
+            (scopes_by_user.setdefault(r["user_id"], {}).setdefault(r["permission_key"], {})
+             .setdefault(r["resource_type"], []).append(r["resource_id"]))
+    for u in result:
+        u["resource_scopes"] = scopes_by_user.get(u["id"], {})
     conn.close()
     return result
 
@@ -5165,6 +5406,9 @@ async def devteam_edit_user(user_id: int, data: DevteamUserEdit, authorization: 
     if data.username is not None:
         fields.append("username = ?"); values.append(data.username)
     if data.password:
+        if len(data.password) < MIN_PASSWORD_LENGTH:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"A new password needs at least {MIN_PASSWORD_LENGTH} characters")
         fields.append("password = ?"); values.append(hash_password(data.password))
     if data.assignment is not None:
         fields.append("assignment = ?"); values.append(data.assignment)
@@ -5442,30 +5686,74 @@ async def devteam_detection_quality(days: int = 30, authorization: Optional[str]
 # own docstring) is called from every soft-deleting endpoint above; this is
 # where DevTeam reads that trail back and, for a delete-type entry whose
 # target is still soft-deleted, undoes it.
+def _audit_bound(value: Optional[str], label: str, end: bool) -> Optional[str]:
+    """A YYYY-MM-DD filter as a created_at bound. created_at is stored UTC;
+    the console's day is Manila time (UTC+8), so a day runs from 16:00 UTC
+    the evening before."""
+    if not value:
+        return None
+    try:
+        day = datetime.strptime(value.strip(), "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{label} must be a date (YYYY-MM-DD)")
+    start = day - timedelta(hours=8)
+    return (start + timedelta(days=1) if end else start).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @app.get("/api/devteam/audit_log")
 async def devteam_list_audit_log(
     action: Optional[str] = None, limit: int = 200, user_id: Optional[int] = None, q: Optional[str] = None,
+    category: Optional[str] = None, target_type: Optional[str] = None,
+    barangay_id: Optional[str] = None, station_id: Optional[str] = None,
+    date_from: Optional[str] = None, date_to: Optional[str] = None,
     authorization: Optional[str] = Header(None)
 ):
-    """action: exact action name. user_id: everything that account did OR
-    that was done to it. q: free-text match on action, actor or target."""
+    """Filters, all optional and combined with AND:
+    action -- exact action name; category -- its prefix ("user", "camera");
+    user_id -- everything that account did OR that was done to it;
+    barangay_id / station_id -- done by an account of that barangay or
+    station, or done to that barangay or station itself;
+    date_from / date_to -- inclusive days (Manila time);
+    target_type; q -- free text on action, actor, target and details."""
     payload = require_auth(authorization)
     require_role(payload, {"DEVTEAM"})
     limit = max(1, min(limit, 1000))
+    start, end = _audit_bound(date_from, "From date", False), _audit_bound(date_to, "To date", True)
+    if start and end and start >= end:
+        raise HTTPException(status_code=400, detail="The date range ends before it starts")
     conn = get_conn()
     cursor = conn.cursor()
     where, params = [], []
     if action:
-        where.append("action = ?"); params.append(action)
+        where.append("a.action = ?"); params.append(action)
+    if category:
+        where.append("a.action LIKE ?"); params.append(f"{category.strip()}.%")
+    if target_type:
+        where.append("a.target_type = ?"); params.append(target_type)
     if user_id is not None:
-        where.append("(actor_user_id = ? OR (target_type = 'user' AND target_id = ?))")
+        where.append("(a.actor_user_id = ? OR (a.target_type = 'user' AND a.target_id = ?))")
         params += [user_id, str(user_id)]
+    if barangay_id:
+        where.append("(LOWER(COALESCE(a.actor_barangay_id, u.barangay_id, '')) = LOWER(?) "
+                     "OR (a.target_type = 'barangay' AND LOWER(a.target_id) = LOWER(?)))")
+        params += [barangay_id, barangay_id]
+    if station_id:
+        where.append("(COALESCE(a.actor_station_id, u.station_id, '') = ? "
+                     "OR (a.target_type = 'station' AND a.target_id = ?))")
+        params += [station_id, station_id]
+    if start:
+        where.append("a.created_at >= ?"); params.append(start)
+    if end:
+        where.append("a.created_at < ?"); params.append(end)
     if q and q.strip():
         like = f"%{q.strip().lower()}%"
-        where.append("(LOWER(action) LIKE ? OR LOWER(actor_username) LIKE ? OR LOWER(target_id) LIKE ? OR LOWER(COALESCE(target_snapshot, '')) LIKE ?)")
+        where.append("(LOWER(a.action) LIKE ? OR LOWER(a.actor_username) LIKE ? OR LOWER(a.target_id) LIKE ? OR LOWER(COALESCE(a.target_snapshot, '')) LIKE ?)")
         params += [like] * 4
     cursor.execute(
-        f"SELECT * FROM audit_log {'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY created_at DESC LIMIT ?",
+        "SELECT a.*, u.username AS actor_current_username, COALESCE(a.actor_barangay_id, u.barangay_id) AS actor_barangay, "
+        "COALESCE(a.actor_station_id, u.station_id) AS actor_station "
+        "FROM audit_log a LEFT JOIN users u ON u.id = a.actor_user_id "
+        f"{'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY a.created_at DESC LIMIT ?",
         (*params, limit),
     )
     rows = [dict(r) for r in cursor.fetchall()]
@@ -5479,6 +5767,37 @@ async def devteam_list_audit_log(
             except Exception:
                 pass
     return rows
+
+@app.get("/api/devteam/audit_log/facets")
+async def devteam_audit_facets(authorization: Optional[str] = Header(None)):
+    """The values the audit filters can take, from what's actually logged."""
+    payload = require_auth(authorization)
+    require_role(payload, {"DEVTEAM"})
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT action, COUNT(*) AS n FROM audit_log GROUP BY action ORDER BY action")
+        actions = [{"action": r["action"], "count": r["n"]} for r in cursor.fetchall()]
+        cursor.execute("SELECT DISTINCT target_type FROM audit_log ORDER BY target_type")
+        target_types = [r["target_type"] for r in cursor.fetchall()]
+        cursor.execute(
+            # The account's current username: the logged one is whatever it
+            # was called at the time, and accounts get renamed.
+            "SELECT a.actor_user_id AS id, COALESCE(MAX(u.username), MAX(a.actor_username)) AS username, MAX(u.full_name) AS full_name, "
+            "MAX(u.role) AS role, COUNT(*) AS n FROM audit_log a LEFT JOIN users u ON u.id = a.actor_user_id "
+            "WHERE a.actor_user_id IS NOT NULL GROUP BY a.actor_user_id ORDER BY username")
+        actors = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT id, name FROM barangays ORDER BY name")
+        barangays = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT id, name FROM police_stations ORDER BY name")
+        stations = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT MIN(created_at) AS first, MAX(created_at) AS last FROM audit_log")
+        span = dict(cursor.fetchone())
+    finally:
+        conn.close()
+    categories = sorted({a["action"].split(".")[0] for a in actions if "." in a["action"]})
+    return {"actions": actions, "categories": categories, "target_types": target_types,
+            "actors": actors, "barangays": barangays, "stations": stations, "span": span}
 
 @app.post("/api/devteam/audit_log/{entry_id}/restore")
 async def devteam_restore_audit_entry(entry_id: str, authorization: Optional[str] = Header(None)):
@@ -5806,6 +6125,38 @@ async def devteam_set_resource_scopes(user_id: int, body: ResourceScopesUpdate, 
     return {"status": "updated", "id": user_id}
 
 
+@app.put("/api/admin/users/{user_id}/resource_scopes")
+async def admin_set_resource_scopes(user_id: int, body: ResourceScopesUpdate, authorization: Optional[str] = Header(None)):
+    """The same dicing DevTeam has (2026-10-01), for a barangay/PNP admin's
+    own staff: "View Crime Map, but only these cameras and these crime
+    types". Capped at the admin's own reach -- an admin who has been diced
+    down themselves can't hand a subordinate more than they hold."""
+    payload = require_auth(authorization)
+    require_role(payload, ADMIN_ROLES)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        target = _resource_grant_target(cursor, user_id)
+        _check_own_subordinate(payload, target)
+        for key, dims in (body.scopes or {}).items():
+            if not isinstance(dims, dict):
+                continue
+            for rtype, ids in dims.items():
+                ceiling = _scoped_resource_ids(cursor, payload, key, rtype)
+                if ceiling is None:
+                    continue
+                if ids is None:
+                    raise HTTPException(status_code=403, detail=f"Your own {key} access is limited, so you can't give {rtype.replace('_', ' ')} access to everything")
+                beyond = [str(i) for i in ids if str(i) not in ceiling]
+                if beyond:
+                    raise HTTPException(status_code=403, detail=f"Outside your own access: {', '.join(beyond)}")
+        _apply_resource_scopes(cursor, payload, target, body.scopes)
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "users", "event": "permissions_updated", "id": user_id})
+    return {"status": "updated", "id": user_id}
+
 @app.get("/api/admin/users/{user_id}/resource_permissions")
 async def admin_list_resource_permissions(user_id: int, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -6129,6 +6480,58 @@ async def delete_custom_role(role_id: str, authorization: Optional[str] = Header
 # response_note. See report_requests' own migration comment for why this
 # does NOT grant any view_history access -- #5's ban on that for barangay
 # accounts is unconditional and stays that way here too.
+def _report_request_details(body: "ReportRequestCreate") -> dict:
+    """Validates the structured fields and returns what gets stored. Empty
+    strings are dropped so the station's view shows only what was given."""
+    def clean(v, limit=500):
+        v = (v or "").strip()
+        if len(v) > limit:
+            raise HTTPException(status_code=400, detail=f"Keep each field under {limit} characters")
+        return v or None
+
+    def iso_date(v, label):
+        v = clean(v, 10)
+        if v is None:
+            return None
+        try:
+            return datetime.strptime(v, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"{label} must be a date (YYYY-MM-DD)")
+
+    out = {
+        "report_type": clean(body.report_type, 40),
+        "crime_type": (clean(body.crime_type, 40) or "").upper() or None,
+        "period_from": iso_date(body.period_from, "Period start"),
+        "period_to": iso_date(body.period_to, "Period end"),
+        "location": clean(body.location, 200),
+        "persons_involved": clean(body.persons_involved, 300),
+        "reference": clean(body.reference, 100),
+        "purpose": clean(body.purpose, 40),
+        "purpose_detail": clean(body.purpose_detail, 300),
+        "urgency": clean(body.urgency, 10) or "routine",
+        "needed_by": iso_date(body.needed_by, "Needed-by date"),
+    }
+    if out["report_type"] and out["report_type"] not in REPORT_REQUEST_TYPES:
+        raise HTTPException(status_code=400, detail="Unknown report type")
+    if out["purpose"] and out["purpose"] not in REPORT_REQUEST_PURPOSES:
+        raise HTTPException(status_code=400, detail="Unknown purpose")
+    if out["purpose"] == "other" and not out["purpose_detail"]:
+        raise HTTPException(status_code=400, detail="Say what the report is for")
+    if out["crime_type"] and out["crime_type"] not in REPORT_REQUEST_CRIMES:
+        raise HTTPException(status_code=400, detail="Unknown crime type")
+    if out["urgency"] not in REPORT_REQUEST_URGENCY:
+        raise HTTPException(status_code=400, detail="Urgency must be routine or urgent")
+    if out["period_from"] and out["period_to"] and out["period_from"] > out["period_to"]:
+        raise HTTPException(status_code=400, detail="The period ends before it starts")
+    today = datetime.now().date().isoformat()
+    if out["period_from"] and out["period_from"] > today:
+        raise HTTPException(status_code=400, detail="The period can't start in the future")
+    if out["needed_by"] and out["needed_by"] < today:
+        raise HTTPException(status_code=400, detail="The needed-by date has already passed")
+    if out["urgency"] == "routine" and not body.report_type:
+        out.pop("urgency")  # a legacy description-only request: store nothing extra
+    return {k: v for k, v in out.items() if v is not None}
+
 @app.post("/api/report_requests")
 async def create_report_request(body: ReportRequestCreate, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
@@ -6139,6 +6542,7 @@ async def create_report_request(body: ReportRequestCreate, authorization: Option
     description = (body.description or "").strip()
     if not description:
         raise HTTPException(status_code=400, detail="Describe what you're requesting")
+    details = _report_request_details(body)
 
     conn = get_conn()
     cursor = conn.cursor()
@@ -6160,12 +6564,14 @@ async def create_report_request(body: ReportRequestCreate, authorization: Option
 
         request_id = str(uuid.uuid4())
         cursor.execute(
-            "INSERT INTO report_requests (id, barangay_id, station_id, incident_id, description, requested_by) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (request_id, barangay_id, station_id, body.incident_id, description, payload["id"]),
+            "INSERT INTO report_requests (id, barangay_id, station_id, incident_id, description, requested_by, details) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (request_id, barangay_id, station_id, body.incident_id, description, payload["id"],
+             json.dumps(details) if details else None),
         )
         log_audit(cursor, payload, "report_request.created", "report_request", request_id, snapshot={
             "barangay_id": barangay_id, "incident_id": body.incident_id, "description": description,
+            "details": details,
         })
         conn.commit()
         if station_id:
@@ -6194,10 +6600,62 @@ async def list_report_requests(authorization: Optional[str] = Header(None)):
         conn.close()
         return []
     rows = [dict(r) for r in cursor.fetchall()]
+    # Who asked, by name, and the barangay's real name -- the station sees
+    # requests from several barangays and several people in each.
+    user_ids = {r["requested_by"] for r in rows} | {r["responded_by"] for r in rows if r.get("responded_by")}
+    names: dict = {}
+    if user_ids:
+        ph = ",".join("?" for _ in user_ids)
+        cursor.execute(f"SELECT id, username, full_name, position FROM users WHERE id IN ({ph})", tuple(user_ids))
+        names = {u["id"]: dict(u) for u in cursor.fetchall()}
+    brgy_ids = {r["barangay_id"] for r in rows}
+    brgy_names: dict = {}
+    if brgy_ids:
+        ph = ",".join("?" for _ in brgy_ids)
+        cursor.execute(f"SELECT id, name FROM barangays WHERE id IN ({ph})", tuple(brgy_ids))
+        brgy_names = {b["id"]: b["name"] for b in cursor.fetchall()}
     conn.close()
+    files_by_req: dict = {}
+    if rows:
+        conn = get_conn()
+        cursor = conn.cursor()
+        ph = ",".join("?" for _ in rows)
+        cursor.execute(f"SELECT id, request_id, original_name, content_type, size_bytes, uploaded_at FROM report_request_files "
+                       f"WHERE request_id IN ({ph}) ORDER BY uploaded_at", tuple(r["id"] for r in rows))
+        for f in cursor.fetchall():
+            files_by_req.setdefault(f["request_id"], []).append(dict(f))
+        conn.close()
+    for r in rows:
+        try:
+            r["details"] = json.loads(r["details"]) if r.get("details") else {}
+        except (TypeError, ValueError):
+            r["details"] = {}
+        try:
+            r["shared_report"] = json.loads(r["shared_report"]) if r.get("shared_report") else None
+        except (TypeError, ValueError):
+            r["shared_report"] = None
+        r["files"] = files_by_req.get(r["id"], [])
+        who = names.get(r["requested_by"]) or {}
+        r["requested_by_name"] = who.get("full_name") or who.get("username")
+        r["requested_by_position"] = who.get("position")
+        responder = names.get(r.get("responded_by")) or {}
+        r["responded_by_name"] = responder.get("full_name") or responder.get("username")
+        r["barangay_name"] = brgy_names.get(r["barangay_id"]) or r["barangay_id"]
     return rows
 
-def _respond_to_report_request(payload: dict, request_id: str, new_status: str, note: Optional[str], require_current: str):
+@app.get("/api/report_requests/options")
+async def report_request_options(authorization: Optional[str] = Header(None)):
+    """The request form's choices, from the same tables the server validates
+    against, so the two can't drift."""
+    require_auth(authorization)
+    return {
+        "report_types": [{"value": k, "label": v} for k, v in REPORT_REQUEST_TYPES.items()],
+        "purposes": [{"value": k, "label": v} for k, v in REPORT_REQUEST_PURPOSES.items()],
+        "crime_types": sorted(REPORT_REQUEST_CRIMES - {"ANY", "OTHER"}),
+    }
+
+def _respond_to_report_request(payload: dict, request_id: str, new_status: str, note: Optional[str], require_current: str,
+                               shared_report: Optional[dict] = None):
     conn = get_conn()
     cursor = conn.cursor()
     try:
@@ -6211,14 +6669,107 @@ def _respond_to_report_request(payload: dict, request_id: str, new_status: str, 
         if req["status"] != require_current:
             raise HTTPException(status_code=400, detail=f"Request is '{req['status']}', not '{require_current}'")
         cursor.execute(
-            "UPDATE report_requests SET status = ?, responded_by = ?, responded_at = NOW(), response_note = ? WHERE id = ?",
-            (new_status, payload["id"], note, request_id),
+            "UPDATE report_requests SET status = ?, responded_by = ?, responded_at = NOW(), response_note = ?, "
+            "shared_report = COALESCE(?, shared_report) WHERE id = ?",
+            (new_status, payload["id"], note, json.dumps(shared_report) if shared_report else None, request_id),
         )
-        log_audit(cursor, payload, f"report_request.{new_status}", "report_request", request_id, snapshot={"note": note})
+        log_audit(cursor, payload, f"report_request.{new_status}", "report_request", request_id,
+                  snapshot={"note": note, "shared": [f["key"] for f in shared_report["fields"]] if shared_report else None,
+                            "incident_id": shared_report.get("incident_id") if shared_report else None})
         conn.commit()
         return {"status": new_status}
     finally:
         conn.close()
+
+# Report fields police may hand to a barangay, in display order. "where"
+# says which record the value comes from.
+SHAREABLE_REPORT_FIELDS = [
+    ("case_id", "Case number", "incident"),
+    ("incident_type", "Incident type", "report"),
+    ("occurred", "Date and time", "incident"),
+    ("location", "Location", "incident"),
+    ("nature_of_incident", "Nature of incident", "report"),
+    ("narrative", "Summary", "report"),
+    ("property_damaged", "Property damaged", "report"),
+    ("evidence_secured", "Evidence secured", "report"),
+    ("action_taken", "Action taken", "report"),
+    ("disposition", "Disposition", "report"),
+    ("complainant", "Complainant", "report"),
+    ("victim_details", "Victim", "report"),
+    ("suspect_description", "Suspect", "report"),
+    ("witnesses", "Witnesses", "report"),
+    ("reporting_officer", "Reporting officer", "report"),
+    ("rank", "Rank", "report"),
+    ("badge_number", "Badge number", "report"),
+]
+SHAREABLE_KEYS = {k for k, _, _ in SHAREABLE_REPORT_FIELDS}
+REQUEST_FILE_TYPES = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                      ".webp": "image/webp",
+                      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+MAX_REQUEST_FILE_BYTES = 15 * 1024 * 1024
+MAX_REQUEST_FILES = 10
+
+
+def _shareable_report(cursor, payload: dict, request: dict, incident_id: str) -> tuple:
+    """The incident and its latest filed report, checked: in the requesting
+    barangay, inside the caller's jurisdiction and crime-type access."""
+    frag, params = scope_clause(payload)
+    where = "id = ? AND deleted_at IS NULL" + (f" AND {frag}" if frag else "")
+    cursor.execute(f"SELECT * FROM incidents WHERE {where}", [incident_id] + params)
+    inc = cursor.fetchone()
+    if not inc:
+        raise HTTPException(status_code=404, detail="Incident not found in your jurisdiction")
+    inc = dict(inc)
+    if (inc.get("barangay_id") or "").lower() != (request.get("barangay_id") or "").lower():
+        raise HTTPException(status_code=400, detail="That incident isn't in the barangay that asked")
+    if not _crime_type_allowed(cursor, payload, "view_history", inc.get("type")):
+        raise HTTPException(status_code=403, detail="Your access doesn't cover that type of incident")
+    cursor.execute(
+        "SELECT * FROM incident_reports WHERE incident_id = ? "
+        "ORDER BY CASE WHEN report_status = 'confirmed' THEN 0 ELSE 1 END, COALESCE(updated_at, created_at) DESC LIMIT 1",
+        (incident_id,))
+    row = cursor.fetchone()
+    report = _parse_report_row(row) if row else None
+    return inc, report
+
+
+def _build_shared_report(inc: dict, report: Optional[dict], keys: list, summary: Optional[str]) -> dict:
+    body = (report or {}).get("report_body") or {}
+    if report and report.get("report_status") != "confirmed":
+        raise HTTPException(status_code=400, detail="That incident's report is still a draft -- confirm it before sharing")
+    values = {
+        "case_id": inc.get("case_id"),
+        "occurred": f"{inc.get('occurred_date')} {_format_12h(inc.get('occurred_time') or '')}".strip(),
+        "location": inc.get("location_name"),
+        "incident_type": body.get("incident_type") or inc.get("type"),
+    }
+    unknown = [k for k in keys if k not in SHAREABLE_KEYS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Can't share: {', '.join(map(str, unknown))}")
+    fields = []
+    for key, label, where in SHAREABLE_REPORT_FIELDS:
+        if key not in keys:
+            continue
+        value = summary.strip() if key == "narrative" and summary and summary.strip() else \
+            (values.get(key) if where == "incident" or key == "incident_type" else body.get(key))
+        if value not in (None, ""):
+            fields.append({"key": key, "label": label, "value": str(value)})
+    if not fields:
+        raise HTTPException(status_code=400, detail="Choose at least one field that has a value")
+    return {"incident_id": inc["id"], "case_id": inc.get("case_id"), "fields": fields,
+            "summary_edited": bool(summary and summary.strip() and summary.strip() != (body.get("narrative") or "").strip())}
+
+
+def _request_for_station(cursor, payload: dict, request_id: str) -> dict:
+    cursor.execute("SELECT * FROM report_requests WHERE id = ?", (request_id,))
+    req = cursor.fetchone()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    req = dict(req)
+    if payload["role"] != "DEVTEAM" and req["station_id"] != payload.get("station_id"):
+        raise HTTPException(status_code=403, detail="This request wasn't routed to your station")
+    return req
+
 
 def _require_report_sharer(payload: dict):
     """Answering a request means handing over what's in the crime history,
@@ -6258,11 +6809,199 @@ async def fulfill_report_request(request_id: str, body: ReportRequestResponse, a
     payload = require_auth(authorization)
     require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
     _require_report_sharer(payload)
-    if not (body.note or "").strip():
-        raise HTTPException(status_code=400, detail="Include the report/information being handed over")
-    result = _respond_to_report_request(payload, request_id, "fulfilled", body.note, require_current="accepted")
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        req = _request_for_station(cursor, payload, request_id)
+        shared = None
+        if body.incident_id:
+            inc, report = _shareable_report(cursor, payload, req, body.incident_id)
+            shared = _build_shared_report(inc, report, list(body.share_fields or []), body.summary)
+            shared.update(shared_by=payload.get("username"), shared_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        cursor.execute("SELECT COUNT(*) AS n FROM report_request_files WHERE request_id = ?", (request_id,))
+        files = cursor.fetchone()["n"]
+    finally:
+        conn.close()
+    if not (body.note or "").strip() and not shared and not files:
+        raise HTTPException(status_code=400, detail="Hand over something: share a report, attach a file, or write the information")
+    result = _respond_to_report_request(payload, request_id, "fulfilled", (body.note or "").strip() or None,
+                                        require_current="accepted", shared_report=shared)
     await manager.broadcast({"channel": "report_requests", "event": "fulfilled", "id": request_id})
     return result
+
+
+@app.get("/api/report_requests/{request_id}/shareable")
+async def report_request_shareable(request_id: str, authorization: Optional[str] = Header(None)):
+    """Incidents in the asking barangay that police could answer with, and
+    the fields each one's report can share."""
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        req = _request_for_station(cursor, payload, request_id)
+        sql, params = apply_scope(payload, "SELECT * FROM incidents", [],
+                                  extra_where="deleted_at IS NULL AND LOWER(barangay_id) = LOWER(?)",
+                                  extra_params=[req["barangay_id"]])
+        cursor.execute(sql + " ORDER BY occurred_date DESC, occurred_time DESC LIMIT 200", tuple(params))
+        incs = [dict(r) for r in cursor.fetchall()
+                if _crime_type_allowed(cursor, payload, "view_history", r["type"])]
+        ids = [i["id"] for i in incs]
+        reports: dict = {}
+        if ids:
+            ph = ",".join("?" for _ in ids)
+            cursor.execute(f"SELECT incident_id, report_status FROM incident_reports WHERE incident_id IN ({ph})", tuple(ids))
+            for r in cursor.fetchall():
+                if r["report_status"] == "confirmed" or r["incident_id"] not in reports:
+                    reports[r["incident_id"]] = r["report_status"]
+    finally:
+        conn.close()
+    return {
+        "fields": [{"key": k, "label": l} for k, l, _ in SHAREABLE_REPORT_FIELDS],
+        "incidents": [{"id": i["id"], "case_id": i["case_id"], "type": i["type"], "status": i["status"],
+                       "occurred_date": i["occurred_date"], "occurred_time": i["occurred_time"],
+                       "location_name": i["location_name"], "report_status": reports.get(i["id"])} for i in incs],
+    }
+
+
+@app.get("/api/report_requests/{request_id}/share_preview")
+async def report_request_share_preview(request_id: str, incident_id: str, authorization: Optional[str] = Header(None)):
+    """Every shareable field of one incident's report with its value, so the
+    officer sees exactly what each tick would hand over."""
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        req = _request_for_station(cursor, payload, request_id)
+        inc, report = _shareable_report(cursor, payload, req, incident_id)
+    finally:
+        conn.close()
+    if report and report.get("report_status") != "confirmed":
+        return {"report_status": "draft", "fields": []}
+    full = _build_shared_report(inc, report, list(SHAREABLE_KEYS), None) if report or inc else None
+    return {"report_status": "confirmed" if report else None, "fields": full["fields"] if full else []}
+
+
+def _request_file_access(cursor, payload: dict, request_id: str) -> dict:
+    """The asking barangay and the answering station both see the files."""
+    cursor.execute("SELECT * FROM report_requests WHERE id = ?", (request_id,))
+    req = cursor.fetchone()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    req = dict(req)
+    role = payload["role"]
+    if role == "DEVTEAM":
+        return req
+    if role in BARANGAY_SIDE_ROLES and (req["barangay_id"] or "").lower() == (payload.get("barangay_id") or "").lower():
+        return req
+    if role in PNP_SIDE_ROLES and req["station_id"] == payload.get("station_id"):
+        return req
+    raise HTTPException(status_code=404, detail="Request not found")
+
+
+@app.post("/api/report_requests/{request_id}/files")
+@limiter.limit("20/minute")
+async def upload_report_request_file(request: Request, request_id: str, file: UploadFile = File(...),
+                                     authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
+    original = os.path.basename(file.filename or "").strip() or "file"
+    ext = os.path.splitext(original)[1].lower()
+    if ext not in REQUEST_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Attach a PDF, Word (.docx) or image (JPG, PNG, WEBP) file")
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        req = _request_for_station(cursor, payload, request_id)
+        if req["status"] != "accepted":
+            raise HTTPException(status_code=400, detail="Accept the request before attaching files")
+        cursor.execute("SELECT COUNT(*) AS n FROM report_request_files WHERE request_id = ?", (request_id,))
+        if cursor.fetchone()["n"] >= MAX_REQUEST_FILES:
+            raise HTTPException(status_code=400, detail=f"At most {MAX_REQUEST_FILES} files per request")
+        file_id = str(uuid.uuid4())
+        stored = f"{file_id}{ext}"
+        dest = os.path.join(REQUEST_FILES_DIR, stored)
+        total = 0
+        try:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_REQUEST_FILE_BYTES:
+                        raise HTTPException(status_code=400, detail="File too large (15 MB max)")
+                    f.write(chunk)
+        except HTTPException:
+            if os.path.exists(dest):
+                os.remove(dest)
+            raise
+        if total == 0:
+            os.remove(dest)
+            raise HTTPException(status_code=400, detail="That file is empty")
+        cursor.execute(
+            "INSERT INTO report_request_files (id, request_id, stored_name, original_name, content_type, size_bytes, uploaded_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (file_id, request_id, stored, original[:200], REQUEST_FILE_TYPES[ext], total, payload["id"]))
+        log_audit(cursor, payload, "report_request.file_attached", "report_request", request_id,
+                  snapshot={"file": original, "bytes": total})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "report_requests", "event": "file_attached", "id": request_id})
+    return {"id": file_id, "original_name": original, "size_bytes": total}
+
+
+@app.delete("/api/report_requests/{request_id}/files/{file_id}")
+async def delete_report_request_file(request_id: str, file_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    require_role(payload, PNP_SIDE_ROLES | {"DEVTEAM"})
+    _require_report_sharer(payload)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        req = _request_for_station(cursor, payload, request_id)
+        if req["status"] != "accepted":
+            raise HTTPException(status_code=400, detail="Files can't be removed once the request is fulfilled")
+        cursor.execute("SELECT * FROM report_request_files WHERE id = ? AND request_id = ?", (file_id, request_id))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="File not found")
+        cursor.execute("DELETE FROM report_request_files WHERE id = ?", (file_id,))
+        log_audit(cursor, payload, "report_request.file_removed", "report_request", request_id,
+                  snapshot={"file": row["original_name"]})
+        conn.commit()
+        try:
+            os.remove(os.path.join(REQUEST_FILES_DIR, row["stored_name"]))
+        except OSError:
+            pass
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "report_requests", "event": "file_removed", "id": request_id})
+    return {"status": "removed"}
+
+
+@app.get("/api/report_requests/{request_id}/files/{file_id}")
+async def download_report_request_file(request_id: str, file_id: str, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        _request_file_access(cursor, payload, request_id)
+        cursor.execute("SELECT * FROM report_request_files WHERE id = ? AND request_id = ?", (file_id, request_id))
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="File not found")
+    path = os.path.join(REQUEST_FILES_DIR, os.path.basename(row["stored_name"]))
+    if not os.path.exists(path):
+        raise HTTPException(status_code=410, detail="The file is no longer on disk")
+    return FileResponse(path, media_type=row["content_type"] or "application/octet-stream", filename=row["original_name"])
 
 # --- DEVTEAM: FULL SYSTEM VISIBILITY (READ-ONLY OVERVIEW) ---
 @app.get("/api/devteam/overview")
