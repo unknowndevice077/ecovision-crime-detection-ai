@@ -978,18 +978,92 @@ res_w, res_h = map(int, sys_config["camera"]["default_resolution"].lower().split
 _URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "udp://", "tcp://")
 
 
-def _normalise_source(raw):
-    """Coerces a config/env/API value into either an int index or a URL string.
+# DirectShow's video-input category GUIDs. A device listed under either is a
+# camera OpenCV's CAP_DSHOW can open, even when ffmpeg labels it "(none)"
+# (some virtual cameras do).
+_DSHOW_VIDEO_GUIDS = ("860bb310-5d01-11d0-bd3b-00a0c911ce86", "65e8773d-8f56-11d0-a3b9-00a0c90a63a5")
+
+
+def _video_device_names():
+    """Local camera names in DirectShow order -- the same order CAP_DSHOW
+    numbers them, so names[i] is what index i opens. Lets the dashboard show
+    "OBS Virtual Camera" instead of a bare 5, and lets config name a device
+    instead of an index that differs on every machine (OBS lands wherever the
+    other virtual cameras on that PC leave room). Empty off Windows or if the
+    bundled ffmpeg can't run; callers fall back to plain indexes."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import subprocess
+        import imageio_ffmpeg
+        out = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+            capture_output=True, text=True, timeout=10, errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stderr
+    except Exception:
+        return []
+    names, pending, section = [], None, None
+    for line in out.splitlines():
+        if "DirectShow video devices" in line:      # older ffmpeg: sectioned output
+            section = "video"
+            continue
+        if "DirectShow audio devices" in line:
+            section = "audio"
+            continue
+        m = re.search(r'\]\s+"(.+)"(?:\s+\((\w+)\))?\s*$', line)
+        if m and "Alternative name" not in line:
+            pending = (m.group(1), m.group(2) or section)
+            continue
+        m = re.search(r'Alternative name "(.+)"', line)
+        if m and pending:
+            name, kind = pending
+            pending = None
+            alt = m.group(1).lower()
+            if kind == "video" or any(g in alt for g in _DSHOW_VIDEO_GUIDS):
+                names.append(name)
+    return names
+
+
+def _device_index_for_name(name, names=None):
+    """Exact name first, then a unique partial match ("obs" -> "OBS Virtual Camera")."""
+    names = _video_device_names() if names is None else names
+    low = name.strip().lower()
+    for i, n in enumerate(names):
+        if n.lower() == low:
+            return i
+    partial = [i for i, n in enumerate(names) if low in n.lower()]
+    return partial[0] if len(partial) == 1 else None
+
+
+# The device name a source was picked by, kept so it's what gets saved: the
+# name finds the same camera on another PC, the index may not.
+camera_source_name = None
+
+
+def _resolve_source(raw):
+    """(source, device_name): the source as an int index or a URL/file
+    string, plus the camera name it was picked by, if it was a name.
 
     A digit string means a local index -- config files and JSON bodies both
     tend to stringify numbers, and opening index "0" as a *filename* fails in
-    a way that looks like a dead camera rather than a type mistake."""
+    a way that looks like a dead camera rather than a type mistake. A camera
+    NAME ("OBS Virtual Camera") resolves to its current index."""
     if isinstance(raw, int):
-        return raw
+        return raw, None
     s = str(raw).strip()
     if s.isdigit():
-        return int(s)
-    return s
+        return int(s), None
+    if s and not s.lower().startswith(_URL_SCHEMES) and not os.path.exists(s):
+        idx = _device_index_for_name(s)
+        if idx is not None:
+            return idx, s
+    return s, None
+
+
+def _normalise_source(raw):
+    """Just the source part of _resolve_source -- no state touched, so
+    reopen and probe paths can call it freely."""
+    return _resolve_source(raw)[0]
 
 
 def _is_network_source(src):
@@ -1004,7 +1078,7 @@ _configured_source = (
     or sys_config["camera"].get("source")
     or sys_config["camera"].get("index", 5)
 )
-camera_source = _normalise_source(_configured_source)
+camera_source, camera_source_name = _resolve_source(_configured_source)
 
 # Sent with every AI-triggered alert as location_name -- see the comment on
 # _post_alert's payload for why this replaced a hardcoded string.
@@ -1323,6 +1397,8 @@ def _describe_source(src=None):
     travel with its credentials intact."""
     src = camera_source if src is None else src
     if not isinstance(src, str):
+        if src == camera_source and camera_source_name:
+            return f"{camera_source_name} (index {src})"
         return f"local index {src}"
     return re.sub(r"://[^/@]*@", "://***@", src)
 
@@ -1346,6 +1422,7 @@ if cap is None:
             print(f"✅ [CAMERA] Using index {found_idx} instead "
                   f"(update config.json or pick it in the Monitor view to make this permanent).")
             camera_idx = camera_source = found_idx
+            camera_source_name = None
             cap = found_cap
         else:
             # Keep running headless: the HTTP server, /available_cameras and
@@ -1434,8 +1511,15 @@ def get_available_cameras(refresh: bool = False):
             _camera_scan_cache["result"] = _scan_cameras()
             _camera_scan_cache["at"] = now
         available = _camera_scan_cache["result"]
+        if refresh or _camera_scan_cache.get("names") is None:
+            _camera_scan_cache["names"] = _video_device_names()
+        names = _camera_scan_cache["names"]
     return {
         "available_cameras": available,
+        # Same cameras with their Windows names, for a picker that says
+        # "OBS Virtual Camera" rather than 5.
+        "devices": [{"index": i, "name": names[i] if i < len(names) else None} for i in available],
+        "current_name": (names[camera_idx] if isinstance(camera_idx, int) and camera_idx < len(names) else None),
         "current_index": camera_idx,
         # Network sources have no index, so the picker needs the source itself
         # to show what is actually being watched. Credentials are stripped.
@@ -1453,7 +1537,12 @@ def _persist_camera_source():
     silently win over a newly-picked `index` on the next boot, because source
     takes precedence."""
     try:
-        if isinstance(camera_source, int):
+        if isinstance(camera_source, int) and camera_source_name:
+            # Picked by name: save the name so it survives the device moving
+            # to another index (or the app moving to another PC).
+            sys_config["camera"]["index"] = camera_source
+            sys_config["camera"]["source"] = camera_source_name
+        elif isinstance(camera_source, int):
             sys_config["camera"]["index"] = camera_source
             sys_config["camera"]["source"] = ""
         else:
@@ -1467,16 +1556,23 @@ def _persist_camera_source():
 def _switch_source(new_source):
     """Shared body of both switch endpoints: reopen, invalidate the scan
     cache, persist. Returns the response dict."""
-    global camera_source, camera_idx
-    previous = camera_source
-    camera_source = _normalise_source(new_source)
+    global camera_source, camera_idx, camera_source_name
+    previous, previous_name = camera_source, camera_source_name
+    camera_source, camera_source_name = _resolve_source(new_source)
+    if isinstance(camera_source, str) and not _is_network_source(camera_source) and not os.path.exists(camera_source):
+        # Neither a camera on this PC, a stream URL nor a file: refuse rather
+        # than "open" a name as a filename and show a dead feed.
+        camera_source, camera_source_name = previous, previous_name
+        return {"status": "failed", "source": str(new_source),
+                "detail": f"No camera called '{new_source}' on this computer -- is it connected (and for OBS, is Virtual Camera started)?",
+                "current_source": _describe_source()}
     camera_idx = camera_source if isinstance(camera_source, int) else None
     ok = _reopen_camera()
 
     if not ok and _is_network_source(camera_source):
         # A typo'd or unreachable URL should not cost the operator the feed
         # they already had. Roll back and report the failure instead.
-        camera_source = previous
+        camera_source, camera_source_name = previous, previous_name
         camera_idx = camera_source if isinstance(camera_source, int) else None
         _reopen_camera()
         return {"status": "failed", "source": _describe_source(new_source),
@@ -1488,6 +1584,7 @@ def _switch_source(new_source):
     # for up to _CAMERA_SCAN_TTL after the operator changed cameras.
     with _camera_scan_lock:
         _camera_scan_cache["result"] = None
+        _camera_scan_cache["names"] = None
 
     _persist_camera_source()
     return {"status": "reopened" if ok else "failed",

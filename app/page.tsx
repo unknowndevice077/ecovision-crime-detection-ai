@@ -90,6 +90,9 @@ export default function EcoVisionSentinel() {
   const [telemetry, setTelemetry] = useState({ battery: 88, solarV: 14.4, tempCPU: 42, tempESP: 38, tempNeural: 51, load: 12.4 });
   const [camIndexInput, setCamIndexInput] = useState("5");
   const [availableCameras, setAvailableCameras] = useState<number[]>([]);
+  // The same cameras with their Windows names ("OBS Virtual Camera"), from
+  // the AI core. Picking by name is saved by name, so it finds OBS on any PC.
+  const [cameraDevices, setCameraDevices] = useState<{ index: number; name: string | null }[]>([]);
   // Credential-stripped description of whatever the AI core is currently
   // watching -- a local index or an RTSP/HTTP stream.
   const [currentSourceLabel, setCurrentSourceLabel] = useState<string>('');
@@ -220,6 +223,7 @@ export default function EcoVisionSentinel() {
         const data = await res.json();
         if (cancelled) return;
         setAvailableCameras(data.available_cameras);
+        setCameraDevices(data.devices || []);
         setCurrentSourceLabel(data.current_source ?? '');
         setSourceIsNetwork(!!data.is_network);
         // For a network camera the input is left blank and the (credential-
@@ -247,8 +251,8 @@ export default function EcoVisionSentinel() {
    * decides which is which -- the dashboard should not have to know, and a
    * barangay adopting its existing IP cameras types a URL here rather than
    * needing the exact webcam hardware this was developed against. */
-  const handleApplyCameraSource = async () => {
-    const raw = camIndexInput.trim();
+  const handleApplyCameraSource = async (override?: string) => {
+    const raw = (override ?? camIndexInput).trim();
     if (!raw) return;
     setApplyState('saving');
     try {
@@ -856,6 +860,38 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                           style={{ background: 'var(--panel)', borderColor: 'var(--line)', borderRadius: 'var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,.25)' }}
                         >
                           <div className="label mb-1.5">Camera source</div>
+                          {cameraDevices.length > 0 && (
+                            <div className="mb-2">
+                              <select
+                                aria-label="Camera on this computer"
+                                title="Cameras on this computer, including OBS Virtual Camera"
+                                value={sourceIsNetwork ? '' : (cameraDevices.find(d => String(d.index) === camIndexInput)?.name || camIndexInput)}
+                                onChange={(e) => {
+                                  const d = cameraDevices.find(x => (x.name || String(x.index)) === e.target.value);
+                                  if (!d) return;
+                                  setCamIndexInput(String(d.index));
+                                  // Send the name when there is one: the core saves it, and the
+                                  // name finds the same camera even if its number changes.
+                                  handleApplyCameraSource(d.name || String(d.index));
+                                }}
+                                className="data w-full h-7 px-1.5 border text-[10px] outline-none cursor-pointer"
+                                style={{ borderColor: 'var(--line)', background: 'var(--bg)', color: 'var(--text)', borderRadius: 'var(--radius-sm)', minWidth: 220 }}
+                              >
+                                {sourceIsNetwork && <option value="">Network camera in use</option>}
+                                {cameraDevices.map(d => (
+                                  <option key={d.index} value={d.name || String(d.index)}>
+                                    {d.name ? `${d.name} (${d.index})` : `Camera ${d.index}`}
+                                  </option>
+                                ))}
+                              </select>
+                              {cameraDevices.some(d => /obs/i.test(d.name || '')) && (
+                                <div className="text-[9px] mt-1" style={{ color: 'var(--text-3)' }}>
+                                  OBS: start Virtual Camera in OBS first, or the feed stays black.
+                                </div>
+                              )}
+                              <div className="text-[9px] mt-1.5 mb-0.5" style={{ color: 'var(--text-3)' }}>Or a stream URL / index:</div>
+                            </div>
+                          )}
                           <div className="relative flex items-center gap-1.5 h-7 px-2 border" style={{ borderColor: 'var(--line)', borderRadius: 'var(--radius-sm)' }}>
                             <input
                               type="text"
@@ -874,13 +910,13 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                                        textAlign: sourceIsNetwork ? 'left' : 'center',
                                        color: 'var(--text)' }}
                             />
-                            {!sourceIsNetwork && availableCameras.length > 0 && (
+                            {!sourceIsNetwork && availableCameras.length > 0 && cameraDevices.length === 0 && (
                               <span className="data text-[9px]" style={{ color: 'var(--text-3)' }}>
                                 [{availableCameras.join(',')}]
                               </span>
                             )}
                             <button
-                              onClick={handleApplyCameraSource}
+                              onClick={() => handleApplyCameraSource()}
                               disabled={applyState === 'saving'}
                               title="Apply camera source"
                               aria-label="Apply camera source"
