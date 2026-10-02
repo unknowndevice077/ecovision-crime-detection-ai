@@ -12,7 +12,8 @@ friends), not by this list -- check there first if the two ever disagree.
 | File | Config key | Role |
 |---|---|---|
 | `yolo11s-pose.pt` | `main.py` (hardcoded name) | People and 17 body keypoints |
-| `weapons_v2.pt` | `detection.weapon.model_path` | Gun / knife / phone (phone is detected so it can be *dropped*). Runs at imgsz 640. |
+| `weapons_v3.pt` | `detection.weapon.model_path` | Gun / knife / phone (phone is detected so it can be *dropped*). Runs at imgsz 960. v2 fine-tuned with synthetic street-camera weapons; 8x fewer false weapons on street footage. |
+| `weapons_v2.pt` | rollback only | Previous weapon model (imgsz 640). Not packaged. |
 | `x3d_xs_violence_scene_daynight.pt` | `detection.violence.scene_model_path` | **The deployed violence model.** Mode is `scene`, so this is the one that runs. |
 | `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery, threshold 0.70 |
 | `vandalism_marks_v2.pt` | `detection.vandalism.marks_model_path` | Graffiti / marks detector used by the vandalism rule |

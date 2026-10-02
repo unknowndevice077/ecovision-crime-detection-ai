@@ -163,7 +163,7 @@
         "to": "weights",
         "filter": [
           "yolo11s-pose.pt",
-          "weapons_v2.pt",
+          "weapons_v3.pt",
           "x3d_xs_violence_best.pt",
           "x3d_xs_violence_scene_daynight.pt",
           "x3d_xs_violence_scene_daynight.pt.meta.json",

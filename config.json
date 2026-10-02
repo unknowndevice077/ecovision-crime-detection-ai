@@ -103,52 +103,53 @@
       "enabled": true,
       "confidence_threshold": 0.38,
       "consecutive_required": 1,
-      "model_path": "weights/weapons_v2.pt",
+      "model_path": "weights/weapons_v3.pt",
+      "_model_path_v3": "weapons v3 deployed 2026-10-03, replacing v2, and runs at imgsz 960 (maincode/detection_rules.py WEAPON_IMGSZ). Fine-tuned from v2 at 960 on v2's training images PLUS 7,500 synthetic street-camera frames (build_synth_weapons.py in the training repo): 5,000 frames of our own Davao street footage with real gun/knife cut-outs pasted at the wrists of real people at street-camera size, and 2,500 untouched frames from the same cameras. None of the 8 false-alarm test cameras or 4 held-out cameras were used as backgrounds; val/test are v2's, 100% real. Best epoch 16 of a run stopped at 17 (out-of-memory crash, not a plateau). MEASURED, both models at 960 and the deployed gun 0.30 / knife 0.23 gates: (1) false weapons on 4 h of daytime street footage with no weapons in it, after the live static-object filter and tracking: v2 909/hr -> v3 112/hr (false gun detections 6,764 -> 372). (2) recall by weapon size on the 2,157-image test split: guns 5-10% of frame 39.8% -> 39.4%, 10-20% 73.1% -> 65.9%, 40%+ 90.1% -> 89.6%; knives 5-10% 75.7% -> 83.8%. So: the same guns found (slightly fewer mid-size ones), 8x fewer false weapons. Versus v2 as it actually ran (640), small-gun recall 14% -> 39%. ROLLBACK: model_path weights/weapons_v2.pt AND WEAPON_IMGSZ 640 -- a pair.",
       "_why_no_smoothing": "Single-frame YOLO object detector, not the temporal SceneViolenceDetector the other three classes use -- there is no multi-frame confirmation to tune. consecutive_required=1 documents that plainly rather than implying a EMA/smoothing stage that doesn't exist for this class.",
       "_added": "2026-08-19: previously ran unconditionally with no enable/disable switch anywhere in the app -- added for parity with violence/robbery/vandalism, all of which already had one. See maincode/main.py's WEAPON_DETECTION_ENABLED gate on the _weapon_exec submit call.",
       "_per_class_thresholds": "The 0.38 above is a legacy top-level fallback, not what's actually enforced -- CONF_BY_CLASS in main.py applies Gun 0.52, Knife 0.45, Sign 0.40 per detection, and WEAPON_YOLO_CONF_FLOOR takes the min of those and this value so YOLO's own conf= cutoff never discards a detection a per-class check would have kept. A bug found 19 Aug had this backwards (YOLO's conf= used the flat 0.6 top-level value directly, silently dropping every Knife/Sign detection between 0.40 and 0.60 before the per-class check ever saw them -- 11 of 58 in a 60-image sample); fixed by routing through the min().",
       "metrics": {
         "status": "deployed",
         "headline": {
-          "label": "Recall",
-          "value": 89.0,
-          "unit": "%"
+          "label": "False weapons",
+          "value": 112,
+          "unit": "/hr"
         },
         "stats": [
           {
-            "label": "Recall",
-            "value": 89.0,
+            "label": "Small-gun recall",
+            "value": 39.4,
             "unit": "%",
-            "note": "at the deployed gun 0.30 / knife 0.23, chosen on val and reported on test",
+            "note": "guns 5-10% of the frame (street-camera size); 14% before at 640",
             "good": true
           },
           {
-            "label": "Precision",
-            "value": 97.9,
+            "label": "Large-gun recall",
+            "value": 89.6,
             "unit": "%",
-            "note": "of alerts raised, the share that are genuine",
+            "note": "guns 40%+ of the frame",
             "good": true
           },
           {
-            "label": "Accuracy",
-            "value": 92.9,
+            "label": "Small-knife recall",
+            "value": 83.8,
             "unit": "%",
-            "note": "2,157 held-out images, 0% split leakage",
+            "note": "knives 5-10% of the frame",
             "good": true
           },
           {
-            "label": "False-positive rate",
-            "value": 3.1,
-            "unit": "%",
-            "note": "image-level; a detection must still survive 4-frame confirm, a 3-of-8 window and the static-object filter before alerting",
-            "good": true
+            "label": "False weapons",
+            "value": 112,
+            "unit": "/hr",
+            "note": "detections surviving tracking + static filter on 4 h of weapon-free street footage; 909/hr for v2 at the same size. An alert additionally needs the weapon held by a person for 4 frames.",
+            "good": false
           }
         ],
-        "measured_on": "2,157-image leakage-free test split (grouped by base image, 0/0/0 overlap), weapons v2 epoch 98 at imgsz 640",
-        "caveat": "REPLACES THE WITHDRAWN FIGURES for weapon_signs.pt (88.4% accuracy / 99.3% precision / 88.7% recall / 21.2% FPR). Those were invalid on two counts: the splits shared 99.4%/14.6%/12.0% of base images, and a traffic-sign class scoring near 100% inflated the headline recall. The 21.2% FPR also rested on only 85 true negatives. Nothing from that measurement is comparable to the figures above."
+        "measured_on": "2,157-image leakage-free test split (by weapon size) + 4 h of daytime street footage from 8 cameras never used in training, weapons v3 at imgsz 960",
+        "caveat": "Guns under 5% of the frame are still almost never found (6%); nobody in the literature solves that either. 112 false detections/hr is detection pressure, not operator alerts: an ARMED alert also needs the weapon assigned to a person track for 4 frames. The v2 figures (89.0% recall / 97.9% precision) were measured on close-up photos and are superseded."
       },
       "_model_path_rollback": "weapons v2 deployed 2026-08-21, replacing weapon_signs.pt. THE PREVIOUS MODEL'S PUBLISHED METRICS WERE WITHDRAWN, not adjusted: its train/val/test splits shared 99.4% / 14.6% / 12.0% of base images (Roboflow ships ~2.8 augmented copies per source photo and the split was made at FILE level), so validation was very nearly a copy of training and every early-stopping decision against it was noise. Its 88.7% headline recall was further inflated by a traffic-sign class scoring ~100%. v2 is split by BASE IMAGE with 0/0/0 overlap, verified independently by verify_all_leakage.py. Classes gun/knife/phone; the sign class is gone. MEASURED on the 2,157-image leakage-free test split at imgsz 640, epoch 98 of 120: 79.7% recall / 85.0% accuracy / 99.6% precision / 0.9% FPR at the OLD thresholds, and 89.0% recall @ 3.1% FPR at the new gun 0.30 / knife 0.23 (chosen on val, reported on test). To roll back, set this to weights/weapon_signs.pt AND restore main.py's WEAPON_IMGSZ to 416 and CONF_BY_CLASS to gun 0.52 / knife 0.45 -- the three changes are a set and rolling back only one produces a configuration that was never measured. Backup: weights/_backup_20260821/.",
-      "_imgsz_note": "Runs at main.py's WEAPON_IMGSZ = 640, matching the resolution it trained at. The previous model trained at 640 and ran at 416, which is why its benchmark numbers described a model that was never deployed."
+      "_imgsz_note": "Runs at detection_rules.py's WEAPON_IMGSZ = 960 (weapons_v3 was fine-tuned at 960). weapons_v2 ran at 640; see _model_path_v3."
     },
     "static_weapon_filter": {
       "enabled": true,

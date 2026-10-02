@@ -37,7 +37,14 @@ import numpy as np
 # overshoots its budget badly on test, i.e. the confidence distribution is not
 # stable at that resolution. Any TensorRT engine must be rebuilt at 640;
 # optimize_weights.py reads this constant, so it follows automatically.
-WEAPON_IMGSZ        = 640
+#
+# 960 since 2026-10-03, with weapons_v3.pt (fine-tuned at 960). A street-pole
+# handgun is under 10% of the frame, and at 640 v2 found 14% of guns that
+# small; at 960 the same weights find ~40%. Measured on the GTX 1660 SUPER:
+# 47 ms per pass at 960 vs 28 ms at 640, against a 200 ms budget (one pass
+# every DETECTION_INTERVAL=6 frames, on its own thread). Roll back with the
+# model: 640 belongs to weapons_v2.pt, 960 to weapons_v3.pt.
+WEAPON_IMGSZ        = 960
 
 # detection.confidence_threshold -- set by configure(). Fallback gate for any
 # weapon class CONF_BY_CLASS does not name.
