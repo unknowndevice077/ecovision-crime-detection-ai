@@ -161,7 +161,8 @@
     "robbery": {
       "enabled": true,
       "model_path": "weights/x3d_xs_robbery_scene.pt",
-      "confidence_threshold": 0.7,
+      "confidence_threshold": 0.85,
+      "_confidence_threshold_085": "Raised 0.70 -> 0.85 on 2026-10-03. MEASURED on 2 h of the four held-out real cameras (nothing criminal in them), consecutive 3: 0.70 -> 12.0 false alarms/hr (market camera 28/hr, restaurant 12, iloilo 6, flyover 2); 0.85 -> 0.5/hr (one alarm in 2 h). Clip recall on the 183-clip test split (8 source scenes) in the same harness: 54.2% -> 39.8%; clip FPR 7.0% -> 3.0%. A detector that fires 12 times an hour on empty streets trains operators to ignore it, so fewer, rarer, more trustworthy alerts is the better trade until real robbery footage from our own cameras exists. A retrain on 737 UCF robbery clips (+ fights as negatives) was measured the same day and rejected: 13.3% recall, 17.5 false alarms/hr. ROLLBACK: 0.70.",
       "consecutive_required": 3,
       "_why_0_7": "Chosen from the held-out test sweep, not by default. On 139 clips from EIGHT source videos the model never trained on: at 0.5 it scores 76.3% accuracy / 79.6% recall / 62.9% precision / 25.6% FPR; at 0.7, 84.2% / 65.3% / 86.5% / 5.6%; at 0.8, 84.2% / 57.1% / 96.6% / 1.1%. 0.7 is where precision becomes usable without collapsing recall. A quarter of normal clips misfiring at 0.5 would make the class ignorable, which is the failure mode this project spent the most effort on for violence.",
       "_consecutive_3": "Matches the violence detector. Measured there on continuous spliced footage: cons 1->3 removed 65% of false alarms while losing none of 40 events. Not separately measured for robbery -- there is no continuous robbery footage to measure it on -- so it is carried over as the safer default rather than claimed as tuned.",
@@ -172,43 +173,37 @@
       "metrics": {
         "status": "deployed",
         "headline": {
-          "label": "Recall",
-          "value": 65.3,
-          "unit": "%"
+          "label": "False alarms",
+          "value": 0.5,
+          "unit": "/hr"
         },
         "stats": [
           {
-            "label": "Accuracy",
-            "value": 84.2,
-            "unit": "%",
-            "note": "at threshold 0.70",
-            "good": true
-          },
-          {
             "label": "Recall",
-            "value": 65.3,
+            "value": 39.8,
             "unit": "%",
-            "note": "misses roughly one robbery in three",
+            "note": "clips from 8 test scenes at threshold 0.85 -- misses most robberies",
             "good": false
           },
           {
-            "label": "Precision",
-            "value": 86.5,
-            "unit": "%",
-            "note": "few false alarms -- deliberately weighted this way",
-            "good": true
-          },
-          {
             "label": "False-positive rate",
-            "value": 5.6,
+            "value": 3.0,
             "unit": "%",
             "note": "share of normal clips that misfire",
             "good": true
+          },
+          {
+            "label": "False alarms",
+            "value": 0.5,
+            "unit": "/hr",
+            "note": "2 h of four held-out real cameras, 0.85 / 3 in a row (12/hr at the old 0.70)",
+            "good": true
           }
         ],
-        "measured_on": "139 clips from 8 source videos never seen in training",
-        "caveat": "8 test scenes, not 139 independent samples -- clips from one video are highly correlated. consecutive_required=3 is carried over from violence, not tuned, because there is no continuous robbery footage to tune it on."
-      }
+        "measured_on": "183-clip test split from 8 source scenes + 2 h of four held-out real cameras, threshold 0.85 / 3 in a row",
+        "caveat": "EXPERIMENTAL. Tuned for few false alarms, not for catching robberies: expect it to miss most of them. Robbery footage from the deployment cameras does not exist yet; public data (UCF-Crime, CamNuvem) did not transfer. Armed robberies are still caught by the separate weapon alert."
+      },
+      "experimental": true
     },
     "vandalism": {
       "enabled": true,
