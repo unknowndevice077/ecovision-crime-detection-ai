@@ -1,0 +1,79 @@
+{
+ "run_name": "daynight_ucabal_s0_seed0",
+ "arch": "x3d_xs",
+ "clip_frames": 13,
+ "frame_size": 160,
+ "input_repr": "whole_frame",
+ "head_activation": "softmax",
+ "output": "probabilities",
+ "loss": "NLLLoss(log(p))",
+ "inference_contract": "use model output directly; do not apply softmax",
+ "normalization": "(x/255 - 0.45) / 0.225",
+ "manifest": "D:/EcoVisionImagesTraining/dataset_manifest_3way_daynight_uca_bal.json",
+ "unfreeze_blocks": 2,
+ "augment": true,
+ "best_val_acc": 0.8346,
+ "best_epoch": 6,
+ "val_acc_caveat": "val is the model-SELECTION split: the best checkpoint is chosen by this number, so it is optimistic. Only the 3-way manifest's test split gives an honest figure.",
+ "provenance": {
+  "started_at": "2026-10-03T03:45:05",
+  "command": "python.exe train_x3d_full.py --train --manifest-path D:/EcoVisionImagesTraining/dataset_manifest_3way_daynight_uca_bal.json --init-weights D:/projects/EcoVisionCode/weights/x3d_xs_violence_scene_corpus_neg.pt --run-name daynight_ucabal_s0 --epochs 10 --batch-size 8 --unfreeze-blocks 2 --backbone-lr-mult 0.1 --seed 0 --num-workers 0",
+  "seed": 0,
+  "training_repo": {
+   "commit": "8341183",
+   "dirty": true
+  },
+  "app_repo": {
+   "commit": "d45442a",
+   "dirty": false
+  },
+  "python": "3.11.9",
+  "host": "DESKTOP-MQVU8JH",
+  "torch": "2.5.1+cu121",
+  "cuda": "12.1",
+  "gpu": "NVIDIA GeForce GTX 1660 SUPER",
+  "manifest": {
+   "path": "D:/EcoVisionImagesTraining/dataset_manifest_3way_daynight_uca_bal.json",
+   "sha256": "266b81fa4156fdc858625d58cb3a0ea9ee416dfc8ae3f2bf6c181e4627970543"
+  }
+ },
+ "status": "DEPLOYED 2026-10-03, replacing daynight. See config.json detection.violence._scene_model_path_ucabal.",
+ "evaluation_2026_10_03": {
+  "live_rule": "person-crop confirmed, threshold 0.50, 2 in a row",
+  "spliced_recall_200": {
+   "deployed_daynight": 79.0,
+   "this": 86.5
+  },
+  "real_cameras_false_alarms_per_hr_2h_4cams": {
+   "deployed_daynight": 3.0,
+   "this": 2.0,
+   "per_camera_this": {
+    "agdao_flyover": 6,
+    "agdao_market": 0,
+    "iloilo_guiez": 2,
+    "lyns_restaurant": 0
+   }
+  },
+  "survfight_clean_148_clip_peak": {
+   "deployed": {
+    "recall": 77.3,
+    "fpr": 21.9
+   },
+   "this": {
+    "recall": 78.7,
+    "fpr": 24.7
+   }
+  },
+  "uca_test_507_clips_live_rule": {
+   "deployed": {
+    "recall": 23.8,
+    "calm_alarmed": 4.0
+   },
+   "this": {
+    "recall": 31.6,
+    "calm_alarmed": 8.0
+   }
+  },
+  "unbalanced_predecessor_rejected": "same UCF fights with only 279 calm clips: 89.5% caught but 13.0 false alarms/hr (restaurant camera 34/hr)"
+ }
+}
