@@ -19,7 +19,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements-backend.txt
-          pip install pytest
+          # httpx: FastAPI's TestClient needs it; without it every API test
+          # module fails at import ("starlette.testclient requires httpx").
+          pip install pytest httpx
+          # The detector tests (test_person_confirm, test_violence_calibration)
+          # import torch; the CPU build of the same version the app pins.
+          pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
 
       - name: Run backend tests
         env:

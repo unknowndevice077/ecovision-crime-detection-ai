@@ -34,12 +34,16 @@
 // - Alerts already on screen at mount are recorded as "seen" WITHOUT firing.
 //   Otherwise every page load would blast the operator with a chime per open
 //   incident, and they would learn to ignore it -- which is worse than silence.
+//   "At mount" means the first run with `enabled` true, so the caller keeps
+//   it false until the list has actually loaded (page.tsx: alertsLoaded).
+//   Enabled from the start, the empty pre-fetch list was what got recorded,
+//   and every pending incident was then announced as new on each reload.
 //
 // - Severity matters: an armed/weapon incident uses a more urgent triple tone.
 //   An operator should be able to tell a weapon alert from a lower-tier one
 //   without looking at the screen.
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 
 export type NotifiableAlert = {
     id: string;

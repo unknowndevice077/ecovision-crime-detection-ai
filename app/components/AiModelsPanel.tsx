@@ -232,6 +232,11 @@ export default function AiModelsPanel() {
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[9.5px] uppercase tracking-wide truncate" style={{ color: 'var(--text-2)' }}>
                     {m.display_name}
+                    {m.experimental && (
+                      <span className="ml-1.5 text-[8px] font-bold px-1 py-px border normal-case" style={{ color: 'var(--warn)', borderColor: 'var(--warn)' }}>
+                        Experimental
+                      </span>
+                    )}
                   </span>
                   <button
                     onClick={() => requestToggle(m)}

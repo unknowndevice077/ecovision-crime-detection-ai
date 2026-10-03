@@ -250,6 +250,37 @@ class Incidents(Base):
         blind = S.make_user(self.dev, "BARANGAY_STAFF", barangay_id=self.brgyA, permissions={})
         self.assertEqual(self.c.post("/siren/activate", headers=self.h(blind)).status_code, 403)
 
+    def test_panic_press_keeps_the_ai_cores_photo(self):
+        # The AI core answers with the frame it just wrote; the backend used
+        # to read the wrong field name and store the panic with no photo.
+        # "screenshotPath" is what the AI core sent until 2026-10-04.
+        for key in ("screenshot_path", "screenshotPath"):
+            with self.subTest(key=key):
+                class Answer:
+                    ok = True
+                    def json(self):
+                        return {"status": "captured", key: "/static/screenshots/snap_panic.jpg"}
+                real = S.B.requests.post
+                S.B.requests.post = lambda *a, **k: Answer()
+                try:
+                    r = self.ok(self.c.post("/api/panic_trigger", json={"event": "PANIC", "device": "pole-1", "barangay_id": self.brgyA}))
+                finally:
+                    S.B.requests.post = real
+                inc = next(x for x in self.ok(self.c.get("/api/incidents", headers=self.h(self.capA))) if x["id"] == r["id"])
+                self.assertTrue((inc.get("screenshot_path") or "").endswith("snap_panic.jpg"))
+
+    def test_siren_says_so_when_the_pole_does_not_answer(self):
+        # Used to answer "deactivate_sent" either way, so the dashboard said
+        # "Siren stopped" with nothing listening.
+        was = (S.B.ESP32_ENABLED, S.B.ESP32_IP)
+        S.B.ESP32_ENABLED, S.B.ESP32_IP = True, "127.0.0.1:9"
+        try:
+            r = self.ok(self.c.post("/siren/deactivate", headers=self.h(self.staffA)))
+        finally:
+            S.B.ESP32_ENABLED, S.B.ESP32_IP = was
+        self.assertEqual(r["status"], "unreachable")
+        self.assertFalse(r["delivered"])
+
 
 class Records(Base):
     def record(self, with_report=False):

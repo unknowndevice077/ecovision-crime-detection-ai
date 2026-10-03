@@ -27,7 +27,8 @@ export const ROLE_STYLES: Record<string, { code: string; text: string; border: s
 export const DEFAULT_ROLE_STYLE = { code: '??', text: 'text-[var(--text-2)]', border: 'border-[var(--line-2)]', bg: 'bg-[var(--panel-2)]', barText: 'text-[var(--text-2)]' };
 
 export const roleStyle = (role: string) => ROLE_STYLES[role] || DEFAULT_ROLE_STYLE;
-export const roleLabel = (role: string) => CREATABLE_ROLES.find(r => r.role === role)?.label || role.replace(/_/g, ' ');
+export const roleLabel = (role: string) =>
+  CREATABLE_ROLES.find(r => r.role === role)?.label || (role === 'DEVTEAM' ? 'DevTeam' : role.replace(/_/g, ' '));
 
 export function authHeaders() {
   const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;

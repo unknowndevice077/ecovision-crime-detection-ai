@@ -68,6 +68,7 @@ except ModuleNotFoundError:
     # invoking "python maincode/main.py" directly still works.
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
     from port_utils import find_free_port, write_runtime_port, start_parent_watchdog
+from config_store import load_overlay, save_overrides
 
 # See port_utils.start_parent_watchdog's own docstring: this is the process
 # holding the actual GPU models (pose, weapons, X3D x3) for as long as it
@@ -187,23 +188,14 @@ if not WRITABLE_DIR:
     WRITABLE_DIR = os.path.join(os.path.expanduser("~"), "EcoVisionSentinelData")
 os.makedirs(WRITABLE_DIR, exist_ok=True)
 
-# CONFIG_PATH from here on refers to the WRITABLE copy -- this is what
-# gets read back in and rewritten by /set_camera_index below. If backend.py
-# already created one (it starts first in electron/main.js), prefer that
-# so both processes agree on secret_key / persisted settings; otherwise
-# seed it from the shipped copy.
+# CONFIG_PATH from here on refers to the WRITABLE copy: this machine's own
+# settings (secret_key, the chosen camera, detectors switched off), merged
+# over the shipped config and written back by /set_camera_index below. It
+# used to be seeded with a full copy of the shipped config on first run,
+# which pinned every model path and threshold on the machine past any later
+# update -- see app/config_store.py.
 CONFIG_PATH = os.path.join(WRITABLE_DIR, "config.json")
-
-
-if os.path.exists(CONFIG_PATH):
-    with open(CONFIG_PATH, 'r') as f:
-        _writable_config = json.load(f)
-    # shipped = base (structure + any newly added keys),
-    # writable = override (whatever this machine actually changed)
-    sys_config = _deep_merge(sys_config, _writable_config)
-else:
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(sys_config, f, indent=2)
+sys_config = _deep_merge(sys_config, load_overlay(CONFIG_PATH, _BASE_CONFIG_PATH))
 
 POSE_IMGSZ          = 416
 # Decision rules (weapon gates and tracking, static-object filter, grip
@@ -1550,8 +1542,10 @@ def _persist_camera_source():
             sys_config["camera"]["source"] = ""
         else:
             sys_config["camera"]["source"] = camera_source
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(sys_config, f, indent=2)
+        # Just these two keys -- a full dump pinned every other setting.
+        save_overrides(CONFIG_PATH, {("camera", "index"): sys_config["camera"].get("index"),
+                                     ("camera", "source"): sys_config["camera"].get("source", "")},
+                       _BASE_CONFIG_PATH)
     except Exception as e:
         print(f"⚠️  [CAMERA] Failed to persist camera source to config.json: {e}")
 
@@ -1853,7 +1847,7 @@ def panic_capture(payload: PanicCaptureRequest):
 
     with _clip_state_lock:
         if not _raw_frame_ring:
-            return {"status": "no_frame_available", "screenshotPath": None}
+            return {"status": "no_frame_available", "screenshot_path": None}
         latest_frame = _raw_frame_ring[-1][1]
 
     snap_filename = f"snap_{incident_id}.jpg"
@@ -1864,7 +1858,9 @@ def panic_capture(payload: PanicCaptureRequest):
 
     screenshot_url_path = f"/static/screenshots/{snap_filename}"
     print(f"🚨 [PANIC] Captured screenshot + started clip for case {incident_id}")
-    return {"status": "captured", "screenshotPath": screenshot_url_path}
+    # snake_case like every other field the backend reads (it used to send
+    # "screenshotPath", which backend.py never picked up).
+    return {"status": "captured", "screenshot_path": screenshot_url_path}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

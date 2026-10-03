@@ -115,6 +115,14 @@
         "to": "maincode/port_utils.py"
       },
       {
+        "from": "app/config_store.py",
+        "to": "backend/config_store.py"
+      },
+      {
+        "from": "app/config_store.py",
+        "to": "maincode/config_store.py"
+      },
+      {
         "from": "app/maintenance.py",
         "to": "backend/maintenance.py"
       },

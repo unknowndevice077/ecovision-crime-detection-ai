@@ -14,6 +14,7 @@ import { SkeletonRow } from './components/dashboard/Skeleton';
 import { SystemClockText, SystemDateText } from './components/dashboard/SystemTime';
 import {
   gridColsFor, tempTone, CameraTile, NavSectionLabel, NavItem, MetricPanel, IncidentRow,
+  SirenPill, SirenNotice,
 } from './components/dashboard/DashboardPrimitives';
 import PTZControls from './components/PTZControls';
 import AiModelsPanel from './components/AiModelsPanel';
@@ -21,10 +22,12 @@ import ThemeToggle from './components/ThemeToggle';
 import {
   Shield, AlertOctagon, Activity, Video, Cpu, Trash2, MapPin,
   Maximize2, X, Sun, User,
-  BatteryMedium, Thermometer, Zap, Plus, Film, Users, Terminal,
+  BatteryMedium, Thermometer, Zap, Plus, Film, Users,
   Camera as CameraIcon, Check, Loader2, Grid2X2, ArrowLeft, Wifi, Siren,
   ClipboardList, PanelRightClose, PanelRightOpen
 } from 'lucide-react';
+
+const SAMPLE_TELEMETRY = { battery: 88, solarV: 14.4, tempCPU: 42, tempESP: 38, tempNeural: 51 };
 
 // Every tab view was previously eagerly imported at module top -- all six
 // (including the Leaflet-map-heavy CrimeReportsView and the large
@@ -33,9 +36,9 @@ import {
 // and loads from local disk on every cold start, so the eager-load cost
 // matters more here than a typical web app. next/dynamic + ssr:false loads
 // each tab's code only when that tab is actually opened.
-const CrimeReportsView = dynamic(() => import('./components/CrimeReportsView'), { ssr: false }) as any;
+const CrimeReportsView = dynamic(() => import('./components/CrimeReportsView'), { ssr: false });
 const HistoryView = dynamic(() => import('./components/dashboard/HistoryView'), { ssr: false });
-const RecordsView = dynamic(() => import('./components/RecordsView'), { ssr: false }) as any;
+const RecordsView = dynamic(() => import('./components/RecordsView'), { ssr: false });
 const ProfileView = dynamic(() => import('./components/ProfileView'), { ssr: false });
 const AdminUsersView = dynamic(() => import('./components/dashboard/AdminUsersView'), { ssr: false });
 const DevteamView = dynamic(() => import('./components/dashboard/DevteamView'), { ssr: false });
@@ -74,6 +77,8 @@ export default function EcoVisionSentinel() {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [isSirenActive, setIsSirenActive] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  // Register Camera used to fail (or ignore an empty field) without a word.
+  const [camFormError, setCamFormError] = useState('');
   const [sqlReportCount, setSqlReportCount] = useState(0);
   const [backendOnline, setBackendOnline] = useState(true);
   // Distinguishes "we have not loaded the queue yet" from "the queue is empty".
@@ -87,7 +92,9 @@ export default function EcoVisionSentinel() {
   // times, so "System Nominal" must not imply the camera feed is live.
   const [aiCoreOnline, setAiCoreOnline] = useState(false);
   const [videoRecordSearchFilter, setVideoRecordSearchQuery] = useState("");
-  const [telemetry, setTelemetry] = useState({ battery: 88, solarV: 14.4, tempCPU: 42, tempESP: 38, tempNeural: 51, load: 12.4 });
+  // Placeholder readings: no battery/solar/temperature sensor reports in
+  // yet, so the Hardware tab labels these as sample values.
+  const telemetry = SAMPLE_TELEMETRY;
   const [camIndexInput, setCamIndexInput] = useState("5");
   const [availableCameras, setAvailableCameras] = useState<number[]>([]);
   // The same cameras with their Windows names ("OBS Virtual Camera"), from
@@ -154,9 +161,6 @@ export default function EcoVisionSentinel() {
     }
     const parsedUser = JSON.parse(savedUser);
     setCurrentUser(parsedUser);
-    if (parsedUser.role === 'DEVTEAM') {
-      setActiveTab('devteam'); // DEVTEAM has no Monitor/dashboard view -- lands on the console
-    }
   }, [router]);
 
   // The stored ecoUser is a snapshot from login, so a permission an admin
@@ -301,8 +305,20 @@ const fetchCameras = async (userObj: any) => {
     }
   };
 
-  const fetchStats = async () => {
-    if (!currentUser || !canSeeIncidents) return;
+  // Incidents are visible with the map, the history or (queue only)
+  // confirm/dismiss -- backend get_incidents. Without any of the three the
+  // queue used to poll a 403 forever and sit on its loading skeleton.
+  const canSeeIncidents = can('view_map') || can('view_history') || can('confirm_dismiss_alerts');
+  // DevTeam gets its console instead of this dashboard (see the early
+  // return below), so nothing here polls, chimes or retitles the window.
+  const isDevteam = currentUser?.role === 'DEVTEAM';
+
+  // One request feeds both the Incident Map badge (every incident) and the
+  // queue (the Active ones). These were two functions fetching the same URL
+  // back to back on every update.
+  const refreshIncidents = async () => {
+    if (!currentUser || isDevteam) return;
+    if (!canSeeIncidents) { setAlerts([]); setAlertsLoaded(true); return; }
     try {
       const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
       const role = currentUser.role || 'user';
@@ -320,39 +336,11 @@ const fetchCameras = async (userObj: any) => {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.status === 401) { forceLogoutStaleSession(); return; }
-      if (!res.ok) return;
-      const data = await res.json();
-      setSqlReportCount(data.length);
-      setBackendOnline(true);
-    } catch (e) {
-      console.warn("📡 [FETCH FAILED] Storage ledger on port 8000 is unreachable inside fetchStats. Retrying...");
-      setBackendOnline(false);
-    }
-  };
-
-  // Incidents are visible with the map, the history or (queue only)
-  // confirm/dismiss -- backend get_incidents. Without any of the three the
-  // queue used to poll a 403 forever and sit on its loading skeleton.
-  const canSeeIncidents = can('view_map') || can('view_history') || can('confirm_dismiss_alerts');
-
-  const fetchActiveAlertCache = async () => {
-    if (!canSeeIncidents) { setAlerts([]); setAlertsLoaded(true); return; }
-    if (!currentUser) return;
-    try {
-      const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
-      const role = currentUser.role || 'user';
-      const token = localStorage.getItem('ecoToken');
-      // See matching comment in fetchStats -- same currentUser-before-token
-      // hydration race, same safe skip-and-let-the-next-poll-retry fix.
-      if (!token) return;
-
-      const res = await fetch(`${apiUrl}/api/incidents?userBarangayId=${encodeURIComponent(barangay)}&role=${encodeURIComponent(role)}&filterBarangayId=all`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.status === 401) { forceLogoutStaleSession(); return; }
       if (res.ok) {
         const data = await res.json();
+        setSqlReportCount(data.length);
         const activeDetections = data.filter((inc: any) => inc.status === 'Active');
+        const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local, like occurred_date
         // /api/incidents returns snake_case (location_name, barangay_id,
         // occurred_time) -- these read camelCase names that don't exist on
         // that response, so location/timestamp were always undefined and
@@ -367,7 +355,9 @@ const fetchCameras = async (userObj: any) => {
           severity: 'CRITICAL' as const,
           location: inc.location_name,
           area: `${inc.barangay_id ? inc.barangay_id.toUpperCase() : 'GLOBAL'} Sector`,
-          timestamp: inc.occurred_time,
+          // Time alone made a week-old incident look like one from tonight.
+          timestamp: inc.occurred_date && inc.occurred_date !== today
+            ? `${inc.occurred_date} ${inc.occurred_time}` : inc.occurred_time,
           confidence: inc.confidence ?? 0.925,
           status: 'pending' as const,
           // BUG FOUND 2026-09-03 (user report): this used to guess the
@@ -391,7 +381,7 @@ const fetchCameras = async (userObj: any) => {
         setAlertsLoaded(true);
       }
     } catch (err) {
-      console.warn("📡 [FETCH FAILED] Storage ledger on port 8000 is unreachable inside fetchActiveAlertCache. Retrying...");
+      console.warn("📡 [FETCH FAILED] Storage ledger on port 8000 is unreachable inside refreshIncidents. Retrying...");
       setBackendOnline(false);
     }
   };
@@ -408,18 +398,21 @@ const fetchCameras = async (userObj: any) => {
   // on useLiveChannel itself -- without this, the hook's one guaranteed
   // initial call fires while currentUser is still null (this effect runs at
   // mount, before the hydrate-from-localStorage effect above has
-  // committed), fetchStats/fetchActiveAlertCache's own `if (!currentUser)
-  // return` skips quietly, and nothing calls them again for up to 60s.
-  useLiveChannel("incidents", () => {
-    fetchStats();
-    fetchActiveAlertCache();
-  }, !!currentUser);
+  // committed), refreshIncidents's own `if (!currentUser) return` skips
+  // quietly, and nothing calls it again for up to 60s. configLoaded for the
+  // same reason: before it, apiUrl is still the default port.
+  useLiveChannel("incidents", refreshIncidents, configLoaded && !!currentUser && !isDevteam);
 
   // Announce new incidents audibly, in the window title, and on the desktop.
   // Before this, an incoming alert only re-rendered the list -- an operator
   // looking away, or with the window minimised, was told nothing at all.
   // See app/hooks/useAlertNotifier.ts for why each channel exists.
-  useAlertNotifier(alerts);
+  // Enabled only once the queue has loaded: the notifier treats whatever it
+  // sees first as "already on screen", and before the first fetch that is
+  // the empty initial list -- so every incident already pending was
+  // announced as new (chime, desktop popups, "(36) ALERT" title) on every
+  // login and reload.
+  useAlertNotifier(alerts, { enabled: alertsLoaded && !isDevteam });
 
   const handleUpsertNode = async (name: string, url: string) => {
     try {
@@ -434,10 +427,10 @@ const fetchCameras = async (userObj: any) => {
         fetchCameras(currentUser);
         setShowModal(false);
       } else {
-        const errBody = await res.text();
-        console.error("Camera creation failed:", res.status, errBody);
+        const errBody = await res.json().catch(() => ({}));
+        setCamFormError(errBody.detail || `Could not register the camera (HTTP ${res.status}).`);
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { setCamFormError('Backend connection failure.'); }
   };
 
   const deleteCam = async (id: string) => {
@@ -459,48 +452,70 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
     } catch (e) { console.error(e); }
   };
 
+  // The physical siren on the pole. The backend reports what actually
+  // happened -- "sent" (the pole answered), "skipped" (no siren configured)
+  // or "unreachable" -- and the dashboard shows exactly that. It used to set
+  // "SIREN ACTIVE" on every Confirm and say "Siren stopped" on every stop,
+  // whether or not a siren had heard anything.
+  type SirenResult = 'sent' | 'skipped' | 'unreachable';
+  const [sirenNotice, setSirenNotice] = useState<string | null>(null);
+  const sirenNoticeTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined);
+  const callSiren = async (on: boolean): Promise<SirenResult> => {
+    try {
+      const token = localStorage.getItem('ecoToken');
+      const res = await fetch(`${apiUrl}/siren/${on ? 'activate' : 'deactivate'}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await res.json().catch(() => ({}));
+      return res.ok && (body.status === 'sent' || body.status === 'skipped') ? body.status : 'unreachable';
+    } catch {
+      return 'unreachable';
+    }
+  };
+  const noteSirenProblem = (r: SirenResult) => {
+    if (r === 'sent') return;
+    setSirenNotice(r === 'skipped' ? 'No siren connected' : 'Siren not reachable');
+    clearTimeout(sirenNoticeTimer.current);
+    sirenNoticeTimer.current = setTimeout(() => setSirenNotice(null), 8000);
+  };
+
   const handleVerifyCrime = async (id: string) => {
     const alertTarget = alerts.find(a => a.id === id);
     setAlerts(prev => prev.filter(a => a.id !== id));
-    setIsSirenActive(true);
     setActiveTab('dashboard');
 
-    if (alertTarget?.cameraLinkId) {
-      const matchCam = cameras.find(c => c.id === alertTarget.cameraLinkId);
-      if (matchCam) { setSelectedCam(matchCam); setIsFullscreenGrid(true); }
-    } else if (cameras.length > 0) {
-      setSelectedCam(cameras[0]);
-      setIsFullscreenGrid(true);
-    }
+    // An incident with no camera (a panic press) opens the whole wall --
+    // it used to open whichever camera happened to be first.
+    const matchCam = alertTarget?.cameraLinkId ? cameras.find(c => c.id === alertTarget.cameraLinkId) : undefined;
+    setSelectedCam(matchCam ?? null);
+    if (cameras.length > 0) setIsFullscreenGrid(true);
 
+    // Not awaited: the siren must not hold up recording the decision.
+    callSiren(true).then(r => { if (r === 'sent') setIsSirenActive(true); else noteSirenProblem(r); });
     try {
       const token = localStorage.getItem('ecoToken');
-      // Missing the Authorization header meant this always 401'd --
-      // require_auth() + require_permission(confirm_dismiss_alerts) both
-      // reject an unauthenticated request, so "Verify Crime" never
-      // actually reached the ESP32. Fire-and-forget on purpose: the siren
-      // is best-effort hardware, and with esp32.enabled=false in most dev
-      // setups this call is EXPECTED to fail every time (nothing configured
-      // to reach) -- console.error here was tripping Next's dev overlay
-      // into a full-screen "crash" for a routine, harmless no-op.
-      fetch(`${apiUrl}/siren/activate`, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
       await fetch(`${apiUrl}/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status: "Confirmed" })
       });
-      fetchStats();
-      fetchActiveAlertCache();
+      refreshIncidents();
     } catch (e) { console.error(e); }
   };
 
   const handleDismissCrime = async (id: string) => {
+    const alertTarget = alerts.find(a => a.id === id);
     setAlerts(prev => prev.filter(a => a.id !== id));
+    // Only a panic press sounds the siren by itself (the pole switches it on
+    // locally), so only dismissing a panic switches it off. Every dismiss
+    // used to -- silencing a siren a different, confirmed incident had set
+    // off. The Emergency Stop button is the general off switch.
+    if (alertTarget?.type === 'HARDWARE_PANIC_INTERRUPT') {
+      callSiren(false).then(r => { if (r === 'sent') setIsSirenActive(false); });
+    }
     try {
       const token = localStorage.getItem('ecoToken');
-      // Same as handleVerifyCrime's /siren/activate -- best-effort, and
-      // expected to fail when no ESP32 is configured. See that comment.
-      fetch(`${apiUrl}/siren/deactivate`, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
       const res = await fetch(`${apiUrl}/api/incidents/${id}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -509,29 +524,19 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
       if (!res.ok) {
         console.error("Dismiss PATCH failed with status", res.status, "-- incident will reappear on next poll since backend never updated.");
       }
-      fetchStats();
-      fetchActiveAlertCache();
+      refreshIncidents();
     } catch (e) { console.error(e); }
   };
 
-  // Standalone from handleDismissCrime's siren call -- that one only fires
-  // alongside dismissing a specific incident. This is a direct panic-style
-  // stop, reachable regardless of whether anything is even in the queue
-  // (a false-triggered ESP32 siren doesn't care whether the operator has
-  // gotten around to triaging the incident that set it off yet).
-  const [sirenStopState, setSirenStopState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  // Standalone from any incident: a direct stop, reachable whether or not
+  // anything is in the queue (a false-triggered siren doesn't wait for the
+  // incident that set it off to be triaged).
+  const [sirenStopState, setSirenStopState] = useState<'idle' | 'busy' | 'done' | 'none' | 'error'>('idle');
   const handleEmergencyStopSiren = async () => {
     setSirenStopState('busy');
-    try {
-      const token = localStorage.getItem('ecoToken');
-      const res = await fetch(`${apiUrl}/siren/deactivate`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setSirenStopState(res.ok ? 'done' : 'error');
-    } catch {
-      setSirenStopState('error');
-    }
+    const r = await callSiren(false);
+    if (r === 'sent') setIsSirenActive(false);
+    setSirenStopState(r === 'sent' ? 'done' : r === 'skipped' ? 'none' : 'error');
     setTimeout(() => setSirenStopState('idle'), 2500);
   };
 
@@ -544,7 +549,8 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
       return;
     }
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
-    const onChange = () => { if (!document.fullscreenElement) { setIsFullscreenGrid(false); setIsSirenActive(false); } };
+    // Closing the wall doesn't silence the siren, so it doesn't clear its badge either.
+    const onChange = () => { if (!document.fullscreenElement) setIsFullscreenGrid(false); };
     // Attached a beat later so the enter transition itself can't trip it.
     const t = setTimeout(() => document.addEventListener('fullscreenchange', onChange), 300);
     return () => { clearTimeout(t); document.removeEventListener('fullscreenchange', onChange); };
@@ -569,6 +575,11 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
   };
 
   if (!currentUser) return <div className="min-h-screen" style={{ background: 'var(--bg)' }} />;
+  // DevTeam has no dashboard of its own: its console covers the screen. It
+  // used to be layered over a full, live operator dashboard -- a second
+  // theme toggle, a hidden siren button, an incident queue nobody could see
+  // still polling and chiming underneath.
+  if (isDevteam) return <DevteamView />;
 
   const pendingAlerts = alerts.filter(a => a.status === 'pending');
   const isPolice = currentUser.role === 'PNP_OFFICER' || currentUser.role === 'PNP_ADMIN';
@@ -616,6 +627,14 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
         </div>
 
         <div className="flex items-center gap-3">
+          {/* The siren outlives the fullscreen wall that showed it going
+              off, so its state and off switch live in the always-visible
+              bar too. */}
+          {isSirenActive && (
+            <SirenPill onStop={can('confirm_dismiss_alerts') ? handleEmergencyStopSiren : undefined} busy={sirenStopState === 'busy'} />
+          )}
+          {sirenNotice && <SirenNotice text={sirenNotice} />}
+
           {/* Pending incident count -- the single most operationally
               important number on the screen, so it gets the only
               persistent critical-colored treatment in the chrome. */}
@@ -736,12 +755,6 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                 <NavItem label="Personnel" icon={<Users size={16} />} active={activeTab === 'manage-users'} onClick={() => setActiveTab('manage-users')} />
               </>
             )}
-            {currentUser.role === 'DEVTEAM' && (
-              <>
-                <NavSectionLabel>System</NavSectionLabel>
-                <NavItem label="DevTeam Console" icon={<Terminal size={16} />} active={activeTab === 'devteam'} onClick={() => setActiveTab('devteam')} />
-              </>
-            )}
           </div>
 
           {/* This used to say "Assignment" and read currentUser.barangayId --
@@ -768,16 +781,17 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
             className="w-full flex items-center justify-center gap-2 py-2.5 border-t text-[10px] font-bold uppercase tracking-[0.15em] transition-colors disabled:opacity-60"
             style={{
               borderColor: 'var(--line)',
-              color: sirenStopState === 'done' ? 'var(--ok)' : sirenStopState === 'error' ? 'var(--critical)' : 'var(--critical)',
+              color: sirenStopState === 'done' ? 'var(--ok)' : sirenStopState === 'none' ? 'var(--text-2)' : 'var(--critical)',
               background: sirenStopState === 'idle' ? 'transparent' : 'rgba(229,52,47,0.06)',
             }}
           >
             {sirenStopState === 'busy' ? <Loader2 size={12} className="animate-spin" /> :
              sirenStopState === 'done' ? <Check size={12} /> :
-             sirenStopState === 'error' ? <X size={12} /> : <Siren size={12} />}
+             sirenStopState === 'error' || sirenStopState === 'none' ? <X size={12} /> : <Siren size={12} />}
             {sirenStopState === 'busy' ? 'Stopping…' :
              sirenStopState === 'done' ? 'Siren stopped' :
-             sirenStopState === 'error' ? 'No response' : 'Emergency stop siren'}
+             sirenStopState === 'none' ? 'No siren connected' :
+             sirenStopState === 'error' ? 'Siren not reachable' : 'Emergency stop siren'}
           </button>}
 
           <div className="px-3 py-2.5 border-t" style={{ borderColor: 'var(--line)' }}>
@@ -1052,20 +1066,16 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
             <div key={activeTab} className="flex-1 min-w-0 overflow-y-auto custom-scrollbar p-3 animate-fade-in">
               {activeTab === 'crime-reports' && (
                 <CrimeReportsView
-                  onUpdate={fetchStats}
+                  onUpdate={refreshIncidents}
                   currentUserRole={currentUser.role}
                   canManageCameras={can('manage_cameras')}
-                  onDeepLink={(crimeId: string) => {
-                    // view_map and view_records are separate permissions --
-                    // a user can have one without the other, and this link
-                    // lives inside the map (view_map-gated) but jumps to the
-                    // Recordings tab (view_records-gated). Same bug as the
-                    // nav items above in a different shape: don't navigate
-                    // somewhere the click would just 403.
-                    if (!can('view_records')) return;
-                    setVideoRecordSearchQuery(crimeId);
+                  // view_map and view_records are separate permissions -- the
+                  // map's Footage button jumps to Recordings, so it only
+                  // exists for accounts that can open Recordings.
+                  onDeepLink={can('view_records') ? (incidentId: string) => {
+                    setVideoRecordSearchQuery(incidentId);
                     setActiveTab('records');
-                  }}
+                  } : undefined}
                 />
               )}
 
@@ -1075,6 +1085,13 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
 
               {activeTab === 'health' && (
                 <div className="space-y-3">
+                  <div
+                    className="px-3 py-2 border text-[10.5px]"
+                    style={{ borderColor: 'var(--warn)', color: 'var(--warn)', background: 'var(--panel)' }}
+                    role="note"
+                  >
+                    Sample values — the smart pole doesn&apos;t report battery, solar or temperature readings yet.
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <MetricPanel
                       label="Battery Reserve"
@@ -1095,10 +1112,8 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                     <MetricPanel label="Edge MCU" value={`${telemetry.tempESP}°C`} icon={<Zap size={16} />} tone={tempTone(telemetry.tempESP)} />
                   </div>
                   {/* Barangay-admin only, not staff -- owning the hardware is
-                      what earns this, same split as manage_cameras. See
-                      backend.py's MODEL_VIEW_ROLES comment for the full
-                      reasoning on why optimize is here but the on/off
-                      switches are not. */}
+                      what earns this, same split as manage_cameras (backend
+                      MODEL_VIEW_ROLES). */}
                   {currentUser.role === 'BARANGAY_ADMIN' && <AiModelsPanel />}
                 </div>
               )}
@@ -1154,7 +1169,6 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
               {activeTab === 'report-requests' && <ReportRequestsView />}
 
               {activeTab === 'manage-users' && <AdminUsersView />}
-              {activeTab === 'devteam' && <DevteamView />}
               {activeTab === 'profile' && <ProfileView currentUser={currentUser} onLogout={handleLogout} />}
             </div>
           )}
@@ -1174,13 +1188,9 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                 {selectedCam ? `Single View — ${selectedCam.name}` : 'Video Wall — Fullscreen'}
               </span>
               {isSirenActive && (
-                <span
-                  className="data text-[10px] px-1.5 py-0.5 border pulse-alert"
-                  style={{ color: 'var(--critical)', borderColor: 'var(--critical)', background: 'rgba(229,52,47,0.12)' }}
-                >
-                  SIREN ACTIVE
-                </span>
+                <SirenPill onStop={can('confirm_dismiss_alerts') ? handleEmergencyStopSiren : undefined} busy={sirenStopState === 'busy'} />
               )}
+              {sirenNotice && <SirenNotice text={sirenNotice} />}
             </div>
             <div className="flex items-center gap-1.5">
               {selectedCam && (
@@ -1204,7 +1214,7 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
               </button>
               <button
                 title="Exit fullscreen (Esc)"
-                onClick={() => { setIsFullscreenGrid(false); setIsSirenActive(false); }}
+                onClick={() => setIsFullscreenGrid(false)}
                 className="h-6 w-6 flex items-center justify-center border transition-colors hover:bg-white/5"
                 style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}
               >
@@ -1299,7 +1309,7 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
               <span className="label" style={{ color: 'var(--text)' }}>Register Camera</span>
               <button
                 title="Cancel"
-                onClick={() => setShowModal(false)}
+                onClick={() => { setShowModal(false); setCamFormError(''); }}
                 className="h-5 w-5 flex items-center justify-center"
                 style={{ color: 'var(--text-2)' }}
               >
@@ -1329,13 +1339,18 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                 onClick={() => {
                   const n = (document.getElementById('cam-name') as HTMLInputElement).value;
                   const u = (document.getElementById('cam-url') as HTMLInputElement).value;
-                  if (n && u) handleUpsertNode(n, u);
+                  if (!n.trim() || !u.trim()) { setCamFormError('Enter both a name and a stream URL.'); return; }
+                  setCamFormError('');
+                  handleUpsertNode(n.trim(), u.trim());
                 }}
                 className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.98]"
                 style={{ background: 'var(--accent)' }}
               >
                 Register
               </button>
+              {camFormError && (
+                <p className="text-[10.5px]" role="alert" style={{ color: 'var(--critical)' }}>{camFormError}</p>
+              )}
             </div>
           </div>
         </div>
@@ -1343,8 +1358,3 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
     </div>
   );
 }
-
-/* ── Layout helper ──────────────────────────────────────────────────────
-   Video-wall column count follows CCTV convention (1/4/9/16 style) rather
-   than a fixed 2-up, so tiles stay as large as possible for the number of
-   feeds actually connected. */

@@ -9,6 +9,7 @@ import { useLiveChannel } from '../../context/WebSocketContext';
 import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
 import { SkeletonRow } from './Skeleton';
 import IncidentDetail from './IncidentDetail';
+import { CRIME_TYPE_OPTIONS } from '../../lib/permissions';
 
 function authHeaders() {
   const token = typeof window !== "undefined" ? localStorage.getItem("ecoToken") : null;
@@ -141,13 +142,7 @@ export default function HistoryView() {
               style={{ color: 'var(--text-2)' }}
             >
               <option value="ALL">All types</option>
-              <option value="ASSAULT">Assault</option>
-              <option value="ARMED THREAT">Armed threat</option>
-              <option value="ROBBERY">Robbery</option>
-              <option value="THEFT">Theft</option>
-              <option value="PHYSICAL VIOLENCE">Physical violence</option>
-              <option value="VANDALISM">Vandalism</option>
-              <option value="HARDWARE_PANIC_INTERRUPT">Panic button</option>
+              {CRIME_TYPE_OPTIONS.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           </div>
 

@@ -48,6 +48,7 @@ import contextvars
 from dotenv import load_dotenv
 from db import get_conn, IntegrityError, DB_KIND, table_exists, SQLITE_PATH
 from port_utils import find_free_port, write_runtime_port, read_runtime_ports, start_parent_watchdog
+from config_store import load_overlay, save_overrides
 from maintenance import start_maintenance_scheduler
 from notifications import notify_incident_targets
 from telegram_bot import start_telegram_registration_poller
@@ -134,9 +135,8 @@ if os.path.exists(_ENV_CONFIG_PATH):
         sys_config = _deep_merge(sys_config, json.load(f))
 
 WRITABLE_CONFIG_PATH = os.path.join(WRITABLE_DIR, "config.json")
-if os.path.exists(WRITABLE_CONFIG_PATH):
-    with open(WRITABLE_CONFIG_PATH, 'r', encoding='utf-8') as f:
-        sys_config = _deep_merge(sys_config, json.load(f))
+# Only what this machine itself changed -- see app/config_store.py.
+sys_config = _deep_merge(sys_config, load_overlay(WRITABLE_CONFIG_PATH, _BASE_CONFIG_PATH))
 
 if CORS_ORIGINS_ENV:
     sys_config.setdefault("security", {})["cors_origins"] = [o.strip() for o in CORS_ORIGINS_ENV.split(",")]
@@ -147,9 +147,10 @@ if SECRET_KEY_ENV:
 if "auth" not in sys_config or not sys_config.get("auth", {}).get("secret_key"):
     sys_config.setdefault("auth", {})["secret_key"] = secrets.token_hex(32)
     # Write to the WRITABLE copy, never back to CONFIG_PATH (BASE_DIR) --
-    # that path can be read-only on a packaged install.
-    with open(WRITABLE_CONFIG_PATH, "w") as f:
-        json.dump(sys_config, f, indent=2)
+    # that path can be read-only on a packaged install. Just the key: a full
+    # dump here pinned every other setting on this machine (config_store.py).
+    save_overrides(WRITABLE_CONFIG_PATH, {("auth", "secret_key"): sys_config["auth"]["secret_key"]},
+                   _BASE_CONFIG_PATH)
 SECRET_KEY = sys_config["auth"]["secret_key"]
 TOKEN_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
@@ -3040,8 +3041,14 @@ async def panic_trigger(data: PanicSchema, request: Request):
             requests.post, _ai_core_capture_url(), json={"incident_id": incident_id}, timeout=2.0
         )
         if cap_res.ok:
-            screenshot_url = cap_res.json().get("screenshot_path") or ""
-            print(f"🚨 [PANIC] AI pipeline evidence capture: {cap_res.json().get('status')}")
+            body = cap_res.json()
+            # BUG FOUND 2026-10-04 (user report: a panic press saved no
+            # photo): the AI core answered "screenshotPath" and this read
+            # "screenshot_path", so every panic incident was stored without
+            # the frame the core had just written. Both spellings accepted,
+            # so an AI core from before the rename still works.
+            screenshot_url = body.get("screenshot_path") or body.get("screenshotPath") or ""
+            print(f"🚨 [PANIC] AI pipeline evidence capture: {body.get('status')}")
     except Exception as e:
         print(f"⚠️  [PANIC] AI pipeline unreachable, logging panic with no evidence: {e}")
 
@@ -3420,42 +3427,48 @@ async def add_incident_report(incident_id: str, data: IncidentReportSchema, auth
     conn.close()
     return {"status": "report_added", "id": report_id}
 
-@app.post("/siren/activate")
-async def siren_activate(authorization: Optional[str] = Header(None)):
+async def _drive_siren(authorization: Optional[str], on: bool) -> dict:
+    """Shared body of /siren/activate and /siren/deactivate.
+
+    Reports what actually happened, because the dashboard shows it to the
+    operator: "sent" (the pole answered), "unreachable" (no answer, or an
+    error status), "skipped" (esp32.enabled is false). Both endpoints used to
+    answer 200 "…_sent" even when the pole never replied, so the dashboard's
+    Emergency Stop said "Siren stopped" with nothing listening.
+
+    BUG FOUND 2026-08-19: esp32.enabled was never checked here, so with NO
+    ESP32 on the network every Confirm/Dismiss click still fired a real HTTP
+    POST and blocked on a 2-second connect timeout before returning."""
     payload = require_auth(authorization)
     conn = get_conn()
-    cursor = conn.cursor()
-    require_permission(cursor, payload, "confirm_dismiss_alerts")
-    conn.close()
-    # BUG FOUND 2026-08-19: esp32.enabled was never checked here, so with NO
-    # ESP32 on the network every Confirm/Dismiss click still fired a real HTTP
-    # POST and blocked on a 2-second connect timeout before returning. (The
-    # ESP32_IP expression at the top of this file reads `enabled`, but only as
-    # part of an `and/or` chain that falls through to the same hardcoded
-    # default either way -- so `enabled: false` disabled nothing at all.)
-    if not ESP32_ENABLED:
-        return {"status": "skipped", "detail": "esp32.enabled is false in config.json"}
     try:
-        await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/on", timeout=2.0)
-    except Exception as e:
-        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
-    return {"status": "activate_sent"}
+        cursor = conn.cursor()
+        require_permission(cursor, payload, "confirm_dismiss_alerts")
+        if not ESP32_ENABLED:
+            result, detail = "skipped", "No siren is configured (esp32.enabled is false)."
+        else:
+            try:
+                r = await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/{'on' if on else 'off'}", timeout=2.0)
+                ok = 200 <= r.status_code < 300
+                result, detail = ("sent", None) if ok else ("unreachable", f"Siren answered HTTP {r.status_code}.")
+            except Exception as e:
+                print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
+                result, detail = "unreachable", f"No answer from the siren at {ESP32_IP}."
+        log_audit(cursor, payload, f"siren.{'on' if on else 'off'}", "siren", ESP32_IP or "-",
+                  snapshot={"result": result})
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": result, "delivered": result == "sent", "detail": detail}
+
+
+@app.post("/siren/activate")
+async def siren_activate(authorization: Optional[str] = Header(None)):
+    return await _drive_siren(authorization, on=True)
 
 @app.post("/siren/deactivate")
 async def siren_deactivate(authorization: Optional[str] = Header(None)):
-    payload = require_auth(authorization)
-    conn = get_conn()
-    cursor = conn.cursor()
-    require_permission(cursor, payload, "confirm_dismiss_alerts")
-    conn.close()
-    # See siren_activate above for why this check exists.
-    if not ESP32_ENABLED:
-        return {"status": "skipped", "detail": "esp32.enabled is false in config.json"}
-    try:
-        await asyncio.to_thread(requests.post, f"http://{ESP32_IP}/siren/off", timeout=2.0)
-    except Exception as e:
-        print(f"⚠️  [SIREN] ESP32 unreachable at {ESP32_IP}: {e}")
-    return {"status": "deactivate_sent"}
+    return await _drive_siren(authorization, on=False)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
@@ -7117,14 +7130,13 @@ def _read_config_file():
     """
     with open(_BASE_CONFIG_PATH, "r", encoding="utf-8") as fh:
         cfg = json.load(fh)
-    for extra in (_ENV_CONFIG_PATH, WRITABLE_CONFIG_PATH):
-        if extra and os.path.exists(extra):
-            try:
-                with open(extra, "r", encoding="utf-8") as fh:
-                    cfg = _deep_merge(cfg, json.load(fh))
-            except Exception:
-                pass          # a malformed overlay must not blank the panel
-    return cfg
+    if _ENV_CONFIG_PATH and os.path.exists(_ENV_CONFIG_PATH):
+        try:
+            with open(_ENV_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                cfg = _deep_merge(cfg, json.load(fh))
+        except Exception:
+            pass          # a malformed overlay must not blank the panel
+    return _deep_merge(cfg, load_overlay(WRITABLE_CONFIG_PATH, _BASE_CONFIG_PATH))
 
 
 @app.get("/api/devteam/detection-models")
@@ -7237,38 +7249,17 @@ async def set_detection_model(
     if not changed:
         raise HTTPException(status_code=400, detail="Nothing to change")
 
-    # Write via a temp file in the same directory, then replace. A partial
-    # write here leaves config.json unparseable, which takes down the backend
-    # AND the detector on next start -- the one file where a torn write is
-    # unrecoverable without a manual edit.
-    #
-    # BUG FOUND 2026-08-23: this used to write to CONFIG_PATH (the shipped
-    # BASE_DIR config.json), not WRITABLE_CONFIG_PATH. Every other writer in
-    # this file follows "write to the WRITABLE copy, never CONFIG_PATH" (see
-    # the comment above the secret_key write ~30 lines up) precisely because
-    # WRITABLE_CONFIG_PATH is what main.py's loader merges LAST -- i.e. it
-    # always wins. WRITABLE_CONFIG_PATH is seeded as a FULL snapshot of the
-    # merged config the first time the app ever runs, so once that snapshot
-    # exists, every key it contains (which is every key, since it's a full
-    # copy) permanently shadows the same key in the base config.json on every
-    # future load. Writing the toggle to CONFIG_PATH instead of
-    # WRITABLE_CONFIG_PATH meant the change was saved to a file whose value
-    # for "enabled" the loader never actually looks at again once the
-    # snapshot exists -- so a detector switched off would flip back on (the
-    # snapshot's original "enabled": true winning the merge) the next time
-    # the app was closed and reopened, exactly undoing the toggle instead of
-    # merely requiring a restart to apply it.
-    tmp = WRITABLE_CONFIG_PATH + ".tmp"
+    # To the WRITABLE copy (merged last, so it wins) -- the shipped
+    # config.json can be read-only on a packaged install (BUG FOUND
+    # 2026-08-23). Only the changed keys: this used to dump the whole merged
+    # config there, which then pinned every other model path and threshold
+    # on the machine past any later update (config_store.py, 2026-10-04).
+    # Atomic, since a torn config.json takes down the backend AND detector.
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
-        os.replace(tmp, WRITABLE_CONFIG_PATH)
+        save_overrides(WRITABLE_CONFIG_PATH,
+                       {("detection", name, key): value for key, value in changed.items()},
+                       _BASE_CONFIG_PATH)
     except Exception as e:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
         raise HTTPException(status_code=500, detail=f"Could not save config.json: {e}")
 
     return {

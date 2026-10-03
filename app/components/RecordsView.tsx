@@ -3,11 +3,12 @@
 import React, { useState, useRef } from 'react';
 import {
   ShieldAlert, Clapperboard, Edit3, Save, Play,
-  ListFilter, Calendar, Clock, Scissors, AlertCircle, Download, Trash2
+  ListFilter, Calendar, Clock, Scissors, AlertCircle, Download, Trash2, X
 } from 'lucide-react';
 import { useLiveChannel } from '../context/WebSocketContext';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 import { usePermissions } from '../hooks/usePermissions';
+import { CRIME_TYPE_OPTIONS } from '../lib/permissions';
 import { SkeletonRow } from './dashboard/Skeleton';
 
 function authHeaders() {
@@ -37,7 +38,9 @@ type VideoRecord = {
 
 const recordTitle = (r: VideoRecord) => r.label || r.filename;
 
-export default function RecordsView() {
+// defaultSearchQuery: an incident id, from the map's Footage button --
+// shows just that incident's clips until cleared.
+export default function RecordsView({ defaultSearchQuery = '' }: { defaultSearchQuery?: string }) {
   const { apiUrl: API_URL } = useRuntimeConfig();
   const [records, setRecords] = useState<VideoRecord[]>([]);
   // Deleting evidence is police-admin/DevTeam only (backend delete_record).
@@ -53,6 +56,7 @@ export default function RecordsView() {
 
   const [filterDate, setFilterDate] = useState("");
   const [filterCrimeType, setFilterCrimeType] = useState("ALL");
+  const [incidentFilter, setIncidentFilter] = useState(defaultSearchQuery);
   const [startTime, setStartTime] = useState("00:00");
   const [endTime, setEndTime] = useState("01:00");
 
@@ -177,8 +181,11 @@ export default function RecordsView() {
     // hidden from both tabs.
     if (subView === 'CLIPS' ? r.type === 'FULL_24_7' : r.type !== 'FULL_24_7') return false;
     if (filterDate && !r.recorded_at.includes(filterDate)) return false;
+    if (subView === 'CLIPS' && incidentFilter && r.associated_incident_id !== incidentFilter) return false;
+    // Exact type, not a substring of the filename: the old "FIREARM" option
+    // matched nothing (the type is ARMED THREAT), so it always came up empty.
     if (subView === 'CLIPS' && filterCrimeType !== 'ALL'
-        && (r.incident_type || r.filename).toUpperCase().indexOf(filterCrimeType) === -1) return false;
+        && (r.incident_type || '').toUpperCase() !== filterCrimeType) return false;
     return true;
   });
 
@@ -221,9 +228,7 @@ export default function RecordsView() {
                 style={{ color: 'var(--text-2)' }}
               >
                 <option value="ALL">All types</option>
-                <option value="ASSAULT">Assault</option>
-                <option value="FIREARM">Weapons / firearms</option>
-                <option value="PANIC">Panic triggers</option>
+                {CRIME_TYPE_OPTIONS.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
               </select>
             </div>
           )}
@@ -374,8 +379,18 @@ export default function RecordsView() {
         {/* Archive list */}
         <div className="col-span-5 flex flex-col min-h-0 border" style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}>
           <div className="h-9 shrink-0 flex items-center justify-between px-2.5 border-b" style={{ borderColor: 'var(--line)' }}>
-            <span className="label" style={{ color: 'var(--text)' }}>
+            <span className="label flex items-center gap-2 min-w-0" style={{ color: 'var(--text)' }}>
               {subView === 'CLIPS' ? 'Event Clips' : '24/7 Archive'}
+              {incidentFilter && (
+                <button
+                  onClick={() => setIncidentFilter('')}
+                  title="Show all recordings"
+                  className="data flex items-center gap-1 px-1.5 py-0.5 border text-[9.5px] normal-case tracking-normal truncate"
+                  style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }}
+                >
+                  {crimes.find(c => c.id === incidentFilter)?.case_id || 'One incident'} <X size={10} />
+                </button>
+              )}
             </span>
             <span className="data text-[10px] px-1.5 py-0.5 border" style={{ color: 'var(--text-2)', borderColor: 'var(--line-2)' }}>
               {String(filteredRecords.length).padStart(3, '0')}

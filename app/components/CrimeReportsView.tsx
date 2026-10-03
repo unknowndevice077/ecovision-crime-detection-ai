@@ -5,10 +5,11 @@ import {
   X, ShieldCheck, Trash2, Plus,
   Info, AlertCircle, FileSignature, FileText,
   Calendar, ListFilter, ShieldAlert, Radio, Check, ArrowLeft, Globe, ImageIcon,
-  Sparkles, RotateCcw, Save, Pencil
+  Sparkles, RotateCcw, Save, Pencil, Film
 } from 'lucide-react';
 import { useRuntimeConfig } from '../hooks/useRuntimeConfig';
 import { useLiveChannel } from '../context/WebSocketContext';
+import { CRIME_TYPE_OPTIONS } from '../lib/permissions';
 
 // Every fetch in this file used to skip this entirely -- backend.py's
 // require_auth() 401s an unauthenticated request, so every read AND write
@@ -112,7 +113,9 @@ type FiledReport = {
   reported_by_username?: string; created_at?: string; updated_at?: string;
 };
 
-const INCIDENT_TYPES = ['ASSAULT', 'ARMED THREAT', 'ROBBERY', 'THEFT', 'PHYSICAL VIOLENCE', 'VANDALISM', 'HARDWARE_PANIC_INTERRUPT'];
+const INCIDENT_TYPES = CRIME_TYPE_OPTIONS.map(o => o.id);
+// A panic is filed by the pole's button, never by hand.
+const MANUAL_TYPE_OPTIONS = CRIME_TYPE_OPTIONS.filter(o => o.id !== 'HARDWARE_PANIC_INTERRUPT');
 const DISPOSITIONS = [
   'Under investigation',
   'Referred to prosecutor (inquest / regular filing)',
@@ -142,7 +145,9 @@ function aiToBody(ai: AiDraft): ReportBody {
 
 interface CrimeReportsViewProps {
   onUpdate: () => void;
-  onDeepLink?: (crimeId: string) => void;
+  // Opens Recordings filtered to this incident's clips. Left out for an
+  // account that can't open Recordings, which hides the Footage button.
+  onDeepLink?: (incidentId: string) => void;
   currentUserRole?: string;
   // From the account's real permissions (usePermissions), not its role:
   // Add smartpole / Move pin show only for accounts that can manage
@@ -996,10 +1001,7 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                     className="data w-full border p-1.5 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
                     style={fieldStyle}
                   >
-                    <option value="ASSAULT">Assault</option>
-                    <option value="THEFT">Theft</option>
-                    <option value="PHYSICAL VIOLENCE">Physical Violence</option>
-                    <option value="VANDALISM">Vandalism</option>
+                    {MANUAL_TYPE_OPTIONS.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
                   </select>
                 </div>
                 <div>
@@ -1062,10 +1064,9 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                 style={{ color: 'var(--text-2)' }}
               >
                 <option value="ALL">All types</option>
-                <option value="ASSAULT">Assault</option>
-                <option value="THEFT">Theft</option>
-                <option value="PHYSICAL VIOLENCE">Physical Violence</option>
-                <option value="VANDALISM">Vandalism</option>
+                {/* Was a hand-copied subset with no Armed threat, Robbery or
+                    Panic -- so those incidents could never be filtered to. */}
+                {CRIME_TYPE_OPTIONS.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
               </select>
             </div>
           </div>
@@ -1134,6 +1135,17 @@ export default function CrimeReportsView({ onUpdate, onDeepLink, currentUserRole
                           style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
                         >
                           <FileSignature size={11} /> {(inc.status || '').toLowerCase() === 'confirmed' ? 'View report' : 'Police report'}
+                        </button>
+                      )}
+
+                      {onDeepLink && (
+                        <button
+                          title={`Open the recorded clips for case ${inc.case_id}`}
+                          onClick={() => onDeepLink(inc.id)}
+                          className="flex items-center gap-1.5 px-2 py-1 border text-[9px] font-bold uppercase tracking-wider transition-colors hover:bg-white/5"
+                          style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                        >
+                          <Film size={11} /> Footage
                         </button>
                       )}
 

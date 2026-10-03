@@ -144,6 +144,46 @@ export function NavItem({ icon, label, badge, badgeTone = 'neutral', active, onC
     );
 }
 
+/* ── Siren state ────────────────────────────────────────────────────────
+   Shown only once the pole has confirmed it switched on (page.tsx's
+   callSiren). onStop is left out for accounts that can't stop it. */
+export function SirenPill({ onStop, busy }: { onStop?: () => void; busy?: boolean }) {
+    return (
+        <span
+            className="flex items-center gap-1.5 h-7 px-2 border pulse-alert"
+            style={{ color: 'var(--critical)', borderColor: 'var(--critical)', background: 'rgba(229,52,47,0.12)', borderRadius: 'var(--radius-sm)' }}
+            role="status"
+        >
+            <span className="data text-[10px] font-bold">SIREN ON</span>
+            {onStop && (
+                <button
+                    onClick={onStop}
+                    disabled={busy}
+                    title="Switch the siren off"
+                    className="data text-[10px] font-bold uppercase px-1.5 border transition-opacity hover:opacity-80 disabled:opacity-50"
+                    style={{ borderColor: 'var(--critical)', borderRadius: 'var(--radius-sm)' }}
+                >
+                    {busy ? 'Stopping…' : 'Stop'}
+                </button>
+            )}
+        </span>
+    );
+}
+
+// Why a confirmed incident did NOT sound a siren ("No siren connected" /
+// "Siren not reachable") -- so the operator doesn't assume it did.
+export function SirenNotice({ text }: { text: string }) {
+    return (
+        <span
+            className="data flex items-center h-7 px-2 border text-[10px]"
+            style={{ color: 'var(--warn)', borderColor: 'var(--warn)', borderRadius: 'var(--radius-sm)' }}
+            role="status"
+        >
+            {text}
+        </span>
+    );
+}
+
 /* ── Metric panel ───────────────────────────────────────────────────────── */
 export function MetricPanel({ label, value, icon, bar, tone = 'ok' }: any) {
     const toneColor =

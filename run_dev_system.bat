@@ -12,17 +12,14 @@ if not exist ".venv\Scripts\activate.bat" (
     exit /b 1
 )
 
-if not exist "weights\yolo11s-pose.pt" if not exist "weights\yolo11s-pose.engine" (
-    echo ⚠️  weights\yolo11s-pose.pt (or .engine^) not found -- the AI core will crash on startup.
+:: Weights are checked by preflight.py, which reads the deployed model files
+:: from config.json. This used to hardcode weapon_signs.pt and
+:: x3d_xs_violence_best.pt -- not what config.json deploys -- so it warned
+:: "the AI core will crash" and paused on a perfectly good setup.
+".venv\Scripts\python.exe" preflight.py --skip-models
+if errorlevel 1 (
+    echo ⚠️  preflight found blocking problems ^(listed above^) -- the AI core may not start.
     echo    See README.md "Add Model Weights" for what needs to go in weights\.
-    pause
-)
-if not exist "weights\weapon_signs.pt" if not exist "weights\weapon_signs.engine" (
-    echo ⚠️  weights\weapon_signs.pt (or .engine^) not found -- the AI core will crash on startup.
-    pause
-)
-if not exist "weights\x3d_xs_violence_best.pt" (
-    echo ⚠️  weights\x3d_xs_violence_best.pt not found -- the AI core will crash on startup.
     pause
 )
 
