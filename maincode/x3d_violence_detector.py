@@ -60,6 +60,9 @@ _DEFAULT_VIOLENCE_CFG = {
     # actually matched to scene inference; x3d_xs_violence_best.pt is the
     # crop-trained model and scores 5.3pp lower under scene inference.
     "scene_model_path": "weights/x3d_xs_violence_best_baseline_backup.pt",
+    # More whole-frame checkpoints whose probabilities are averaged with
+    # scene_model_path's (each with its own calibration). Empty = one model.
+    "scene_ensemble_paths": [],
 
     # --- tiled mode (city-scale full-view cameras, see TiledSceneViolenceDetector) ---
     # Grid density and check cadence are a measured cost/recall tradeoff, not
@@ -125,6 +128,8 @@ TILE_GRID = _VIOLENCE_CFG["tile_grid"]
 TILE_OVERLAP = _VIOLENCE_CFG["tile_overlap"]
 TILE_CHECK_INTERVAL = _VIOLENCE_CFG["tile_check_interval"]
 SCENE_PERSON_CONFIRM = bool(_VIOLENCE_CFG["scene_person_confirm"])
+SCENE_ENSEMBLE_PATHS = [os.path.normpath(os.path.join(DETECTOR_PROJECT_ROOT, p))
+                        for p in _VIOLENCE_CFG.get("scene_ensemble_paths") or []]
 
 # --- EMA smoothing on raw confidence, per track ---
 EMA_ALPHA = _VIOLENCE_CFG["ema_alpha"]          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
@@ -331,7 +336,7 @@ class X3DViolenceDetector:
         self._confirmed_state: dict[int, bool] = {}
 
         self._log_rows_since_flush = 0
-        if ENABLE_DIAGNOSTIC_LOG:
+        if ENABLE_DIAGNOSTIC_LOG and self._log_path:
             os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
             # Rotate the trace CSV once it gets too big -- unbounded growth
             # over a 24/7 deployment otherwise. Simple single-backup rotation
@@ -806,7 +811,7 @@ class SceneViolenceDetector(X3DViolenceDetector):
     def __init__(self, model_path: str = None, device: str = None,
                  threshold: float = None, consecutive: int = None,
                  log_path: str = SCENE_DIAGNOSTIC_LOG_PATH,
-                 person_confirm: bool = False):
+                 person_confirm: bool = False, ensemble_paths=None):
         # Defaults to the whole-frame-trained checkpoint, not the crop one --
         # matching the representation is worth 5.3pp here. Separate log file
         # so it does not interleave with the per-track detector's, which is
@@ -835,6 +840,26 @@ class SceneViolenceDetector(X3DViolenceDetector):
         self._confirm_recent = deque(maxlen=self.CONFIRM_RECENT)
         self._last_scene_conf = 0.0
         self._last_crop_conf = 0.0
+        # ENSEMBLE: further checkpoints scored on the very same tensor, every
+        # model's calibrated probabilities averaged (_forward below). Measured
+        # 2026-10-04 (experiments/crop_recheck, ensemble_traces.py): deployed
+        # ucabal + the mined-negatives retrain, person-crop confirmed, 2 in a
+        # row -- 0.45: 88.0% of 200 fights at 2.0 false alarms/hr, 0.50:
+        # 85.5% at 0.5/hr, vs the single model's 86.5% at 2.0/hr. Partners
+        # load like any checkpoint (own meta, own temperature, own engine)
+        # but keep no state or log: they only ever see _forward.
+        self._partners = [X3DViolenceDetector(model_path=p, device=str(self.device), log_path=None)
+                          for p in (ensemble_paths or [])]
+        if self._partners:
+            print(f"[X3D] Ensemble ON: averaging {1 + len(self._partners)} models")
+
+    def _forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        probs = super()._forward(tensor)
+        if not getattr(self, "_partners", None):
+            return probs
+        for partner in self._partners:
+            probs = probs + partner._forward(tensor)
+        return probs / (1 + len(self._partners))
 
     def reset_scene(self):
         """Between independent clips in a batch eval -- same role

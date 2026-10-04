@@ -213,30 +213,32 @@
       "_dashboard_note": "With this false, no VANDALISM alert is emitted at all. That is deliberate: the alternative was RULE_VANDALISM_PLACEHOLDER_CONF = 0.84, an invented constant rendered on the dashboard identically to a real model output, attached to a rule that cannot fire.",
       "display_name": "Vandalism",
       "model_path": "weights/x3d_xs_vandalism_scene_v3.pt",
-      "confidence_threshold": 0.7,
+      "confidence_threshold": 0.6,
       "consecutive_required": 3,
+      "person_confirm": true,
+      "_person_confirm": "Added 2026-10-04: the violence detector's person-crop confirmation, applied to vandalism (min of whole-frame confidence and the best crop around a group of people over the last 3 checks). MEASURED with v3 on identical footage (experiments/crop_recheck in the training repo): spliced_vandalism (31 held-out acts from the v3 test split -- few source videos, so recall is approximate) + 2 h of the four held-out real cameras. Whole frame 0.70/3 (previous deployment): 87.1% caught, 6.0 false alarms/hr. Confirmed 0.60/3: 87.1% caught, 1.0/hr. Confirmed 0.70/3: 83.9%, 0.5/hr. Same recall at a sixth of the false alarms, so threshold 0.70 -> 0.60. Rollback: person_confirm false, confidence_threshold 0.7.",
       "experimental": true,
       "_model_path_note": "Points at v3, the best vandalism model that exists, while enabled stays false. Shipping the best available checkpoint behind an off switch means that if anyone ever flips it on they get 21.75 alarms/hr rather than the 125.25 the previous checkpoint produced. Roll back to weights/x3d_xs_vandalism_scene.pt (v1, 11 scenes) or retrain from dataset_manifest_vandalism_v3.json. See _v3_result for the full comparison.",
       "metrics": {
         "status": "deployed",
         "headline": {
           "label": "False alarms",
-          "value": 6.75,
+          "value": 1.0,
           "unit": "/hr"
         },
         "stats": [
           {
             "label": "False alarms",
-            "value": 6.75,
+            "value": 1.0,
             "unit": "/hr",
-            "note": "at the deployed 0.7 / consecutive 3, on 4 real held-out cameras. Was 125.25 before Davao negatives. Violence runs at 4.50/hr.",
+            "note": "at 0.6 / consecutive 3 with person-crop confirmation, on 4 real held-out cameras (2 h). Was 6.0 at the previous 0.7 whole-frame setting.",
             "good": true
           },
           {
             "label": "Recall",
-            "value": 78.1,
+            "value": 87.1,
             "unit": "%",
-            "note": "at threshold 0.7 on the held-out test split",
+            "note": "31 held-out vandalism acts spliced into street footage; few source videos, so approximate",
             "good": true
           },
           {
@@ -254,7 +256,7 @@
             "good": false
           }
         ],
-        "measured_on": "51 clips from 5 held-out UCF scenes, plus 80 min of real CCTV across 4 held-out cameras (v3, threshold 0.5 / consecutive 3)",
+        "measured_on": "31 held-out vandalism acts spliced into street footage + 2 h of real CCTV across 4 held-out cameras (v3, 0.6 / consecutive 3, person-crop confirmed); clip accuracy on 51 clips from 5 held-out UCF scenes",
         "caveat": "Test split is 5 scenes and 19 negatives. The retrain is a genuine improvement -- 11 -> 26 scenes moved it from below its baseline to 19.7 points above, confirming a hypothesis recorded in the previous checkpoint's own metadata -- but 125.25 alarms/hr is undeployable regardless of how good the per-clip numbers look."
       },
       "marks_model_path": "weights/vandalism_marks_v2.pt",

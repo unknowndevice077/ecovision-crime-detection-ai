@@ -95,7 +95,7 @@ except ImportError:
 from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
 from x3d_violence_detector import (
     X3DViolenceDetector, SceneViolenceDetector, TiledSceneViolenceDetector, VIOLENCE_MODE,
-    MODEL_PATH as TRACK_MODEL_PATH, SCENE_PERSON_CONFIRM,
+    MODEL_PATH as TRACK_MODEL_PATH, SCENE_PERSON_CONFIRM, SCENE_ENSEMBLE_PATHS,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -635,7 +635,8 @@ if SCENE_MODE_ON and VIOLENCE_ON:
         # person_confirm: an alarm also needs a crop around a group of people
         # to look violent (config.json detection.violence.scene_person_confirm;
         # measured trade-off in SceneViolenceDetector's class docstring).
-        scene_detector = SceneViolenceDetector(device=TARGET_DEVICE, person_confirm=SCENE_PERSON_CONFIRM)
+        scene_detector = SceneViolenceDetector(device=TARGET_DEVICE, person_confirm=SCENE_PERSON_CONFIRM,
+                                               ensemble_paths=SCENE_ENSEMBLE_PATHS)
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
 elif not VIOLENCE_ON:
     pass  # already printed "🚫 Physical Violence: disabled" above -- a mode line here would contradict it
@@ -676,10 +677,13 @@ if VANDALISM_ON and _VANDAL_CFG.get("model_path"):
                 os.path.dirname(BASE_DIR), _VANDAL_CFG["model_path"])),
             device=TARGET_DEVICE,
             threshold=float(_VANDAL_CFG.get("confidence_threshold", 0.7)),
-            consecutive=int(_VANDAL_CFG.get("consecutive_required", 3)))
+            consecutive=int(_VANDAL_CFG.get("consecutive_required", 3)),
+            # Same person-crop confirmation as violence: 6.0 -> 1.0 false
+            # alarms/hr at equal recall (config detection.vandalism._person_confirm).
+            person_confirm=bool(_VANDAL_CFG.get("person_confirm", False)))
         print(f"🎨 Vandalism model: {_VANDAL_CFG['model_path']} "
-              f"@ {_VANDAL_CFG.get('confidence_threshold', 0.7)} "
-              f"(6.75 false alarms/hr measured on 4 held-out cameras)")
+              f"@ {_VANDAL_CFG.get('confidence_threshold', 0.7)}"
+              f"{' with person-crop confirmation' if vandalism_detector.person_confirm else ''}")
     except Exception as e:
         # Same policy as robbery: loud, but never take the rest down.
         print(f"⚠️  Vandalism model failed to load ({e}); "
@@ -2010,7 +2014,9 @@ while _running:
     # involving assault should raise both, not compete for one label.
     vandal_hit, vandal_conf = (False, 0.0)
     if VANDALISM_ON and vandalism_detector is not None:
-        vandal_hit, vandal_conf = vandalism_detector.update(frame, frame_count)
+        vandal_hit, vandal_conf = vandalism_detector.update(
+            frame, frame_count,
+            person_boxes=_confirm_person_boxes if vandalism_detector.person_confirm else None)
 
     robbery_hit, robbery_conf = (False, 0.0)
     if ROBBERY_ON and robbery_detector is not None:

@@ -33,5 +33,24 @@ class Calibration(unittest.TestCase):
             self.assertEqual((out[:, 1] >= 0.5).tolist(), (self.probs[:, 1] >= 0.5).tolist())
 
 
+class Ensemble(unittest.TestCase):
+    """SceneViolenceDetector._forward averages its partners' calibrated
+    probabilities with its own (config detection.violence.scene_ensemble_paths)."""
+
+    def make(self, own, partners):
+        det = X.SceneViolenceDetector.__new__(X.SceneViolenceDetector)
+        det._trt, det.temperature, det.model = None, 1.0, (lambda t: own)
+        det._partners = [SimpleNamespace(_forward=(lambda t, p=p: p)) for p in partners]
+        return det
+
+    def test_two_models_are_averaged(self):
+        out = self.make(torch.tensor([[0.2, 0.8]]), [torch.tensor([[0.6, 0.4]])])._forward(torch.zeros(1))
+        self.assertTrue(torch.allclose(out, torch.tensor([[0.4, 0.6]])))
+
+    def test_no_partners_is_the_single_model(self):
+        own = torch.tensor([[0.3, 0.7]])
+        self.assertIs(self.make(own, [])._forward(torch.zeros(1)), own)
+
+
 if __name__ == "__main__":
     unittest.main()
