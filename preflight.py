@@ -45,6 +45,11 @@ _WEAPON_WEIGHT = Path(
 _MARKS_WEIGHT = Path(
     _CONFIG["detection"].get("vandalism", {}).get(
         "marks_model_path", "vandalism_marks.pt")).name
+_VANDAL_WEIGHT = _CONFIG["detection"].get("vandalism", {}).get("model_path")
+# Averaged with the scene model on every check, so missing one stops the AI
+# core from starting just as surely as missing the scene model itself.
+_ENSEMBLE_WEIGHTS = [Path(p).name for p in
+                     _CONFIG["detection"]["violence"].get("scene_ensemble_paths") or []]
 
 GREEN, RED, YELLOW, RESET = "\033[92m", "\033[91m", "\033[93m", "\033[0m"
 
@@ -145,6 +150,10 @@ def main():
         _ROBBERY_WEIGHT: "robbery",
         _MARKS_WEIGHT: "graffiti marks (vandalism static targets)",
     }
+    if _VANDAL_WEIGHT and _CONFIG["detection"]["vandalism"].get("enabled"):
+        required[Path(_VANDAL_WEIGHT).name] = "vandalism (scene mode)"
+    for w in _ENSEMBLE_WEIGHTS:
+        required[w] = "violence ensemble partner"
     wdir = REPO / "weights"
     for f, why in required.items():
         p = wdir / f

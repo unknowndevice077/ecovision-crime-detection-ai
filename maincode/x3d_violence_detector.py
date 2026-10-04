@@ -756,6 +756,13 @@ def _confirm_crop_box(box, W, H, pad=0.30, min_height_frac=0.20):
     return sx1, sy1, sx1 + int(w), sy1 + int(h)
 
 
+class _EnsemblePartner(X3DViolenceDetector):
+    """A SceneViolenceDetector ensemble member: loaded like any checkpoint,
+    fed the scene detector's whole-frame tensors (so its input-type check
+    expects whole frames, not the per-track crops)."""
+    EXPECTED_INPUT_REPR = "whole_frame"
+
+
 class SceneViolenceDetector(X3DViolenceDetector):
     """Whole-frame violence detection -- one verdict for the scene, no tracking.
 
@@ -848,7 +855,7 @@ class SceneViolenceDetector(X3DViolenceDetector):
         # 85.5% at 0.5/hr, vs the single model's 86.5% at 2.0/hr. Partners
         # load like any checkpoint (own meta, own temperature, own engine)
         # but keep no state or log: they only ever see _forward.
-        self._partners = [X3DViolenceDetector(model_path=p, device=str(self.device), log_path=None)
+        self._partners = [_EnsemblePartner(model_path=p, device=str(self.device), log_path=None)
                           for p in (ensemble_paths or [])]
         if self._partners:
             print(f"[X3D] Ensemble ON: averaging {1 + len(self._partners)} models")

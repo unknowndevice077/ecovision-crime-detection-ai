@@ -43,12 +43,16 @@
       "release_hysteresis_margin": 0.07,
       "bystander_merge_radius_mult": 1.3,
       "mode": "scene",
-      "scene_confidence_threshold": 0.5,
+      "scene_confidence_threshold": 0.45,
       "scene_consecutive_required": 2,
       "scene_person_confirm": true,
       "_scene_person_confirm": "Added 2026-10-01. Each check also scores crops around the groups of people the pose model found (aspect-matched, so they look like whole frames to the model), and the value that goes through smoothing/confirmation is min(whole-frame confidence, best crop over the last 3 checks): the scene AND some group of real people must both look violent. That removes enough false alarms to drop consecutive 3 -> 2, which is what buys back recall. MEASURED on identical footage, same daynight weights, all six rows from one trace (experiments/crop_recheck in the training repo): spliced_recall_200 (200 held-out fights from 200 different source videos spliced into street footage) + 2 h of the four held-out real cameras (30 min each). whole frame 0.50/3 (previous deployment): 75.0% caught, 5.0 false alarms/hr. whole frame 0.50/2: 83.0%, 12.0/hr. CONFIRMED 0.50/2 (this setting): 79.0%, 3.0/hr -- better on both axes. confirmed 0.50/1: 81.0%, 5.0/hr. confirmed 0.40/2: 82.0%, 8.0/hr. Per camera at this setting: flyover 12 -> 12/hr, market 0, iloilo 0, lyns_restaurant 8 -> 0/hr. Also measured: using the crop to ADD detections ('or') gave the same recall at 3-6x the false alarms, so the crop only ever vetoes. On 75 real CCTV fights / 73 non-fights from SurvFight sources that share nothing with training, single-reading clip FPR falls 31.5% -> 21.9% for recall 81.3% -> 77.3%. The shipped SceneViolenceDetector was checked against the experiment check by check (verify_shipped.py): identical values on 720 checks. COST: one batched X3D forward of 1 + up to 5 clips per check instead of 1. ROLLBACK: set scene_person_confirm to false AND scene_consecutive_required back to 3 -- the two are a pair; confirmation off at 2 is the 12 alarms/hr row above.",
       "_scene_consecutive_required_rollback": "Was 1. Raised to 3 on 2026-08-14. TWO separate things are fixed by this. (1) A MEASUREMENT/CONFIG MISMATCH: eval_false_alarms_corpus.py defaults to --consecutive 2, but main.py:495 builds SceneViolenceDetector() with no consecutive argument, so the live system used this config value of 1. Every false-alarm figure on record -- including the 32.0 alarms/hr for corpus_neg and 41.0 for ucf_neg_motion -- was therefore measured at 2 while deployment ran at 1. Replayed at 1, the deployed model gives 49.0 alarms/hr (flyover 38, market 2, lyns 9), so the published rates understated live behaviour by ~53%. (2) THE SETTING ITSELF: consecutive_required has never been tunable, because 5-second benchmark clips yield too few inference points for need>=3 to succeed arithmetically -- a property of the clips, not the model. Measured instead on continuous footage (build_spliced_recall_set.py: 40 held-out violent test clips spliced into real Davao night street footage with 25 s of ordinary activity either side, replayed through the shipped _smooth_and_confirm): at threshold 0.50, cons=1 and cons=2 and cons=3 all detect 38/40 events (95.0%), while held-out camera alarms fall 49.0 -> 32.0 -> 17.0 per hour. cons=4 drops to 36/40 (90.0%) for 9.0/hr. So 3 is the last free step and 4 is the first one that costs. CAVEATS: 40 events gives about +/-2.5 points of resolution, so 'zero cost' means 'lost none of 40', not 'provably lossless'; and spliced recall is an UPPER bound, because a hard cut between two cameras is itself a large visual change and the violent clips are benchmark footage (several are indoor, some carry YouTube compilation watermarks and one a visible player UI). To roll back, set this to 1 for the previous deployed behaviour, or 2 to match how every historical measurement was taken.",
       "scene_model_path": "weights/x3d_xs_violence_scene_ucabal.pt",
+      "scene_ensemble_paths": [
+        "weights/x3d_xs_violence_scene_ucabal_mined.pt"
+      ],
+      "_scene_ensemble_paths": "Added 2026-10-05. A second whole-frame checkpoint (the ucabal recipe retrained with 6 false-alarm clips mined from TRAINING cameras added as negatives) runs on the same clip and the two models' calibrated probabilities are averaged (SceneViolenceDetector._forward). Alone it is not better than ucabal (83.5% vs 86.5% at 0.50/2); averaged, the two disagree on different false alarms. MEASURED through the app's own code path (trace_crop.py --ensemble; identical to the offline average) on spliced_recall_200 + 2 h of the four held-out cameras, person-crop confirmed: ucabal alone 0.50/2: 86.5% caught, 2.0 false alarms/hr; ensemble 0.45/2: 88.0%, 2.0/hr; ensemble 0.50/2: 85.5%, 0.5/hr. 1,310 test clips at 0.45: accuracy 93.1%, recall 92.8%, precision 93.4% (ucabal at 0.50: 92.8 / 92.2 / 93.4). Cost: a second X3D-XS forward per check. Rollback: scene_ensemble_paths [] and scene_confidence_threshold 0.5.",
       "_scene_model_path_ucabal": "Deployed 2026-10-03, replacing daynight. Same recipe as daynight (fine-tuned from corpus_neg, 2 blocks unfrozen), data = daynight's manifest PLUS UCF-Crime clips cut at the event timestamps of the UCA annotations (CVPR 2024): 821 fight clips from 98 Fighting/Assault/Abuse videos and 835 calm clips from the non-violent stretches of the same and of robbery/vandalism videos -- same shops, restaurants and streets on both sides. Best epoch 7 of 10. MEASURED at the live rule (person-crop confirmed, 0.50, 2 in a row): spliced_recall_200 79.0% -> 86.5%; held-out real cameras 3.0 -> 2.0 false alarms/hr (flyover 12 -> 6, iloilo 0 -> 2, restaurant 0 -> 0, market 0 -> 0). Unseen SurvFight real-CCTV clips (peak reading): recall 77.3% -> 78.7%, FPR 21.9% -> 24.7% (2 clips of 73, noise). CAVEAT: on 507 held-out UCF clips (live rule) fights alarmed 23.8% -> 31.6% but calm indoor clips alarmed 4.0% -> 8.0% -- indoor shop/restaurant CCTV may see more alerts; street cameras did not. The unbalanced version (279 calm clips) was measured and rejected: 89.5% caught at 13.0 false alarms/hr. ROLLBACK: weights/x3d_xs_violence_scene_daynight.pt (nothing else changes).",
       "_scene_model_path_rollback": "daynight deployed 2026-08-18, replacing corpus_neg. Recall UNCHANGED at 95.0% (38/40 on the spliced replay, deployed operating point 0.50/consecutive=3) while real-camera alarms fall 12.75 -> 4.50/hr (flyover 45 -> 6/hr is nearly the whole effect; lyns_restaurant is the one camera that gets WORSE, 6 -> 12/hr -- not a uniform win, see the checkpoint's own .meta.json for the full breakdown including the 0.45 threshold that was measured and rejected). This weights file was accidentally deleted from the repo on 2026-08-18 (an unrelated tool ran against this codebase and removed it) and recovered from D:\\EcoVisionImagesTraining\\x3d_xs_violence_best_daynight.pt -- identity confirmed by an exact match on best_val_acc (0.87791601...) against the surviving x3d_xs_violence_scene_daynight.pt.meta.json and identical architecture (563 keys, 3,010,271 params) to every other deployed scene checkpoint. Previous deployment history (corpus_neg vs ucf_neg_motion etc.) is preserved below for rollback. To roll back to corpus_neg, set scene_model_path to weights/x3d_xs_violence_scene_corpus_neg.pt.",
       "_scene_model_path_history": "corpus_neg deployed 2026-08-13. Measured against the previously deployed ucf_neg_motion on IDENTICAL footage and IDENTICAL clips, both re-measured rather than compared across runs. Real cameras (agdao_flyover + agdao_market + lyns_restaurant, 20 min each, threshold 0.5 / consecutive 2): corpus_neg 32.0 alarms/hr vs ucf_neg_motion 41.0 -- per camera 84/3/9 vs 93/15/15. Benchmark on the 932 clips held out from BOTH manifests: recall 91.4% vs 87.1%, FPR 12.9% vs 13.5%, precision 92.5% vs 91.8% -- better on every axis and across the whole threshold curve, not one lucky point. CAVEAT: one training run against one training run, no seed replication, so treat +4.3 recall as a direction rather than a precise figure. The only change was negatives: 3,925 -> 4,825, from 7 daytime cameras to 26 (dataset_manifest_3way_corpus.json, --train-neg-ratio 2.0). Present for rollback: weights/x3d_xs_violence_scene_ucf_neg_motion.pt, ..._ucf_neg.pt, ..._3way_nll_scaleaug_negatives.pt.",
@@ -62,41 +66,41 @@
         "status": "deployed",
         "headline": {
           "label": "Detection rate",
-          "value": 86.5,
+          "value": 88.0,
           "unit": "%"
         },
         "stats": [
           {
             "label": "Detection rate",
-            "value": 86.5,
+            "value": 88.0,
             "unit": "%",
-            "note": "173 of 200 fights from 200 different source videos, spliced into continuous street footage",
+            "note": "176 of 200 fights from 200 different source videos, spliced into continuous street footage (single model: 86.5%)",
             "good": true
           },
           {
             "label": "Per-clip recall",
-            "value": 92.2,
+            "value": 92.8,
             "unit": "%",
-            "note": "1,310 held-out test clips (was 83.8% for the previous model on the same clips); accuracy 92.8%",
+            "note": "1,310 held-out test clips; accuracy 93.1%",
             "good": true
           },
           {
             "label": "Precision",
             "value": 93.4,
             "unit": "%",
-            "note": "of clips flagged, the share that are genuine; 1,310 held-out test clips (FPR 6.6%, was 3.7%)",
+            "note": "of clips flagged, the share that are genuine; 1,310 held-out test clips (FPR 6.6%)",
             "good": true
           },
           {
             "label": "False alarms",
             "value": 2.0,
             "unit": "/hr",
-            "note": "across 4 held-out real cameras, 2 hours (flyover 6/hr, iloilo 2/hr, the other two 0). Previous model on the same footage: 3.0/hr.",
+            "note": "across 4 held-out real cameras, 2 hours -- all on the flyover (8/hr there), none on the other three. Single model: 2.0/hr.",
             "good": true
           }
         ],
-        "measured_on": "spliced_recall_200 + 2 h of four held-out real cameras at threshold 0.50 / 2 in a row with person-crop confirmation; per-clip figures from the 1,310-clip held-out test split",
-        "caveat": "Spliced footage is benchmark video cut into street scenes; recall on the deployment cameras themselves is unmeasured because no labelled incident has been recorded on them. On indoor UCF CCTV this model flags calm moments about twice as often as the previous one (8% vs 4% of clips)."
+        "measured_on": "spliced_recall_200 + 2 h of four held-out real cameras at threshold 0.45 / 2 in a row, two-model ensemble, person-crop confirmation; per-clip figures from the 1,310-clip held-out test split",
+        "caveat": "Spliced footage is benchmark video cut into street scenes; recall on the deployment cameras themselves is unmeasured because no labelled incident has been recorded on them. On indoor UCF CCTV clips the ensemble at 0.45 flags 19.5% of calm moments (single model at 0.50: 17.1%) while catching 58.6% of fights there (56.6%)."
       }
     },
     "weapon": {

@@ -1,0 +1,40 @@
+{
+ "run_name": "ucabal_mined_s0_seed0",
+ "arch": "x3d_xs",
+ "clip_frames": 13,
+ "frame_size": 160,
+ "input_repr": "whole_frame",
+ "head_activation": "softmax",
+ "output": "probabilities",
+ "loss": "NLLLoss(log(p))",
+ "inference_contract": "use model output directly; do not apply softmax",
+ "normalization": "(x/255 - 0.45) / 0.225",
+ "manifest": "D:/EcoVisionImagesTraining/dataset_manifest_3way_daynight_uca_bal_mined.json",
+ "unfreeze_blocks": 2,
+ "augment": true,
+ "best_val_acc": 0.8363,
+ "best_epoch": 1,
+ "val_acc_caveat": "val is the model-SELECTION split: the best checkpoint is chosen by this number, so it is optimistic. Only the 3-way manifest's test split gives an honest figure.",
+ "provenance": {
+  "started_at": "2026-10-03T20:43:52",
+  "command": "python.exe train_x3d_full.py --train --manifest-path D:/EcoVisionImagesTraining/dataset_manifest_3way_daynight_uca_bal_mined.json --init-weights D:/projects/EcoVisionCode/weights/x3d_xs_violence_scene_corpus_neg.pt --run-name ucabal_mined_s0 --epochs 10 --batch-size 8 --unfreeze-blocks 2 --backbone-lr-mult 0.1 --seed 0 --num-workers 0",
+  "seed": 0,
+  "training_repo": {
+   "commit": "d19b384",
+   "dirty": false
+  },
+  "app_repo": {
+   "commit": "912e8e0",
+   "dirty": false
+  },
+  "python": "3.11.9",
+  "host": "DESKTOP-MQVU8JH",
+  "torch": "2.5.1+cu121",
+  "cuda": "12.1",
+  "gpu": "NVIDIA GeForce GTX 1660 SUPER",
+  "manifest": {
+   "path": "D:/EcoVisionImagesTraining/dataset_manifest_3way_daynight_uca_bal_mined.json",
+   "sha256": "749c2a1b4a8b37cb29fc9b8fd869b826c705d675ff2e3ace56a910ca2e398803"
+  }
+ }
+}
