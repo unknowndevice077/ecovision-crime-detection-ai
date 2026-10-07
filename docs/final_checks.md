@@ -1,3 +1,9 @@
+> **Dated snapshot — 14 Aug 2026.** Describes that day's build. Several
+> statements below are no longer true (e.g. vandalism is now enabled and
+> labelled experimental; the deployed violence and weapon models have changed
+> twice). For the current state see the root `README.md` and
+> `detection_performance_report.md` §1.
+
 # Final checks — what changed, what was verified, what is still open
 
 Written 2026-08-14, after the shippable build. Everything below was run, not

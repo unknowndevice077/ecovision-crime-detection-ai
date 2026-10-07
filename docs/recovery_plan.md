@@ -1,6 +1,6 @@
 # Recovery plan — what to do when a piece of this breaks
 
-Written 2026-08-26. Operational procedures for failure modes, written so a
+Written 2026-08-26; status updated 2026-10-07. Operational procedures for failure modes, written so a
 non-developer running the pilot (a barangay IT aide, an on-site officer) can
 follow them, with the developer-facing detail underneath for anything that
 needs a code fix rather than a restart.
@@ -92,12 +92,11 @@ visible error instead of restart-looping forever.
 3. `sqlite3 <file> "PRAGMA integrity_check;"` — if it reports anything other
    than `ok`, the file is genuinely corrupted, not just locked.
 
-**Recommended, not yet built:** a scheduled nightly copy of the database file
-to a separate location (even just a dated copy alongside it). There is
-currently no backup cadence for the one file every incident, user, and
-camera record lives in. This is the single highest-value gap in this whole
-document — everything else here is a recoverable inconvenience; losing the
-DB with no backup is not.
+**Built (Oct 2026):** `app/maintenance.py` copies the database once a day to
+`backups/` in the writable data directory and keeps the last 14 copies. To
+restore: stop the app, copy the newest backup over the damaged `.db`, start the
+app. The backups sit on the **same disk** as the database, so they protect
+against corruption and mistakes, not against losing the machine — see §8.
 
 ---
 
@@ -106,10 +105,10 @@ DB with no backup is not.
 **Symptom:** clip saving starts failing; eventually the whole app misbehaves
 once the OS itself is low on space.
 
-**Cause:** `static/recordings/`, `static/clips/`, `static/screenshots/`
-currently grow forever — this is the same gap flagged in
-`docs/privacy_compliance_plan.md` §5 (no retention sweep exists yet), and
-it's a reliability problem as much as a compliance one.
+**Cause:** recordings and screenshots of confirmed, reported incidents are
+kept indefinitely by design. Everything else is pruned by the daily retention
+sweep (`app/maintenance.py`; dismissed alerts after 7 days, confirmed-unreported
+after 30), so disk growth now tracks real incidents, not every false alarm.
 
 **Until the retention job exists:** periodically check free space and
 manually clear old dismissed-incident clips. Never delete a clip tied to a
@@ -136,8 +135,11 @@ one.
 
 ## 7. Notification channel down (Telegram/SMS gateway outage)
 
-Relevant once `docs/incident_response_plan.md`'s notification system is
-built. If the SMS gateway or Telegram Bot API is unreachable:
+The notification system is built (`app/notifications.py`). It already does the
+first two points below: a failed send never blocks the incident, and every
+attempt — success or failure — is logged to `notify_log` against the incident.
+The third (a visible channel-status indicator) is still open. If the SMS
+gateway or Telegram Bot API is unreachable:
 
 - The in-app dashboard alert must still fire regardless — notification
   delivery must never gate whether the incident record itself gets created.
@@ -161,21 +163,20 @@ whatever) — a real risk for a machine sitting at a public camera site.
 |---|---|
 | A copy of the installer (`dist_installer/`) stored somewhere other than the dead machine | Manual — confirm one exists off-site |
 | A copy of `weights/` (the trained models — not in git, ~400MB) | Manual — confirm one exists off-site |
-| A recent database backup | **Does not exist yet** — see §4 |
+| A recent database backup | Daily copies exist (§4) but on the **same disk** — copy `backups/` off-site regularly |
 | A copy of the per-machine `config.json`/writable-config overlay | Manual — confirm one exists off-site |
 
-Until the DB backup in §4 exists, a full machine loss means losing every
-incident record the pilot has generated. Worth fixing before go-live, not
-after the first real incident.
+Until the daily backups are also copied off the machine, a full machine loss
+still means losing every incident record the pilot has generated. Worth fixing
+before go-live, not after the first real incident.
 
 ---
 
 ## Priority order
 
-1. **Database backup cadence (§4)** — nothing else here matters if this is
-   still missing when a real failure happens.
-2. **Retention sweep (§5 / privacy plan §5)** — reliability and compliance
-   both depend on it.
+1. ~~Database backup cadence (§4)~~ — **done** (daily, 14 kept). Remaining:
+   copy `backups/` off the machine.
+2. ~~Retention sweep (§5 / privacy plan §5)~~ — **done**.
 3. **Auto-restart-with-backoff for crashed children (§3)** — turns "close and
    reopen the app" into something that doesn't need a human present.
 4. Everything else is already either fixed (§1, §6) or a documented manual

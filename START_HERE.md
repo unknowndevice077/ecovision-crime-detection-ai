@@ -1,7 +1,7 @@
 # Start here
 
 The one page. What to run, which models are live, where everything lives, and
-the traps. Current as of 19 Aug 2026.
+the traps. Current as of 7 Oct 2026 (testing phase).
 
 ---
 
@@ -15,7 +15,7 @@ the traps. Current as of 19 Aug 2026.
 | **Install on another PC** | copy `EcoVisionSentinel-Setup-1.0.0.exe`, run it once | One installer, one folder-choice screen, everything lands in the folder you pick. No Python, no pip, no terminal, no internet needed at install time. Requires Inno Setup 6 on the *build* machine only — see trap #9. |
 | **Check a machine can run it** | `.venv\Scripts\python.exe preflight.py` | Weights, schema, GPU, RAM, throughput. |
 | **Speed up models for this GPU** | `.venv\Scripts\python.exe optimize_weights.py` | Optional. Prints before/after. `--revert` undoes it. |
-| **Turn a detector on/off** | Dashboard → **AI Models** tab | DevTeam login. All four classes are toggleable now — violence, robbery, vandalism, and weapon/sign detection (added 19 Aug; previously weapon detection had no switch at all). Restart detection to apply. |
+| **Turn a detector on/off** | Dashboard → **AI Models** tab | DevTeam login. All four classes are toggleable — violence, weapons, vandalism, robbery. Robbery and vandalism carry an **Experimental** badge. Restart detection to apply. |
 | **Rebuild paper figures** | `.venv\Scripts\python.exe tools\make_defense_figures.py` | → `docs\figures\` |
 | **Rebuild explainer GIFs** | `.venv\Scripts\python.exe tools\make_explainer_gifs.py` | → `docs\media\` |
 | **Rebuild the defense PDF** | `node_modules\electron\dist\electron.exe tools\html_to_pdf.js docs\model_behavior_defense.html docs\EcoVision_Defense_Reference.pdf` | See trap #5 below. |
@@ -37,32 +37,40 @@ again, exactly as before.
 | File | Loaded by | Role |
 |---|---|---|
 | `yolo11s-pose.pt` | `main.py`, hardcoded name | People + 17 body keypoints |
-| `weapon_signs.pt` | `main.py`, hardcoded name; toggle at `detection.weapon.enabled` (added 19 Aug) | Gun / Knife / Sign |
-| `x3d_xs_violence_scene_daynight.pt` | `detection.violence.scene_model_path` | **Deployed violence model** (since 18 Aug, replacing corpus_neg). Mode is `scene`, threshold 0.50, confirmations 3. Same 95.0% recall as corpus_neg; real-camera alarms 12.75 → 4.50/hr, driven almost entirely by the flyover camera (45 → 6/hr) — the camera outside Lyn's Restaurant gets *worse* (6 → 12/hr), not a uniform win. Full evidence in its `.meta.json`. |
-| `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery, threshold 0.70 |
+| `weapons_v3.pt` | `detection.weapon.model_path`; runs at 960 px | Gun / knife / phone (phone is detected so it can be dropped). Deployed 3 Oct. |
+| `x3d_xs_violence_scene_ucabal.pt` | `detection.violence.scene_model_path` | **Deployed violence model** (since 3 Oct). Mode `scene`, threshold 0.45, 2 in a row, person-crop confirmed. |
+| `x3d_xs_violence_scene_ucabal_mined.pt` | `detection.violence.scene_ensemble_paths` | Ensemble partner (since 5 Oct) — its probability is averaged with ucabal's on every check. Not used alone. |
+| `x3d_xs_violence_best.pt` | `detection.violence.model_path` | Per-track model; decides *who* gets boxed once the scene model has decided an alert fires. |
+| `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery, **experimental**, threshold 0.85, 3 in a row. |
+| `x3d_xs_vandalism_scene_v3.pt` | `detection.vandalism.model_path` | Vandalism, **experimental**, threshold 0.60, 3 in a row, person-crop confirmed. |
+| `vandalism_marks_v2.pt` | `detection.vandalism.marks_model_path` | Graffiti / tag detector feeding the vandalism wrist-motion rule. |
 
 ### Present but not running
 
-| File | Why it is here |
-|---|---|
-| `x3d_xs_violence_scene_corpus_neg.pt` | **Previously deployed**, superseded by daynight on 18 Aug. Kept for rollback — see config.json's `_scene_model_path_rollback` note. |
-| `x3d_xs_violence_best.pt` | `detection.violence.model_path` — the **per-track** model. Only loads if `mode` is `track` or `both`. `run_dev_system.bat` also checks for it. |
-| `x3d_xs_vandalism_scene.pt` | Ships so vandalism can be switched on and inspected from the AI Models tab. **Disabled by default** — 37.5% FPR at its best threshold (0.90); 87.5% at 0.50. Blocked on scene count (11 training scenes vs robbery's 26), not architecture — see `docs/vandalism_data_collection.md`. |
+Rollback targets only — `weapons_v2.pt`, `x3d_xs_violence_scene_daynight.pt`,
+`x3d_xs_violence_scene_corpus_neg.pt`, `x3d_xs_vandalism_scene.pt` (v1),
+`weapon_signs.pt`, `vandalism_marks.pt`. Each one's config note says how to roll
+back to it.
 
-`weights/archive/` holds 14 superseded files (173 MB), moved rather than deleted.
+`weights/archive/` holds superseded files, moved rather than deleted.
 `weights/README.md` explains each. **Nothing in `archive/` is loadable.**
 
 ### Measured performance
 
+All on footage the models never trained on: four held-out street cameras
+(2 h, nothing criminal in them) for false alarms, and held-out crime clips
+spliced into continuous street footage for how many events raise an alarm.
+
 | Class | State | Headline | Say this before you are asked |
 |---|---|---|---|
-| Violence | on | 95.0% of events, 17 alarms/hr | Per camera that is 0 / 6 / 45. One average hides a >45× spread. |
-| Robbery | on | 84.2% acc, 5.6% FPR | **Recall is 65.3%** — misses ~1 in 3. 8 test scenes, not 139 samples. |
-| Vandalism | **off** | — | Trained *and* measured. 70.3% accuracy is *below* the 78.4% always-guess baseline. |
+| Violence | on | 88.0% of 200 fights, 2.0 false alarms/hr | 93.1% accuracy on 1,310 test clips. The 24 misses are mostly ground fights, distant crowds and close-up/occluded views. |
+| Weapons | on | 89.6% of large guns, 39.4% of street-size guns | Small, distant guns are the hard case — under ~5% of the frame, recall is ~6%. |
+| Vandalism | on, experimental | 87.1% of 31 acts, 1.0 false alarm/hr | Only 31 test acts from few source videos — approximate. |
+| Robbery | on, experimental | 0.5 false alarms/hr | **Catches only ~40% of test clips** (8.3% of events in continuous footage). Tuned to stay quiet rather than cry wolf. |
 
-**Recall on the actual deployment cameras is unmeasured for every class** — no
-labelled incident has ever been recorded on them. Property of the problem, not
-an oversight.
+**Recall on the actual deployment cameras is still unmeasured for every class** —
+no labelled incident has ever been recorded on them. Property of the problem,
+not an oversight.
 
 ---
 
@@ -79,11 +87,14 @@ EcoVisionCode/
 ├── optimize_weights.py    optional TensorRT compilation + before/after report
 │
 ├── maincode/              the detector
-│   ├── main.py                 camera loop, weapon logic, alert emission
-│   └── x3d_violence_detector.py    model wrapper, smoothing, confirmation
+│   ├── main.py                 camera loop, alert emission
+│   ├── detection_rules.py      every alert rule (weapon gates, tracking, ARMED/ASSAULT) —
+│   │                           the evaluation scripts import this same file
+│   └── x3d_violence_detector.py    model wrapper, ensemble, person-crop confirmation, smoothing
 │
 ├── app/                   backend AND frontend share this folder (see trap #1)
-│   ├── backend.py              FastAPI: incidents, users, cameras, AI-models API
+│   ├── backend.py              FastAPI: incidents, users, permissions, audit, report requests, AI-models API
+│   ├── config_store.py         writes only the config keys someone changed
 │   ├── db.py                   SQLite by default; Postgres if DATABASE_URL set
 │   ├── globals.css             the design tokens everything follows
 │   └── components/dashboard/   DevteamView (has the AI Models tab), HistoryView…
@@ -113,6 +124,7 @@ videos extracted for future MIL work).
 | Explain the method | `docs/convolution_explainer.md` |
 | Figures for the thesis | `docs/figures/*.pdf` (vector) and `*.png` (300 dpi) |
 | What changed and why | `docs/final_checks.md` |
+| Roles, permissions, DevTeam console | `README.md` → Organization & Roles |
 
 **Never cite** `progress_report_violence_detection.pdf` or `.html` — they were
 exported 12 Aug and the `.md` gained §30–§32 on 14 Aug.
@@ -199,7 +211,7 @@ something in this area looks broken again:**
 
 | | |
 |---|---|
-| **Adopt the day+night violence model?** | Fully measured, strictly better at the current operating point. One line in `config.json`. |
-| **Retrain robbery on 400 sources?** | 43 → 400 available in `ucf_source/`. Unattended, hours. Biggest remaining win — 65.3% recall is the weakest number in the system. |
-| **Rebuild the installer?** | `package.json` changed after the last build, so the current `.exe` predates the vandalism model. |
+| **Add a vision-language double-check?** | Qwen3-VL-2B checking each alarm: violence 88.0% → 90.5% of fights at 2.0 → 0.5 false alarms/hr; robbery 8.3% → 51–60% of events at 2–3/hr. ~6 s added per alert. **Confirmed on 5 h of held-out footage (7 Oct)**: violence 90.5% at 0.4/hr, robbery 51.1% at 2.0/hr. Next step is wiring it into the app (training repo, `experiments/crop_recheck`). |
+| **Testing-phase shortcuts to revert before real use** | `TESTING_PHASE_FIXED_CREDENTIALS` in `electron/main.js`; `PrivilegesRequired=lowest` in the `.iss`. |
+| **Rebuild the installer?** | Models and config changed on 3–5 Oct; any `.exe` built before that ships the old models. |
 | **Model on/off for barangay users?** | Recommended: read-only visibility + a request-and-approve flow, **not** a direct switch. A local official with a silent off switch reproduces the project's own worst failure mode. |

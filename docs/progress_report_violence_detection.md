@@ -1,7 +1,7 @@
 # EcoVision Security Sentinel — Violence Detection Module
 ## Research Progress Report
 
-**Prepared:** August 8, 2026 · **Updated:** August 12, 2026, 15:40
+**Prepared:** August 8, 2026 · **Updated:** August 12, 2026; §35 added October 7, 2026
 **Module:** Real-time violence detection (YOLO person/pose + weapon detection, X3D-XS video classifier)
 **Scope of this report:** Architecture and methods used, datasets used, diagnosis and correction of the violence-detection subsystem, discovery and partial resolution of a deployment-blocking scale limitation, a lighting/time-of-day domain gap and a train/test split defect, camera integration for arbitrary RTSP/ONVIF hardware, and honest per-source real-world validation results with open problems clearly stated.
 
@@ -1877,6 +1877,96 @@ from adjacent classes.** Both attempts here tried to buy scene diversity
 without new footage and both came up short in a measured, specific way
 rather than an ambiguous one, which at least closes off two options
 instead of leaving them as untested assumptions.
+
+
+---
+
+## 35. October 2026: Person-Crop Confirmation, UCA Data, an Ensemble — and a Larger, Harder Test
+
+### 35.1 A larger recall set replaced the 40-fight one
+
+The 95.0% figure of §§27–31 came from **40** held-out fights spliced into night
+footage. In October that set was replaced by `spliced_recall_200`: **200 fights
+from 200 different source videos**, spliced into street footage, scored on the
+same four held-out cameras (2 h, 30 min each) for false alarms. On this harder
+set, the August deployment (daynight, whole frame, 0.50 × 3) catches **75.0% at
+5.0 false alarms/hr** — the starting point for everything below. Every row in
+this section comes from one trace format replayed through the shipped rules,
+so rows are directly comparable.
+
+### 35.2 Person-crop confirmation (deployed 1 Oct)
+
+The pose model already finds every person, so each check also scores crops
+(aspect-matched to look like whole frames) around the groups of people it
+found. The value that is smoothed and confirmed becomes
+`min(whole-frame score, best crop over the last 3 checks)` — the scene **and**
+some group of real people must both look violent.
+
+| setting | caught | false alarms/hr |
+|---|---|---|
+| whole frame 0.50 × 3 (August) | 75.0% | 5.0 |
+| whole frame 0.50 × 2 | 83.0% | 12.0 |
+| **confirmed 0.50 × 2** | **79.0%** | **3.0** |
+| confirmed 0.50 × 1 | 81.0% | 5.0 |
+
+Confirmation removes enough false alarms that two consecutive checks suffice
+instead of three, which is what buys the recall back. Using the crop to *add*
+detections ("or") gave the same recall at 3–6x the false alarms, so the crop
+only ever vetoes. The shipped detector was compared with the experiment check by
+check: identical on 720 checks.
+
+### 35.3 UCA-timestamped training data (deployed 3 Oct)
+
+§2's exclusion of UCF-Crime's violence half was right for folder-level labels.
+The UCA annotations (CVPR 2024) give event-level timestamps, which made it
+usable: **821 fight clips from 98 Fighting/Assault/Abuse videos and 835 calm
+clips** from the non-violent stretches of the same and of robbery/vandalism
+videos, so the same shops and streets appear on both sides. Fine-tuned from the
+daynight recipe (`ucabal`): **86.5% at 2.0/hr** (confirmed 0.50 × 2). The calm
+clips are not optional — with only 279 of them the same recipe caught 89.5% at
+13.0/hr. Caveat: indoor UCF calm clips alarm more (4.0% → 8.0%), so indoor shop
+cameras may see more alerts than street cameras.
+
+### 35.4 Hard-negative mining and a two-model ensemble (deployed 5 Oct)
+
+False alarms the detector raised on **training** cameras (never the held-out
+ones) were cut into clips, checked by eye on a contact sheet, and added as
+negatives to a second checkpoint. Alone it is worse (83.5%). Averaged with
+`ucabal` — the two models' calibrated probabilities, every check — it reaches
+**88.0% at 2.0/hr** at 0.45 × 2 (85.5% at 0.5/hr at 0.50 × 2). On the 1,310-clip
+test split: accuracy 93.1%, recall 92.8%, precision 93.4%.
+
+### 35.5 What the 24 misses are
+
+At the deployed setting, 24 of 200 fights raise no alarm that starts inside
+them. **4** began while an alarm from seconds earlier was still on — the camera
+was already flagged, so coverage is really 90.0%. **7** were vetoed because the
+pose model found nobody in blurry footage; a fallback that lets a very high
+whole-frame score through when no one is found recovered about half of them with no
+extra false alarms on 2 h, which is too little footage to adopt it yet. **13**
+the model scored low: ground fights, distant crowd scuffles, close-up or
+occluded views — and three vertical phone videos unlike any CCTV.
+
+### 35.6 Second-stage verification (measured, not deployed)
+
+Loosening the detector raises its ceiling only slightly (92.5% at 0.25 × 1, at
+10.5 false alarms/hr), so the question became whether a slower model could
+check each alarm. Each alarm's 2-second clip was scored by a video-language
+model with a yes/no question, the cut-off fitted on half the source videos and
+scored on the other half:
+
+| | caught | false alarms/hr | time per alarm |
+|---|---|---|---|
+| deployed | 88.0% | 2.0 | — |
+| 0.25 × 1 + **Qwen3-VL-2B** | **90.5%** | **0.5** | ~6 s |
+| 0.25 × 2 + Cosmos-Embed1 (224 px) | 90.0% | 2.0 | ~9 s |
+| 0.25 × 1 + Qwen3-VL-4B (4-bit) | 90.0% | 1.0 | ~32 s |
+
+The same verifier lifted robbery from 8.3% to 51–60% of events at 2–3 false
+alarms/hr. First measured on 2 hours of camera footage, then re-tested on 5
+hours (three more hours of the held-out streams recorded 6 Oct): the deployed
+ensemble held at 88.0% with 1.4 false alarms/hr, and the Qwen3-VL-2B cascade at
+90.5% with 0.4/hr.
 
 ---
 

@@ -1,27 +1,167 @@
 # EcoVision Detection Performance — Full Report
 
-As of 2026-08-19. Every number is measured and traceable to a script in the
-repository. Nothing is estimated, and where a figure rests on something thin it
-says so on the same line.
+Updated 2026-10-07. Every number is measured and traceable to a script — in
+this repository or in the training repository's `experiments/crop_recheck` —
+and to the `config.json` note beside the setting it justifies. Nothing is
+estimated, and where a figure rests on something thin it says so on the same
+line.
+
+**How to read this file.** §1 is the current state of every detector, measured
+in October 2026 on one harness. §§2–8 are the **August record**: they describe
+the models and settings of that time (the daynight violence checkpoint,
+`weapon_signs` / `weapons_v2`, vandalism disabled) and are kept because the
+reasoning and the negative results still hold. Do not quote a §§2–8 number as
+the current system.
 
 ---
 
-## 1. The one-page answer
+## 1. The one-page answer (October 2026)
 
-| class | status | detection rate | false alarms |
+### 1.1 How everything below was measured
+
+- **False alarms per hour**: 2 hours of four held-out street cameras (Agdao
+  flyover, Agdao market, Iloilo Guiez St, outside Lyn's Restaurant — 30 min
+  each, nothing criminal in them, never used in any training), replayed
+  through the shipped smoothing and confirmation rules.
+- **Events caught**: held-out crime clips spliced into continuous street
+  footage and replayed the same way. An event counts if an alarm starts
+  between its start and 3 s after its end. Violence: `spliced_recall_200`
+  (200 fights from 200 different source videos). Robbery: 133 events.
+  Vandalism: 31 acts from the v3 test split (few source videos).
+- **Per-clip figures**: each model's own held-out test split, one forward pass
+  per clip.
+- All rules come from `maincode/detection_rules.py` and
+  `maincode/x3d_violence_detector.py` — the same code the app runs. The
+  shipped detector was checked against the experiment check by check
+  (`verify_shipped.py`): identical values on 720 checks.
+
+### 1.2 Current numbers
+
+| class | status | setting | events caught | false alarms / hr | per-clip |
+|---|---|---|---|---|---|
+| **Violence** | deployed | two-model ensemble, person-crop confirmed, 0.45 × 2 | **88.0%** (176/200) | **2.0** | acc 93.1%, recall 92.8%, precision 93.4% (1,310 clips) |
+| **Weapons** | deployed | `weapons_v3` at 960 px, gun 0.30 / knife 0.23 | see §1.5 | 112 raw detections/hr (not alerts) | — |
+| **Vandalism** | experimental | v3, person-crop confirmed, 0.60 × 3 | **87.1%** (27/31) | **1.0** | acc 74.5% vs 62.7% baseline |
+| **Robbery** | experimental | 0.85 × 3 | 8.3% of events; **39.8%** of test clips | **0.5** | clip FPR 3.0% |
+
+**Recall on the actual deployment cameras is unmeasured for every class**,
+because no labelled incident has ever been recorded on them.
+
+### 1.3 Violence — what changed since August
+
+| step (date) | setting | events caught | false alarms/hr |
 |---|---|---|---|
-| **Physical injury (violence)** | deployed | **95.0%** on continuous footage (38/40 events) | **17 / hour** across 3 cameras |
-| **Robbery** | deployed | **65.3%** of clips in unseen scenes | **5.6%** of normal clips |
-| **Vandalism** | **disabled** | 0% — the shipped rule has never fired | n/a |
-| **Weapons & signs** | deployed | **88.7%** recall on 3,001 test images | **99.3%** precision — see §5.3 before quoting an FPR |
+| daynight, whole frame (Aug) | 0.50 × 3 | 75.0% | 5.0 |
+| + person-crop confirmation (1 Oct) | 0.50 × 2 | 79.0% | 3.0 |
+| ucabal checkpoint (3 Oct) | 0.50 × 2 | 86.5% | 2.0 |
+| **+ ensemble partner (5 Oct, deployed)** | **0.45 × 2** | **88.0%** | **2.0** |
 
-Read the rest before quoting any of these. In particular, **recall on the
-actual deployment cameras is unmeasured for every class**, because no labelled
-incident has ever been recorded on them.
+All four rows on the same 200 fights and the same 2 h of cameras. (The
+August §2.3 figure of 95.0% was on 40 fights spliced into night footage — a
+smaller, easier set; the 200-fight set replaced it.)
+
+- **Person-crop confirmation**: each check also scores crops around the groups
+  of people the pose model found; the value that is smoothed and confirmed is
+  min(whole-frame score, best crop over the last 3 checks). Using the crop to
+  *add* detections instead gave the same recall at 3–6× the false alarms, so
+  the crop only ever vetoes.
+- **ucabal** adds 821 fight clips and 835 calm clips cut from UCF-Crime at the
+  UCA (CVPR 2024) event timestamps — same shops and streets on both sides.
+- **Ensemble**: a second checkpoint (ucabal recipe + 6 false-alarm clips mined
+  from training cameras) whose probability is averaged with ucabal's. Alone it
+  is worse (83.5%); averaged, the two make different mistakes.
+- All 2.0/hr come from the Agdao flyover camera (8/hr there); the other three
+  cameras gave none.
+- **Caveat**: on indoor UCF CCTV, the ensemble flags 19.5% of calm moments
+  (single model 17.1%) — indoor shop and restaurant cameras may see more
+  alerts than street cameras.
+- **The 24 missed fights**: 4 began while an alarm from a moment earlier was
+  still on (the camera was already flagged), 7 were blocked because the pose
+  model found nobody in blurry footage, and 13 the model scored low — ground
+  fights, distant crowd scuffles, close-up or occluded views, and 3 vertical
+  phone videos unlike any CCTV.
+
+### 1.4 Vandalism and robbery
+
+- **Vandalism** was re-enabled with person-crop confirmation (4 Oct): whole
+  frame at 0.70 × 3 caught 87.1% at 6.0/hr; confirmed at 0.60 × 3 it catches
+  the same 87.1% at **1.0/hr**. Only 31 test acts from few source videos —
+  treat recall as approximate.
+- **Robbery** threshold 0.70 → 0.85 (3 Oct): false alarms 12.0 → 0.5/hr
+  (market 28/hr at 0.70), clip recall 54.2% → 39.8%. Rejected since, each on
+  measurement: a retrain on 737 UCF robbery clips (13.3% recall, 17.5/hr) and
+  robbery v5 (started from the violence model, 1,824
+  Davao street negatives + 71 mined false alarms: **40.5/hr** at 0.85 × 2 on the
+  held-out cameras). One look at a whole frame cannot tell a robbery from an
+  ordinary hand-off in a busy market.
+
+### 1.5 Weapons
+
+`weapons_v3` (3 Oct): fine-tuned from v2 at 960 px with 7,500 synthetic
+street-camera frames — real gun/knife cut-outs pasted at the wrists of real
+people in our own Davao footage, at street-camera size, plus untouched frames
+from the same cameras. Val/test are v2's, 100% real.
+
+| guns, by share of frame | v2 at 960 | **v3 at 960** |
+|---|---|---|
+| under 5% | — | ~6% |
+| 5–10% (street-camera size) | 39.8% | **39.4%** (14% for v2 as it ran, at 640) |
+| 10–20% | 73.1% | 65.9% |
+| 40%+ | 90.1% | **89.6%** |
+| knives 5–10% | 75.7% | **83.8%** |
+| **false weapons/hr**, 4 h of weapon-free street footage | 909 | **112** |
+
+112/hr is detection pressure after tracking and the static-object filter,
+not operator alerts: an ARMED alert also needs the weapon assigned to a person
+track for 4 frames. Measured and rejected (Oct): running the detector a second
+time on crops around each person — +8.6 points on tiny guns for +5% false
+detections and up to 6 extra inferences per frame.
+
+### 1.6 Research, not deployed
+
+A second-stage check by a vision-language model: the fast detector runs at a
+looser setting and each alarm's 2-second clip is scored by **Qwen3-VL-2B**
+(yes/no question, log-probability of "Yes" minus "No"; ~6 s and ~4 GB VRAM per
+alarm on a GTX 1660). Cut-off fitted on half the source videos and scored on
+the other half.
+
+| | events caught | false alarms/hr |
+|---|---|---|
+| violence, deployed | 88.0% | 2.0 |
+| violence, 0.25 × 1 + Qwen3-VL-2B | **90.5%** | **0.5** |
+| violence, 0.25 × 2 + Cosmos-Embed1 | 90.0% | 2.0 |
+| robbery, deployed | 8.3% | 0.5 |
+| robbery, 0.60 × 2 + Qwen3-VL-2B | **51.1%** | **2.0** |
+| robbery, 0.50 × 2 + Qwen3-VL-2B | **60.2%** | 3.0 |
+
+Qwen3-VL-4B (4-bit) was no better and ~32 s per alarm.
+
+**Re-test on 5 hours (7 Oct).** Three more hours of the held-out streams were
+recorded on 6 Oct (Agdao market, outside Lyn's Restaurant, and a basketball
+court at a barangay hall that was new to testing) and every setting re-scored
+on all 5 hours:
+
+| | 2 h | **5 h** |
+|---|---|---|
+| violence, deployed (0.45 × 2) | 88.0% @ 2.0/hr | **88.0% @ 1.4/hr** |
+| violence, 0.25 × 1 + Qwen3-VL-2B | 90.5% @ 0.5/hr | **90.5% @ 0.4/hr** |
+| violence, 0.25 × 2 + Cosmos-Embed1 | 90.0% @ 2.0/hr | 90.0% @ 1.6/hr |
+| vandalism, deployed (0.60 × 3) | 87.1% @ 1.0/hr | **87.1% @ 0.6/hr** |
+| robbery, deployed (0.85 × 3) | 8.3% @ 0.5/hr | 8.3% @ 1.4/hr |
+| robbery, 0.60 × 2 + Qwen3-VL-2B | 51.1% @ 2.0/hr | **51.1% @ 2.0/hr** |
+| robbery, 0.50 × 2 + Qwen3-VL-2B | 60.2% @ 3.0/hr | **60.2% @ 1.8/hr** |
+
+The verifier's gains held. The deployed robbery model got noisier on the new
+footage (5 of its 7 false alarms came from one hour outside Lyn's Restaurant),
+which is the same failure the verifier removes.
+
 
 ---
 
-## 2. Violence
+> **Everything from here down is the August 2026 record** — see "How to read
+> this file" above.
+
+## 2. Violence (August record — daynight checkpoint)
 
 ### 2.1 What it is trained on
 
@@ -129,7 +269,7 @@ flattering.
 
 ---
 
-## 3. Robbery
+## 3. Robbery (August record — threshold 0.70)
 
 ### 3.1 Data
 
@@ -179,7 +319,7 @@ deployed detector code path, one forward pass per test clip.
 
 ---
 
-## 4. Vandalism — disabled, and why
+## 4. Vandalism — why it was disabled in August (re-enabled since, see §1.4)
 
 ### 4.1 The shipped rule has never fired
 
@@ -237,7 +377,7 @@ that gap is filming, not filtering — every new location is a new scene. See
 
 ---
 
-## 5. Weapons and signs
+## 5. Weapons and signs (August record — `weapon_signs.pt`, superseded twice; see §1.5)
 
 The only class in this system that is an **object detector** rather than a
 video classifier: a single YOLO model (`weights/weapon_signs.pt`) with three

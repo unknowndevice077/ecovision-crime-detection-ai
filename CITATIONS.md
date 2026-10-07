@@ -33,6 +33,20 @@ venue/year against the dataset's own page before quoting it.
   ~1,600 folder-labelled-only crime videos were deliberately excluded, since a
   ten-minute video labelled "violent" for a twenty-second act would teach the
   model that the CCTV look itself means the crime.
+- **UCA (UCF-Crime Annotation)** — Tongtong Yuan et al., *"Towards
+  Surveillance Video-and-Language Understanding: New Dataset, Baselines, and
+  Challenges,"* CVPR 2024 (verify author list before citing formally). Its
+  event-level timestamps for UCF-Crime were used (Oct 2026) to cut **821 fight
+  clips from 98 Fighting/Assault/Abuse videos and 835 calm clips** from the
+  non-violent stretches of the same and of robbery/vandalism videos, so the
+  same shops and streets appear on both sides — the deployed `ucabal`
+  checkpoint and its ensemble partner. This is the first use of UCF-Crime's
+  violence half; the August models excluded it because folder-level labels
+  alone mark whole indoor videos as violent.
+- **Philippine street CCTV** — clips recorded from public live street-camera
+  streams in Davao City (and one Iloilo camera) and used as *normal*
+  (non-violent) examples, split by camera; the four held-out evaluation
+  cameras were never used for training.
 - **CCTV-Fights** — official dataset from NTU ROSE Lab (registration-gated);
   this project used an unofficial Kaggle mirror
   (`shreyj1729/cctv-fights-dataset`) while the official registration was
@@ -54,7 +68,14 @@ venue/year against the dataset's own page before quoting it.
   to outdoor robbery-relevant clips via `filter_ucf_property_crime.py`'s
   `ROBBERY_OUTDOOR` allowlist.
 
-## Weapon detection (`weapons_v2.pt`)
+## Weapon detection (`weapons_v3.pt`)
+
+`weapons_v3.pt` (deployed Oct 2026) is `weapons_v2.pt` fine-tuned with 7,500
+**synthetic** street-camera frames built from the project's own Davao street
+footage: real gun and knife cut-outs from the v2 *training* images below,
+pasted at the wrists of real people at street-camera scale, plus untouched
+frames from the same cameras. No evaluation camera was used as a background.
+The real-image sources are unchanged from v2:
 
 Seven Roboflow Universe exports, merged into one gun/knife/phone dataset
 (`build_weapon_dataset.py`, `merge_weapons.py`) and split by base image with
@@ -78,7 +99,11 @@ to be emitted as one of those two classes with no alternative, which is what
 produced the false-alarm rate that motivated retraining v2 in the first place
 (see `README.md`'s Weapon detection entry for the measured numbers).
 
-## Vandalism detection (`vandalism_marks_v2.pt`)
+## Vandalism detection (`x3d_xs_vandalism_scene_v3.pt`, `vandalism_marks_v2.pt`)
+
+- The X3D vandalism model is trained on vandalism footage from 26 source videos
+  (largely **UCF-Crime**; the full list is in the training manifest), with real
+  Davao street clips as negatives, split by camera.
 
 - **17k-graffiti** — Roboflow Universe mirror (`detr-2bavb/17k-graffiti` v1,
   CC BY 4.0, <https://universe.roboflow.com/detr-2bavb/17k-graffiti>) of the
@@ -91,6 +116,13 @@ produced the false-alarm rate that motivated retraining v2 in the first place
   baseline `vandalism_marks.pt` before the 17k-graffiti expansion) — its exact
   upstream source was not preserved in a locally-recoverable form; if you can
   trace it, please open an issue so this file can be corrected.
+
+## Pretrained backbones
+
+- **X3D-XS**, Kinetics-400 pretrained — Christoph Feichtenhofer, *"X3D:
+  Expanding Architectures for Efficient Video Recognition,"* CVPR 2020; weights
+  via [PyTorchVideo](https://github.com/facebookresearch/pytorchvideo)
+  (Apache-2.0). Every violence, robbery and vandalism model starts from it.
 
 ## Pose tracking (`yolo11s-pose.pt`)
 

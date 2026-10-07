@@ -29,6 +29,13 @@ machine. Fixed 18 Aug.)
 
 ### What was actually measured
 
+> **Measured 19 Aug 2026 with four models.** The deployed set has grown since:
+> weapons now run at 960 px instead of 640, violence runs two models averaged,
+> and vandalism adds an X3D model plus a graffiti detector. Expect more GPU
+> memory and somewhat lower throughput than the table below; re-measure on the
+> target machine with `tools\measure_min_specs.py` (or `preflight.py`, which
+> reports throughput) before relying on these figures.
+
 | | GPU | CPU only |
 |---|---|---|
 | throughput | 8.9 FPS (113 ms/frame) | 2.9 FPS (345 ms/frame) |
@@ -195,16 +202,19 @@ open. If detection then misbehaves, that output is the first place to look.
 
 | model | file | role |
 |---|---|---|
-| YOLO11s-pose | `weights/yolo11s-pose.pt` | person detection and tracking |
-| weapon/sign | `weights/weapon_signs.pt` | Gun / Knife / Sign |
-| X3D violence | `weights/x3d_xs_violence_scene_daynight.pt` | physical injury |
-| X3D robbery | `weights/x3d_xs_robbery_scene.pt` | robbery |
+| YOLO11s-pose | `weights/yolo11s-pose.pt` | person detection, tracking, wrist keypoints |
+| YOLO weapons v3 | `weights/weapons_v3.pt` | gun / knife / phone, at 960 px |
+| X3D violence (×2) | `weights/x3d_xs_violence_scene_ucabal.pt` + `..._ucabal_mined.pt` | physical violence, two models averaged |
+| X3D violence, per-track | `weights/x3d_xs_violence_best.pt` | which person an alert is attributed to |
+| X3D robbery | `weights/x3d_xs_robbery_scene.pt` | robbery (experimental) |
+| X3D vandalism v3 | `weights/x3d_xs_vandalism_scene_v3.pt` | vandalism (experimental) |
+| YOLO graffiti marks v2 | `weights/vandalism_marks_v2.pt` | graffiti / tags for the vandalism rule |
 
 Each may be accompanied by a `.engine` file built by the optimize step above.
 Where one exists and loads, it is used; otherwise the `.pt` is.
 
 **`.engine` files are never packaged, and this is enforced in the build.**
-`package.json`'s `extraResources` lists those six files explicitly rather than
+`package.json`'s `extraResources` lists the deployed files explicitly rather than
 copying `weights/` wholesale. An earlier build did copy the whole folder, which
 shipped this machine's engines to a machine that cannot load them — 70 MB that
 fails on every launch — plus ~200 MB of superseded checkpoints nothing loads.
@@ -214,31 +224,25 @@ old per-file weight checks in `build_release.bat` did.
 
 If you add or replace a deployed model, update **both** lists.
 
-**Vandalism ships disabled.** Both routes were measured and both failed: the
-trained model fires on 7 of 8 normal clips, and the rule-based fallback fired
-on 0 of 40 real vandalism clips because its gate needs a YOLO `Sign` detection
-that never occurs. Rather than emit a fabricated confidence from a branch that
-cannot fire, the class is switched off, with the measurements recorded in
-`config.json` under `detection.vandalism`. See
-`docs/vandalism_data_collection.md` for what would enable it.
+**Robbery and vandalism ship enabled but labelled experimental** in the AI
+Models tab. Each can be switched off there.
 
 ### Expected behaviour at the shipped settings
 
-Violence, threshold 0.50 with `consecutive_required` 3, measured on 60 minutes
-of held-out Philippine street CCTV:
+Measured on 2 hours of four held-out street cameras (nothing criminal in them)
+and on held-out crime clips spliced into continuous street footage:
 
-| camera | alarms/hour |
-|---|---|
-| agdao_market | 0 |
-| outside Lyn's | 6 |
-| agdao_flyover (PTZ) | 45 |
+| detector | setting | events caught | false alarms / hour |
+|---|---|---|---|
+| Violence (2 models, person-crop confirmed) | 0.45, 2 in a row | 88.0% of 200 fights | 2.0 |
+| Vandalism (person-crop confirmed) | 0.60, 3 in a row | 87.1% of 31 acts | 1.0 |
+| Robbery | 0.85, 3 in a row | ~40% of test clips | 0.5 |
 
-Detection rate is 95.0% on continuous spliced footage. **The flyover is the
-worst case** and a known limitation; the other two are quiet. A single
-system-wide number would hide a spread of more than 45×.
-
-Robbery, threshold 0.70: 84.2% accuracy, 65.3% recall, 86.5% precision, 5.6%
-FPR — measured on 8 source videos the model never trained on.
+False alarms are not spread evenly — busy scenes produce most of them
+(violence: all on the Agdao flyover PTZ); quiet fixed cameras produce almost
+none. Weapons: 89.6%
+recall on large guns, 39.4% on street-camera-size guns; a weapon alert also
+needs the weapon assigned to a person's wrist.
 
 Full numbers: `docs/detection_performance_report.md`.
 

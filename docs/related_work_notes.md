@@ -255,3 +255,60 @@ in this repository, not cited.
   detector class that fired 0 times in 3,600 frames. Per-condition
   instrumentation distinguishes "needs tuning" from "cannot fire", and the two
   have nothing in common as problems.
+
+---
+
+# Part III — references compiled 2026-10-07
+
+Literature behind the October work. Verification status as in Part II: the
+paper, venue and headline claim were checked on the authors' own page or
+arXiv listing; exact figures should still be re-checked before formal citation.
+
+## 10. Event-level annotations for UCF-Crime
+
+- **UCA — UCF-Crime Annotation** (Yuan et al., *Towards Surveillance
+  Video-and-Language Understanding: New Dataset, Baselines, and Challenges*,
+  CVPR 2024). Adds timestamped, sentence-level event descriptions to UCF-Crime.
+  This project uses only the timestamps: they turn UCF-Crime's fight videos into
+  usable clips (the act itself, plus calm stretches of the same scene as
+  negatives), which folder-level labels never allowed. Result here: violence
+  79.0% → 86.5% of fights at lower false alarms (`detection_performance_report.md` §1.3).
+
+## 11. Spatial cropping, revisited
+
+- **CUE-Net** (Senadeera et al., CVPRW 2024; [arXiv 2404.18952](https://arxiv.org/abs/2404.18952))
+  crops around detected people before classifying. Section 8 noted this; in
+  October it was implemented as a *confirmation* step rather than a second
+  detector: the whole-frame alarm must be backed by a crop around real people.
+  Measured here, crops used to *add* detections tripled false alarms; used to
+  *veto*, they cut false alarms by ~40% and allowed a faster confirmation rule.
+
+## 12. Vision-language models as alarm verifiers
+
+- **Fine-grained prompting of VLMs for VAD** — [*Unlocking Vision-Language Models for Video Anomaly Detection via Fine-Grained Prompting*](https://arxiv.org/abs/2510.02155) (WACV 2026)
+  reports ~89.8% AUC on UCF-Crime with Qwen2.5-VL-7B and no task training;
+  Holmes-VAD and HiProbe-VAD sit close behind. The point for this project is
+  not the AUC but that a general video-language model can judge a clip it was
+  never trained on, and explain the judgement.
+- **NVIDIA's surveillance blueprint (VSS)** uses the same shape this project
+  measured: a fast detector raises candidates, a larger video-language model
+  verifies each one. **Cosmos-Embed1** (NVIDIA, commercial-use licence) was
+  tested here as that verifier.
+- **Qwen3-VL** (Alibaba, 2025) — the strongest open-weight family at small
+  sizes; the 2B model fits a 6 GB GPU in fp16. Measured here: as a verifier it
+  beat Cosmos-Embed1 and its own 4B sibling, at ~6 s per alarm.
+- **Evaluation of Vision-LLMs in Surveillance Video** ([arXiv 2510.23190](https://arxiv.org/pdf/2510.23190))
+  — useful for calibrating claims: VLMs are strong at "is something wrong here"
+  and weaker at fine temporal localisation, which is why this project uses them
+  only to check an alarm the fast detector has already placed in time.
+
+## 13. Small-object weapon detection
+
+The standard levers — copy-paste augmentation of small objects into new
+backgrounds, scale jitter, and sliced inference (SAHI) — are surveyed in
+[*AI-Based Weapon Detection for Security Surveillance: Recent Research Advances (2016–2025)*](https://www.mdpi.com/2079-9292/14/23/4609).
+This project applied copy-paste in its strongest form (real cut-outs placed at
+real people's wrists in the deployment cameras' own footage, `weapons_v3`), and
+measured a person-crop second pass as a light form of slicing (+8.6 points on
+tiny guns for much more GPU time — rejected). Guns under ~5% of the frame
+remain an open problem in the literature as well as here.

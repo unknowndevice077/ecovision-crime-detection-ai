@@ -17,9 +17,9 @@ friends), not by this list -- check there first if the two ever disagree.
 | `x3d_xs_violence_scene_ucabal.pt` | `detection.violence.scene_model_path` | **The deployed violence model** (2026-10-03). daynight + timestamped UCF-Crime fights and same-venue calm clips. Mode is `scene`, so this is the one that runs. |
 | `x3d_xs_violence_scene_ucabal_mined.pt` | `detection.violence.scene_ensemble_paths` | **Ensemble partner** (2026-10-05). The ucabal recipe plus 6 false-alarm clips mined from training cameras; averaged with ucabal it catches 88.0% of fights at 2.0 false alarms/hr (ucabal alone 86.5%). Not used on its own. |
 | `x3d_xs_violence_scene_daynight.pt` | rollback only | Previous violence model. Not packaged. |
-| `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery, threshold 0.70 |
+| `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery (experimental), threshold 0.85 x 3 in a row: 0.5 false alarms/hr on held-out cameras, 39.8% clip recall. Every retrain since has been measured and rejected -- see config's `_confidence_threshold_085`. |
 | `vandalism_marks_v2.pt` | `detection.vandalism.marks_model_path` | Graffiti / marks detector used by the vandalism rule |
-| `x3d_xs_vandalism_scene_v3.pt` | `detection.vandalism.model_path` | Vandalism clip model. Measured at ~21.75 false alarms/hr on real cameras -- see config's `_v3_result` before relying on it. |
+| `x3d_xs_vandalism_scene_v3.pt` | `detection.vandalism.model_path` | Vandalism (experimental), 0.60 x 3 with person-crop confirmation: 87.1% of 31 held-out acts at 1.0 false alarm/hr (6.0/hr whole-frame only). See config's `_person_confirm`. |
 
 ## Present but not currently running
 

@@ -1,3 +1,13 @@
+> **Status, 7 Oct 2026.** This is the original August design; it was
+> implemented and then extended in September: a DevTeam Developer Console split
+> into Monitoring and Configuration, permissions narrowed to single cameras or
+> crime types (`permission_grants`), custom roles as named presets on top of
+> `BARANGAY_STAFF` / `PNP_OFFICER`, police-only crime archives
+> (`view_history` / `view_records` refused for barangay accounts), identity
+> verification, barangay→police report requests, application lifecycles for
+> self-signup locations, and an audit log with soft-delete/restore. The root
+> `README.md` (Organization & Roles) describes the current model.
+
 # User Hierarchy Redesign — Plan
 
 Status: **proposal, nothing implemented.** Written for review.

@@ -1,4 +1,4 @@
-# Installer — why it is a 7-Zip SFX and not NSIS
+# Installer — why it is Inno Setup and not NSIS
 
 `package.json`'s `build.win.target` is `dir` only. That is deliberate, and this
 file exists because the reason cannot live in `package.json`: electron-builder
@@ -43,19 +43,28 @@ rather than a size limit.
 
 ## What is shipped instead
 
-`tools\build_sfx_installer.ps1` builds a 7-Zip self-extracting `.exe`, which has
-no such ceiling and behaves like an installer: it prompts, extracts to a chosen
-folder, and launches the app.
+**Inno Setup** (updated Oct 2026). Inno Setup streams its payload instead of
+memory-mapping it, so it has no ~2 GB ceiling, and it handles the uninstall
+entry, shortcuts and folder choice natively.
 
 ```
-npm run app:build
-powershell -ExecutionPolicy Bypass -File tools\build_sfx_installer.ps1
+npm run installer
 ```
 
-The script gates itself on `preflight.py` and additionally verifies that every
-model named in the *packaged* `config.json` is present in the *packaged*
-`weights` folder — the failure mode that nearly shipped on 2026-08-22, when
-`package.json`'s weights whitelist still named three superseded checkpoints.
+which runs `npm run app:build` and then `toolsuild_installer.ps1`, which
+compiles `tools\installer.iss` with `ISCC.exe` (Inno Setup 6 or 7; install with
+`winget install JRSoftware.InnoSetup.7`). The CI workflow and
+`build_release.bat` compile `installer\EcoVisionSentinel.iss` the same way.
+
+The build gates itself on `preflight.py`, which checks that every model named
+in `config.json` is present **and** bundled by `package.json`'s
+`extraResources` filter — the failure mode that nearly shipped on 2026-08-22,
+when that whitelist still named superseded checkpoints.
+
+An earlier pipeline built a 7-Zip self-extracting `.exe`
+(`toolsuild_sfx_installer.ps1`, now retired): it was not a real installer,
+and the hand-written uninstall and registration scripts it needed each had
+their own bug.
 
 ## Known limitation
 

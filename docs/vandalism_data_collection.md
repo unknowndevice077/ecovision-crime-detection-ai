@@ -1,3 +1,10 @@
+> **Status, 7 Oct 2026.** Not executed. Vandalism has since been enabled as
+> an experimental class — real street negatives and then person-crop
+> confirmation brought the trained model to 87.1% of 31 held-out acts at 1.0
+> false alarm/hr — but those 31 acts come from few source videos, and no public
+> dataset of the graffiti act exists. Filming the locations below is still the
+> way to measure (and improve) recall on this project's own cameras.
+
 # Collecting Vandalism Footage That Will Actually Train
 
 ## Why this exists

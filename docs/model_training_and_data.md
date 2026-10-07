@@ -1,6 +1,7 @@
 # How every model was trained, and where its data came from
 
-Compiled 2026-08-21. One section per model: what it does, how it is implemented,
+Compiled 2026-08-21, updated 2026-10-07 for the October models (violence ensemble,
+`weapons_v3`, vandalism re-enabled, robbery at 0.85). One section per model: what it does, how it is implemented,
 which datasets it was built from with links, the exact training configuration,
 what it measures, and what would improve it.
 
@@ -51,7 +52,11 @@ Four reasons, each measured or reasoned rather than assumed:
 
 ## 1. Violence — X3D-XS scene classifier
 
-**Deployed:** `weights/x3d_xs_violence_scene_daynight.pt` (18 Aug)
+**Deployed (Oct 2026):** `weights/x3d_xs_violence_scene_ucabal.pt` **averaged with**
+`weights/x3d_xs_violence_scene_ucabal_mined.pt`, person-crop confirmed, threshold
+0.45, 2 checks in a row. (August: `x3d_xs_violence_scene_daynight.pt` — the
+sections below on data and negatives describe how that checkpoint was built,
+and `ucabal` is fine-tuned on top of the same recipe.)
 
 ### Architecture and implementation
 
@@ -86,6 +91,7 @@ softmax` for that reason.
 | **UCF-Crime** | untrimmed real CCTV, 13 anomaly classes | [crcv.ucf.edu/projects/real-world](https://www.crcv.ucf.edu/projects/real-world/) |
 | **CCTV-Fights** | additional fight footage | Kaggle |
 | **Davao street capture** | in-domain negatives, 26 cameras | captured for this project |
+| **UCA** (UCF-Crime Annotation, CVPR 2024) | event timestamps used to cut 821 fight + 835 calm clips from UCF-Crime (Oct) | see `CITATIONS.md` |
 
 **Licensing note that belongs in the paper:** RWF-2000 may not be modified or
 redistributed without SMIIP Lab approval and is non-commercial. SCVD accompanies
@@ -106,15 +112,41 @@ fell 12.75 → 4.50/hr. **Not a uniform win:** the flyover camera improved 45 �
 alarms/hr, but Lyn's Restaurant got *worse*, 6 → 12/hr. The aggregate hides that
 spread, which is why the per-camera breakdown lives in the checkpoint sidecar.
 
-### Measured
+### October: three changes, each measured on the same footage
+
+On 200 held-out fights from 200 different source videos spliced into street
+footage, plus 2 h of four held-out real cameras:
+
+| change | setting | fights caught | false alarms/hr |
+|---|---|---|---|
+| daynight, whole frame (Aug) | 0.50 × 3 | 75.0% | 5.0 |
+| **person-crop confirmation** | 0.50 × 2 | 79.0% | 3.0 |
+| **ucabal** — + 821 UCA-timestamped UCF fights and 835 same-venue calm clips | 0.50 × 2 | 86.5% | 2.0 |
+| **ensemble** — averaged with a partner trained with 6 mined false alarms | 0.45 × 2 | **88.0%** | **2.0** |
+
+- *Person-crop confirmation*: each check also scores crops (aspect-matched to
+  whole frames) around the groups of people the pose model found; the value
+  that is smoothed is min(whole-frame score, best crop over the last 3 checks).
+- *Same-venue calm clips* matter as much as the fights: the unbalanced ucabal
+  variant with only 279 calm clips caught 89.5% but at 13.0 false alarms/hr.
+- *Hard-negative mining*: the partner model adds false alarms the detector
+  raised on **training** cameras (never the held-out ones) as negatives. Alone
+  it is worse (83.5%); averaged, the two make different mistakes.
+- Per-clip on the 1,310-clip test split, ensemble at 0.45: accuracy 93.1%,
+  recall 92.8%, precision 93.4%.
+
+### Measured (August, daynight)
 
 **95.0% of events detected** (38/40) on continuous spliced footage at threshold
 0.50 / `consecutive_required=3`; **4.50 false alarms/hour** aggregate across
-three real cameras.
+three real cameras. (A smaller, easier 40-fight night set — the 200-fight set
+above replaced it.)
 
 ### What would improve it
 
-- **Person-crop two-stage** — [CUE-Net (CVPR 2024W)](https://arxiv.org/abs/2404.18952) reaches SOTA by cropping around detected people specifically to handle distant subjects. Measured here: at 15% person height the model detects 7/40; at 9%, **0/40**. A wide city camera puts a person at 6–12%.
+- **Person-crop two-stage** — [CUE-Net (CVPR 2024W)](https://arxiv.org/abs/2404.18952) reaches SOTA by cropping around detected people specifically to handle distant subjects. **Done in October as a confirmation step** (above); using crops to *add* detections was also measured and gave the same recall at 3–6× the false alarms. Distant subjects remain the limit: at 15% person height the model detects 7/40; at 9%, **0/40**.
+- **More examples of the misses** — of the 24 fights the ensemble misses, 13 are scored low by the model: ground fights, distant crowd scuffles, close-up or occluded views.
+- **A vision-language verifier** — see §8.
 - **Scene-bias debiasing** — [Choi et al., NeurIPS 2019](https://proceedings.neurips.cc/paper_files/paper/2019/file/ab817c9349cf9c4f6877e1894a1faa00-Paper.pdf), adversarial scene loss + human-mask confusion loss.
 - **Mean Teacher on unlabeled Philippine capture** — removes the current risk that footage *assumed* violence-free is trained as negative when a real incident occurs in it.
 
@@ -122,7 +154,7 @@ three real cameras.
 
 ## 2. Robbery — X3D-XS, same architecture, different manifest
 
-**Deployed:** `weights/x3d_xs_robbery_scene.pt` · threshold 0.7
+**Deployed:** `weights/x3d_xs_robbery_scene.pt` · threshold **0.85** (0.70 until 3 Oct) · 3 in a row · labelled experimental
 
 Identical architecture and training recipe, initialised from the violence
 checkpoint (`corpus_neg`), `unfreeze_blocks=2`. **26 train / 9 val / 8 test
@@ -138,15 +170,29 @@ scenes.**
 and the figure comes from 139 clips drawn from **eight** source videos — not 139
 independent samples.
 
+**October:** at 0.70 it raised 12.0 false alarms/hr on the held-out cameras
+(28/hr on the market camera), so the threshold went to 0.85: 0.5/hr, clip recall
+54.2% → 39.8%. Retrains measured and rejected: 737 UCF robbery clips with fights
+as negatives (13.3% recall, 17.5/hr), and **robbery v5** — started from the
+violence model, with 1,824 Davao street negatives and 71 of its own mined false
+alarms — 40.5/hr on the held-out cameras at 0.85 × 2. A single look at a whole
+frame cannot separate a robbery from an ordinary hand-off in a busy market; a
+vision-language verifier is the measured way forward (§8).
+
 **Why it matters to the vandalism section:** robbery is the reference point for
 how many scenes this architecture needs. It works at 26 training scenes. That
 number is the yardstick used everywhere below.
 
 ---
 
-## 3. Vandalism — X3D-XS, currently disabled, retraining
+## 3. Vandalism — X3D-XS, enabled (experimental) since October
 
-**Status:** `detection.vandalism.enabled = false`
+**Status (Oct 2026):** enabled, labelled experimental. Deployed
+`x3d_xs_vandalism_scene_v3.pt` (v3 added 700 Davao street clips as negatives,
+split by camera: false alarms 125.25 → 21.75/hr), then threshold 0.70 (6.0/hr),
+then **person-crop confirmation at 0.60 × 3: 87.1% of 31 held-out acts at
+1.0 false alarm/hr.** The subsections below are the August history of how it
+got there.
 
 ### The rejected model, recorded rather than deleted
 
@@ -241,7 +287,17 @@ locations. That is the only lever that exists.
 
 ## 4. Weapons — YOLO11s detector
 
-**Trained, not yet deployed.** Config still points at the old `weapon_signs.pt`.
+**Deployed (Oct 2026): `weapons_v3.pt` at imgsz 960**, gates gun 0.30 / knife
+0.23. v2 (this section's August training run) was deployed on 21 Aug at 640; v3
+is v2 fine-tuned at 960 with **7,500 synthetic street-camera frames** — real
+gun/knife cut-outs from v2's *training* images pasted at the wrists of real
+people in our own Davao footage at street-camera size (a handgun ≈ 12% of a
+person's height), colour-matched and re-encoded as JPEG, plus 2,500 untouched
+frames from the same cameras so "street CCTV look" cannot itself become the cue.
+No evaluation camera was used as a background. Result, both at 960: false
+weapons on 4 h of weapon-free street footage **909 → 112/hr**; street-size gun
+recall 39.4% (14% for v2 as it ran at 640); large guns 89.6%; street-size knives
+75.7% → 83.8%. Guns under 5% of the frame remain ~6%.
 
 ### Data and the class design
 
@@ -338,7 +394,7 @@ improving the low-confidence tail.
 
 ## 5. Graffiti marks — YOLO11s detector
 
-**Trained 21 Aug, beats the deployed model, not yet deployed.**
+**Deployed 21 Aug as `vandalism_marks_v2.pt`** (it beat v1 on all four metrics below).
 
 ### Data
 
@@ -412,17 +468,33 @@ withdrawn number.
 | **`imgsz` matched to runtime** | `optimize_weights.py` reads the constants out of `main.py`, not the checkpoint |
 | **`.meta.json` beside every checkpoint** | records manifest, scene counts, caveats and the inference contract |
 | **Rejected models kept** | `x3d_xs_vandalism_scene.pt` ships with `status: REJECTED FOR DEPLOYMENT` and its reason |
+| **Look before training** | every new dataset (mined clips, synthetic weapons, UCA cuts) goes on a contact sheet and is checked by eye — labels and folder names have been wrong before |
+| **Measure the way it runs** | false alarms/hr on held-out cameras and events caught in spliced continuous footage, through `detection_rules.py` — the code the app runs |
+| **Mine hard negatives only from training cameras** | mining on held-out cameras would quietly turn the test into training data |
 
 ---
 
 ## 8. Improvement priorities
 
-Cheapest and highest-certainty first.
+Updated Oct 2026. Done since August: weapon thresholds re-swept and deployed
+(0.30 / 0.23); graffiti v2 deployed; weapon `imgsz` resolved (960, v3);
+person-crop confirmation for violence and vandalism.
 
-1. **Re-sweep weapon thresholds after the resume completes.** +15 points of recall already demonstrated; costs one inference pass.
-2. **Deploy graffiti v2.** Strictly better on the same benchmark; the work is done.
-3. **Resolve weapon `imgsz` 416 vs 640** by measurement, then rebuild the TensorRT engine.
-4. **Film ~20 vandalism locations.** The only lever that exists — public data is exhausted at four graffiti scenes.
-5. **Request MSAD access.** Maps to the property-damage class; will not arrive before defense, but makes future work concrete.
-6. **Two-stage person-crop for violence**, gated on measuring whether pose resolves people at 9–12% frame height at an affordable `imgsz`.
+1. **Vision-language verifier for alarms** — measured on the training side:
+   Qwen3-VL-2B checking each alarm's 2-second clip lifts violence to 90.5% of
+   fights at 0.5 false alarms/hr and robbery from 8.3% to 51–60% of events at
+   2–3/hr, for ~6 s per alert. Confirmed on 5 hours of held-out footage
+   (7 Oct); next is wiring it into the app.
+2. **More held-out camera hours.** Two hours made every false-alarm rate coarse
+   (one alarm = 0.5/hr); 6 Oct recordings brought it to 5 hours. More, including
+   night footage, would tighten it further.
+3. **Violence misses**: ground fights, distant crowds, close-up/occluded views;
+   and a "nobody found" fallback (a very high whole-frame score may alarm when
+   the pose model finds no one) measured at +2 points with no extra false
+   alarms on 2 h — needs the larger camera set to confirm.
+4. **Film ~20 vandalism locations.** Still the only lever for the act itself —
+   public data is exhausted at four graffiti scenes.
+5. **Request MSAD access.** Maps to the property-damage class.
+6. **Tiny guns** (under ~5% of the frame) need a higher-resolution or P2-head
+   detector, which does not fit live on a GTX 1660 alongside the other models.
 7. **RTFM-style top-k MIL** if weakly-supervised training is revisited — [84.30% AUC on UCF-Crime](https://arxiv.org/abs/2101.10030) versus the MIL formulation this project measured and rejected.

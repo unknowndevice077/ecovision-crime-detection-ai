@@ -1,6 +1,6 @@
 # Data splits and leakage audit
 
-Audited 2026-08-21. Every split this project currently trains or reports on is
+Audited 2026-08-21; October 2026 additions at the end. Every split this project currently trains or reports on is
 listed here with its grouping rule, its measured leakage, and the limitations
 that survive the audit.
 
@@ -131,6 +131,43 @@ Zero leakage is necessary, not sufficient. These remain true:
   moving between splits. Weapon thresholds are therefore swept on **val** and
   reported on **test**
   ([`sweep_weapon_thresholds.py`](../../EcoVisionImagesTraining/sweep_weapon_thresholds.py)).
+
+---
+
+## October 2026 additions
+
+New data and new comparisons since the August audit, and the leaks found while
+making them.
+
+- **Held-out cameras stay held out everywhere.** The four evaluation cameras
+  (Agdao flyover, Agdao market, Iloilo Guiez St, outside Lyn's Restaurant) are
+  excluded from training data, from hard-negative mining
+  (`mine_violence_fa.py` skips the HOLDOUT stream IDs), and from the
+  backgrounds of the synthetic weapon frames. Four more hours of these streams
+  were recorded on 6 Oct for evaluation only.
+- **Mined false alarms come from training cameras only.** The violence ensemble
+  partner (6 clips) and robbery v5 (71 clips) were trained on false alarms the
+  detector raised on *training* cameras; mining the held-out ones would turn
+  the test into training data.
+- **Synthetic weapons**: cut-outs come from `weapon_ds_v2/train_unique.txt`
+  only, never val/test; val and test stay 100% real.
+- **UCA-timestamped UCF clips** (violence `ucabal`, robbery tests): split by
+  source video like every other video set; the UCA test manifests were cleaned
+  of train/test overlap before use, and the spliced event sets built from them
+  inherit that.
+- **Robbery: a leak found and worked around.** `dataset_manifest_robbery.json`
+  was rebuilt on 19 Aug; the robbery checkpoints trained before that (rob1–rob3,
+  including the deployed one) saw **33 of its current test clips** during
+  training. Comparisons between robbery models are therefore made on the
+  **150 test clips no model trained on**, matched by normalised path (the
+  manifest has no content hashes).
+- **Vandalism**: v1 overlaps the v3 test split by 6 clips (v2 by none), so v1
+  is excluded from comparisons on that split.
+
+One limitation got sharper rather than smaller: false alarms per hour rest on
+**2 hours** of camera footage, where a single alarm moves a rate by 0.5/hr.
+Differences of one or two alarms between settings are noise; the 6 Oct
+recordings exist to fix that.
 
 ---
 

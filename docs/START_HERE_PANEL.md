@@ -6,6 +6,14 @@ but it is not what you should sit down and read.
 
 **These four are.**
 
+> **Check the dates (7 Oct 2026).** The three HTML documents and the PDF were
+> written in August, before the October models: the two-model violence
+> ensemble (88.0% of fights at 2.0 false alarms/hr), `weapons_v3`, and
+> vandalism re-enabled with person-crop confirmation (87.1% at 1.0/hr). For any
+> number you say out loud, use `detection_performance_report.md` or the root
+> `README.md` — they are current. The *explanations* in the HTML documents
+> (how a convolution works, why two model families) are still accurate.
+
 ---
 
 ## 1. `model_behavior_defense.html` — start here
@@ -62,28 +70,35 @@ Read these three sections of `ecovision_full_report.md`:
 
 | file | why |
 |---|---|
-| `progress_report_violence_detection.pdf` / `.html` | Exported 12 Aug; the `.md` gained three sections on 14 Aug. These show an earlier, worse picture of the work. |
+| `archive/stale-exports-2026-08/` | The 12 Aug PDF/HTML exports of the progress report; the `.md` gained sections after them. These show an earlier, worse picture of the work. |
 | `archive/` | Superseded manuscript backups and a pre-animation fragment of the defense doc. |
 | everything else in `docs/` | Working records. Correct, but written for whoever maintains this, not for a reader. |
 
 ---
 
-## The three things worth having ready to say
+## Four things worth having ready to say
 
 1. **"We withdrew three published numbers after measuring how they were
    produced."** A 99.4%-leaked validation split, a detector class that had never
    fired, and a rule scored against footage containing none of what it detects.
    Each was found by instrumenting a claim rather than accepting it.
 
-2. **"Vandalism is disabled, and here is exactly why."** Not *"it didn't work"* —
-   its gate fired 0 times in 3,600 frames; the inverted formulation caught 3 of 4
+2. **"Vandalism took five routes, and each failure was measured."** Its first
+   gate fired 0 times in 3,600 frames; the inverted formulation caught 3 of 4
    events but alarmed on every camera; the trained model reached 82.4% accuracy
    against a 62.7% baseline yet still produced 125 false alarms an hour, cut to
-   21.75 by adding real street negatives. And **no public video dataset of the
-   graffiti act exists** — that is a field-level limitation, not a gap in our
-   collection.
+   21.75 by adding real street negatives, then to 6.0 by a higher threshold, and
+   finally to **1.0 an hour at 87.1% recall** by requiring the alarm to be backed
+   by a crop around actual people. It ships, labelled experimental. And **no
+   public video dataset of the graffiti act exists** — that is a field-level
+   limitation, not a gap in our collection.
 
 3. **"The models we ship are the models we measured."** Config layering meant the
    detector silently loaded different weights than the config named, and the
    robbery detector was not running at all. Found by running the system and
    reading which files it loaded, not by trusting a green check.
+
+4. **"We measure the way it runs."** Every number is false alarms per hour on
+   cameras the models never trained on, and events caught in continuous
+   footage — through the exact decision rules that ship (`detection_rules.py`),
+   not a clean offline copy of them.

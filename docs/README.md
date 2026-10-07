@@ -1,8 +1,9 @@
 # Docs folder index
 
-Fifteen files live here and they are not equal. Four are the research core,
-four are defense material, three are engineering records, two are stale
-exports that would misrepresent the work if cited, and two are drafts.
+The files here are not equal. Five are the research core, four are defense
+material, five are operations plans for a real pilot, a few are engineering
+records, two are drafts, and the archive holds stale exports that would
+misrepresent the work if cited. Updated 7 Oct 2026.
 
 ---
 
@@ -24,7 +25,7 @@ index, most of it working material rather than presentation material.
 
 | File | Content |
 |---|---|
-| `detection_performance_report.md` | Every measured number for all three detectors, each with the caveat that limits it. The authoritative source for any figure quoted elsewhere — nothing here is estimated. |
+| `detection_performance_report.md` | Every measured number for all four detectors, each with the caveat that limits it. The authoritative source for any figure quoted elsewhere — nothing here is estimated. |
 | `progress_report_violence_detection.md` | 1,715 lines. The full development narrative for the violence detector: what was tried, what failed, why, with derivations. §§27–32 cover the daynight checkpoint and its adoption. |
 | `model_training_and_data.md` | **The methodology/RRL reference.** One section per model — what it does, how it is implemented, which datasets built it *with links and licences*, the exact training configuration, what it measures, and what would improve it. Also records the design decisions that were made rather than defaulted (why separate models instead of one softmax; why `phone` is a class; why `Sign` was removed) and an ordered improvement list. |
 | `data_splits_and_leakage.md` | **Read before quoting any accuracy in this project.** How every split is grouped, the measured leakage on each (all zero as of 21 Aug), and the limitations that survive a clean audit. Records the 99.4% / 14.6% / 12.0% overlap that invalidated the previous weapon detector's metrics, and why the audit deliberately shares no code with the scripts that build the splits. |
@@ -37,7 +38,9 @@ index, most of it working material rather than presentation material.
 | `model_behavior_defense.html` | 13 sections, confusion-matrix charts for all three detectors, 3 animations, a glossary, and a section anticipating likely questions. Self-contained HTML, opens in a browser. |
 | `EcoVision_Defense_Reference.pdf` | The same document, print-styled. |
 | `convolution_explainer.md` | What YOLO does vs what X3D does, with animations. |
-| `figures/` | 7 figures, PNG at 300 dpi and vector PDF. |
+| `figures/` | 7 figures, PNG at 300 dpi and vector PDF. Made in August — they show the models of that time, not the October ones. |
+| `how_ecovision_sees.html`, `detection_metrics.html` | Visual explainer and a metrics ledger, self-contained HTML. |
+| `EcoVision - Manuscript (REVISED).docx` | The paper itself. Edited by hand; check its numbers against `detection_performance_report.md`. |
 
 ## Draft material
 
@@ -46,6 +49,16 @@ index, most of it working material rather than presentation material.
 | `paper_revised_sections.md` | Rewritten paper sections. Numbers should be checked against `detection_performance_report.md` before submission — this file is edited independently and can drift. |
 | `paper_revision_notes.md` | Notes on what changed in the revision and why. |
 
+## Operations plans (written 26 Aug for a real pilot)
+
+| File | Content |
+|---|---|
+| `evaluation_plan.md` | What evaluating the system means, in order, and the protocol. |
+| `incident_response_plan.md` | From "the model fired" to "an officer is on the way": confirmation, notification, chain of custody. Telegram and SMS notifications from §2 now exist. |
+| `privacy_compliance_plan.md` | RA 10173 (Data Privacy Act) requirements and where the system still falls short. |
+| `recovery_plan.md` | What to do when a piece breaks, written for a non-developer. |
+| `scaling_plan.md` | How many cameras one PC can run, measured on the pilot hardware. |
+
 ## Engineering records
 
 Document what was built rather than what was found.
@@ -53,7 +66,8 @@ Document what was built rather than what was found.
 | File | Content |
 |---|---|
 | `final_checks.md` | Dated snapshot (14 Aug) of bugs found and fixed, with how each was found. Describes that date's build state, not necessarily the current one. |
-| `USER_HIERARCHY_PLAN.md` | Role and permission design. |
+| `USER_HIERARCHY_PLAN.md` | Original role and permission design (August). The September additions — diced permissions, custom roles, identity verification, report requests, audit log — are summarised in the root `README.md` under Organization & Roles. |
+| `INSTALLER_NOTES.md` | Why the installer is built the way it is. |
 | `vandalism_data_collection.md` | The filming protocol that would make the vandalism-in-progress detector viable. Not yet executed. |
 
 ---
@@ -77,43 +91,30 @@ authoritative copy.
 
 ---
 
-## Headline figures, as of 19 Aug
+## Headline figures, as of 7 Oct 2026
 
-All measured on data the model never trained on. Full detail, including raw
-TP/FP/TN/FN counts, is in `detection_performance_report.md`.
+All measured on data the models never trained on: four held-out street cameras
+(2 h, nothing criminal in them) for false alarms per hour, and held-out crime
+clips spliced into continuous street footage for how many events raise an
+alarm, both through the shipped smoothing and confirmation rules. Full detail
+is in `detection_performance_report.md` and in each model's `config.json` note.
 
 | Class | Headline | What it does not capture |
 |---|---|---|
-| Violence (daynight checkpoint, deployed 18 Aug) | 95.0% of events detected on continuous spliced footage; 4.50 false alarms/hr aggregate across three cameras | Not a uniform improvement over the previous checkpoint: the flyover camera falls 45 → 6/hr, but the camera outside Lyn's Restaurant gets *worse*, 6 → 12/hr. The aggregate hides that spread. |
-| Robbery | 84.2% accuracy, 5.6% false-positive rate | Recall is 65.3% — misses roughly one robbery in three. Measured on 8 source scenes, not 139 independent samples; clips from the same video are correlated. |
-| Vandalism | Disabled by default | Both the rule-based and trained-model routes were built and measured, not just assumed to fail. The trained model's 70.3% accuracy is below the 78.4% baseline of always guessing "vandalism". |
+| Violence (two-model ensemble, person-crop confirmed, 0.45 × 2) | 88.0% of 200 fights at 2.0 false alarms/hr; 93.1% accuracy / 92.8% recall / 93.4% precision on 1,310 test clips | Two hours of camera footage is a small sample — one alarm moves the rate by 0.5/hr. Most misses are ground fights, distant crowds and close-up or occluded views. |
+| Weapons (`weapons_v3`, 960 px) | 89.6% recall on large guns, 39.4% on street-camera-size guns, 83.8% on street-size knives; ~8× fewer false weapons than v2 on street footage | Guns under ~5% of the frame are still mostly missed (~6%). No real armed incident has ever been recorded on the deployment cameras. |
+| Vandalism (experimental, person-crop confirmed, 0.60 × 3) | 87.1% of 31 acts at 1.0 false alarm/hr | 31 acts from few source videos — approximate. |
+| Robbery (experimental, 0.85 × 3) | 0.5 false alarms/hr | Catches ~40% of test clips and 8.3% of events in continuous footage — tuned to stay quiet rather than cry wolf. Every retrain since has been rejected on measurement. |
 
-One caveat applies to all three: recall on the actual deployment cameras is
+One caveat applies to all four: recall on the actual deployment cameras is
 unmeasured, because no labelled incident has ever been recorded on them. That
-follows from the problem — violence cannot be labelled on footage where none
+follows from the problem — a crime cannot be labelled on footage where none
 has happened — rather than from a gap in the measurement work.
 
-**Note on the 70.3% above:** that figure belongs to the trained *vandalism*
-model, not to any weapon figure. It has been misattributed once in working
-notes; the weapon detector's own baseline is 79.7% recall (TP 1255 / FP 5 /
-TN 578 / FN 319) on the final epoch-98 checkpoint. The epoch-68 checkpoint
-measured 74.3%; both were reproduced independently by two scripts on 21 Aug.
+### In research, not deployed
 
----
-
-## Status as of 21 Aug — headline figures above not yet updated
-
-All three retrains are now complete. The headline table above still shows the
-19 Aug snapshot; these are the current measurements.
-
-| Class | Change | Result |
-|---|---|---|
-| Graffiti marks | Retrained on 7,943 images (was 1,177) | **Beats deployed on all four metrics** on the same untouched 165-image benchmark: mAP50 0.734 vs 0.718, recall 0.646 vs 0.602. Not yet deployed. |
-| Weapons | Rebuilt leakage-free, `Sign` class removed, crashed run resumed to epoch 100 | Final epoch-98 checkpoint: **79.7% recall / 85.0% accuracy** at deployed thresholds, up from 74.3% / 81.0%. Re-swept thresholds give **89.0% recall at 3.1% FPR** (gun 0.30 / knife 0.23). Not yet deployed. |
-| Vandalism | Scene count 11 → 26 sources | **82.4% accuracy vs a 62.7% baseline** — the class now carries positive information, where the previous model was 8.1 points *below* its baseline. **Still disabled:** FPR 36.8% against deployed robbery's 5.6%. |
-
-Also measured and recorded rather than assumed: the rule-based vandalism route
-was instrumented per condition and scored 8.3% recall (0% before the graffiti
-detector unblocked its gate), and a change-detection prototype reached 3 of 4
-events but false-alarmed on all four held-out cameras. Both remain disabled.
-See `data_splits_and_leakage.md` for why any figure here is quotable at all.
+A second-stage check by a small vision-language model (Qwen3-VL-2B, ~6 s per
+alarm) on the training side: violence 88.0% → 90.5% of fights at 2.0 → 0.5
+false alarms/hr; robbery 8.3% → 51–60% of events at 2–3/hr. Confirmed on 5
+hours of held-out footage on 7 Oct (violence 90.5% at 0.4/hr; robbery 51.1% at
+2.0/hr). Not yet in the app.

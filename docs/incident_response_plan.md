@@ -5,6 +5,25 @@ officer is on the way," and what has to be true of the evidence in between so
 it holds up as more than a screenshot. Marked throughout: what exists today
 vs. what this plan proposes building.
 
+> **Status, 7 Oct 2026 — most of this plan is now built.**
+> - §2 notifications: **built.** `notify_targets` (per barangay/station, managed
+>   from the admin consoles, permission `manage_notify_targets`), Telegram as
+>   primary and SMS via Semaphore as fallback (`app/notifications.py`,
+>   `app/telegram_bot.py`), sent on confirm-and-report, every attempt logged to
+>   `notify_log` whether it succeeds or fails. Not yet exercised with a real
+>   Telegram bot token or Semaphore key in this project.
+> - §3.1 evidence hashing: **built** — SHA-256 of each clip and snapshot is
+>   stored and shown in the report.
+> - §3.2 deletion guard: **built** — a clip that is evidence for a reported
+>   incident cannot be deleted from the Recordings tab.
+> - Also built since: a pre-filled police-report draft for every confirmed
+>   incident (template-based, edited and confirmed by the officer), and a full
+>   audit log of every change with soft-delete/restore.
+> - Still open: §3.3 per-view access log for evidence, and §3.4 a check that
+>   report edits cannot overwrite the original timestamp.
+>
+> The text below is the original plan, kept as the design record.
+
 ---
 
 ## 1. The flow that exists today

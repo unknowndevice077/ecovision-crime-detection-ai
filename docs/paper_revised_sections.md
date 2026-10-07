@@ -1,3 +1,10 @@
+> **Check every number before submission (7 Oct 2026).** This draft predates
+> the October models. Current headline figures: violence 88.0% of 200 held-out
+> fights at 2.0 false alarms/hr (1.4/hr on 5 h of cameras), 93.1% accuracy on
+> 1,310 test clips; weapons v3 89.6% / 39.4% recall on large / street-size guns;
+> vandalism 87.1% at 1.0/hr (experimental); robbery 0.5/hr at ~40% clip recall
+> (experimental). Source: `detection_performance_report.md` §1.
+
 # EcoVision Manuscript — Drafted Replacement Sections
 
 Ready-to-paste text for the gaps and rewrites identified in

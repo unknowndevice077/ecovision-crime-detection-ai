@@ -7,6 +7,15 @@ retrospective — several items below are gaps, stated as gaps.
 
 ---
 
+> **Status, 7 Oct 2026.** Two things changed since this was written:
+> 1. **The retention sweep is built** (`app/maintenance.py`, daily): dismissed
+>    alerts are deleted after 7 days, confirmed incidents with no filed report
+>    after 30, and anything with a filed report is never touched. §5's table is
+>    now the system's actual behaviour, not a proposal.
+> 2. **The system now stores identity documents of its own users** — new §2a.
+>    That is sensitive personal information under RA 10173 and needs its own
+>    retention rule, which does not exist yet.
+
 ## 1. Why this applies at all
 
 RA 10173 governs "personal information" — any data from which a living
@@ -55,6 +64,33 @@ clip, a screenshot, or a dismissed incident — `logs/`, `static/screenshots/`,
 runtime output) but nothing *prunes* them at runtime either.
 
 ---
+
+## 2a. Operator identity documents (added Oct 2026)
+
+Identity verification (Sept 2026) lets every account upload a **government ID**
+and, for some flows, a **face photo**, reviewed by an administrator or DevTeam.
+
+| Data | Where | Access | Retention today |
+|---|---|---|---|
+| Profile fields: full name, birthdate, home address, contact number, position | `users` table | the user, their admin, DevTeam | unbounded (account data) |
+| ID document, face photo | `verification_docs/` in the writable data directory; only the filename is in the `users` row | an authenticated, permission-checked endpoint (the user, their own admin, DevTeam) — **never** a public static path like screenshots | **unbounded** |
+
+- A government-issued ID number is **sensitive personal information** under RA
+  10173 §3(l), which raises the bar: processing needs a lawful basis (here,
+  verifying the identity of people given access to surveillance footage — a
+  legitimate, proportionate purpose) and stricter security.
+- Files are **not encrypted at rest**. Anyone with access to the machine's
+  disk can read them.
+- Nothing deletes them when an account is removed (accounts are soft-deleted
+  so they can be restored from the audit log).
+
+**Recommended:** delete the documents once verification is decided (keep only
+the decision, who made it and when), or encrypt them at rest; and purge them
+when an account is permanently removed.
+
+The face photo is used only for a human reviewer to compare against the ID; no
+face embedding is computed and nothing is matched automatically — §1's "no
+facial recognition" still holds.
 
 ## 3. Legal basis for processing
 
@@ -109,11 +145,14 @@ distinguishes incident states (`status`: pending / confirmed / dismissed):
 | Confirmed incident with a filed report (`confirm-and-report`) | **Retained per PNP records-retention rules**, not this system's default | Once it's evidence, retention is a legal question, not an engineering one — this system should stop being the authority on deletion at that point |
 | Raw, never-alerted footage | **Not stored** (already true — only alert-triggered clips persist) | Matches the system's actual behavior today; worth stating as a positive, not just a gap |
 
-**Not yet implemented.** This needs a scheduled job (daily, similar in shape
-to the existing `optimize_weights` background task) that sweeps
-`static/clips/`, `static/screenshots/`, `static/recordings/` and the
-`incidents` table against these windows. Until it exists, say so plainly
-rather than describing retention as something the system already does.
+**Implemented** (`app/maintenance.py`, `retention_sweep`): a daily background
+job applies the first three rows of this table to recordings, screenshots and
+incident rows. Any incident with a filed report is never touched.
+
+Not covered by it: operator identity documents (§2a), and datasets exported by
+`tools/export_feedback_dataset.py` (alert frames copied out for retraining —
+they leave the app's retention control the moment they are exported, so treat
+an export folder as footage under the same policy).
 
 ---
 
@@ -128,6 +167,14 @@ measures proportional to the risk. What's already real in this codebase:
   cameras outside their barangay/station scope (`apply_scope`).
 - Devteam-only actions (model weight edits, threshold changes) separately
   gated from barangay/PNP roles (`MODEL_VIEW_ROLES` vs. `DEVTEAM`-only checks).
+- Permissions re-read from the database on every request, so a revoked
+  permission or disabled account stops working immediately; permissions can be
+  narrowed to single cameras or crime types; barangay accounts cannot open
+  police case archives at all.
+- An audit log of every change — who, what, when, with a snapshot — and
+  soft-delete with restore for users and incidents.
+- Evidence integrity: SHA-256 of every clip and snapshot, and reported
+  incidents' clips cannot be deleted from the app.
 - Secrets excluded from version control (`.env`, `devteam_credentials.txt`
   in `.gitignore`), and a firmware credential leak was found and purged from
   git history this project (see `.gitignore`'s "Firmware" section) —
@@ -148,7 +195,8 @@ IT officer, but needs to be named somewhere, even just in this document.
 | Draft/confirm barangay ordinance or PNP authorization naming the camera's public-safety purpose | Barangay/PNP (not this codebase) | Before go-live |
 | Install "under CCTV surveillance" signage at the camera site | Barangay | Before go-live |
 | Name a DPO/privacy contact (can be a supervising role, not a new hire) | Barangay/school | Before go-live |
-| Build the retention sweep job (§5 table) | Dev | High — this is the actual code gap |
+| ~~Build the retention sweep job (§5 table)~~ | Dev | **Done** (`app/maintenance.py`) |
+| Retention or encryption for operator ID documents (§2a) | Dev | High — the new code gap |
 | Write the data-subject-access-request procedure (who receives it, how footage is located) | Barangay, with dev support for the "how to find it" half | Medium |
 
 ---
@@ -161,9 +209,9 @@ pipeline — worth pointing at `maincode/main.py`'s model list (pose, weapon,
 X3D action classifiers) directly if pressed.
 
 *"What happens to a clip of someone who wasn't actually doing anything
-wrong?"* — Today: it stays indefinitely, which is the gap this document
-exists to fix. The honest answer is the retention policy above is designed
-but not yet built — say that, don't claim it's done.
+wrong?"* — If the operator dismisses the alert, the clip, snapshot and record
+are deleted automatically after 7 days (`app/maintenance.py`). Footage that
+never raised an alert is never stored at all.
 
 *"Who authorizes this camera to record people?"* — Points to a barangay
 ordinance/PNP authorization that needs to exist outside the code — confirm

@@ -1,7 +1,7 @@
 # EcoVision Sentinel: Building and Honestly Measuring a Real-Time CCTV Crime-Detection System
 
 **A consolidated technical report**
-Compiled 2026-08-21 · single-GPU (GTX 1660 SUPER) deployment target
+Compiled 2026-08-21, updated 2026-10-07 · single-GPU (GTX 1660 SUPER) deployment target
 
 ---
 
@@ -28,11 +28,16 @@ classifier over 13-frame clips; and **weapons and graffiti marks** as *objects*,
 using YOLO11s single-frame detectors. Pose estimation supplies keypoints to
 rule-based logic that links objects to people.
 
-The deployed violence detector identifies **95.0% of events** on continuous
-footage at **4.50 false alarms per hour** across three real cameras. Robbery
-reaches **84.2% accuracy at 65.3% recall**. A rebuilt, leakage-free weapon
-detector reaches **89.0% recall at 3.1% false-positive rate** after threshold
-selection performed on validation and reported on test.
+As of October 2026, the deployed violence detector — two X3D-XS models
+averaged, with every whole-frame alarm confirmed against crops around the
+people present — catches **88.0% of 200 held-out fights** spliced into
+continuous street footage at **2.0 false alarms per hour** on four held-out real
+cameras (93.1% accuracy on 1,310 test clips). The weapon detector, fine-tuned
+on synthetic street-camera weapons, finds **89.6% of large and 39.4% of
+street-size guns** with 8x fewer false weapons than its predecessor. Robbery is
+deliberately conservative — **0.5 false alarms per hour at ~40% clip recall** —
+because every attempt to raise its recall flooded busy street scenes with false
+alarms; a vision-language verifier is the measured way forward (§7.0).
 
 **The vandalism class was disabled for most of this project's life and is now
 deployed**, and the path there is the report's most instructive result. Four
@@ -43,7 +48,8 @@ scoring *below* its own always-guess baseline. Two changes fixed it, neither of
 them architectural: raising the scene count 11 to 26 made the class carry
 positive information, and adding **real deployment-camera footage as negatives**
 cut false alarms from **125.25 to 6.75 per hour** -- an 18.6x reduction that
-brings it within reach of the violence detector's accepted 4.50/hr. A survey of
+brings it within reach of the violence detector's accepted rate; person-crop
+confirmation (October) then cut it to **1.0 per hour at 87.1% recall**. A survey of
 every public video anomaly dataset establishes that **no dataset of the graffiti
 act exists**, so the remaining ceiling is field-level rather than a gap in
 collection.
@@ -389,7 +395,64 @@ in one inference pass, then evaluates all 7,396 threshold pairs in pure Python.
 
 ## 7. Results
 
-### 7.1 Violence — deployed
+### 7.0 October 2026 — the current system
+
+Everything in this subsection was measured on one harness: false alarms per
+hour on 2 h of four held-out street cameras, and events caught on held-out
+crime clips spliced into continuous street footage, both through the shipped
+rules (`detection_rules.py`, `x3d_violence_detector.py`). §§7.1–7.5 below are
+the August results and are kept as the record of how the system got here.
+
+| detector | setting | events caught | false alarms/hr |
+|---|---|---|---|
+| Violence — 2-model ensemble, person-crop confirmed | 0.45 × 2 | **88.0%** of 200 | **2.0** |
+| Vandalism — v3, person-crop confirmed (experimental) | 0.60 × 3 | **87.1%** of 31 | **1.0** |
+| Robbery (experimental) | 0.85 × 3 | 8.3% of 133 (39.8% of test clips) | **0.5** |
+| Weapons — v3 at 960 px | gun 0.30 / knife 0.23 | 89.6% large guns, 39.4% street-size guns, 83.8% street-size knives | 112 raw detections/hr (909 for v2) |
+
+**What moved violence from 75.0% at 5.0/hr to 88.0% at 2.0/hr**, each step on
+identical footage:
+
+1. *Person-crop confirmation* (75.0% → 79.0%, 5.0 → 3.0/hr): the smoothed value
+   is min(whole-frame score, best crop around a group of people over the last
+   three checks). Because it removes false alarms, confirmation could drop from
+   three checks to two, which is what bought recall back. Using crops to *add*
+   detections instead gave the same recall at 3–6x the false alarms.
+2. *UCA-timestamped training data* (→ 86.5%, 2.0/hr): 821 fight clips and 835
+   calm clips cut from UCF-Crime at the CVPR 2024 UCA annotations' event
+   times — the same shops and streets on both sides. Without enough calm clips
+   (279) the same recipe caught 89.5% at 13.0/hr.
+3. *Ensemble with a hard-negative partner* (→ 88.0% at 0.45, 2.0/hr): a second
+   checkpoint trained with false alarms mined from training cameras; alone it
+   is worse (83.5%), averaged the two make different mistakes.
+
+Of the 24 fights still missed, 4 began while an alarm from a moment earlier was
+still on, 7 were vetoed because the pose model found no one in blurry footage,
+and 13 were scored low: ground fights, distant crowds, close-up or occluded
+views, and three vertical phone videos.
+
+**Verification with a vision-language model — measured, not deployed.** The
+fast detector runs looser and each alarm's 2-second clip is asked a yes/no
+question by Qwen3-VL-2B (~6 s, ~4 GB VRAM on the target GPU), with the cut-off
+fitted on half the source videos and scored on the other half:
+
+| | events caught | false alarms/hr |
+|---|---|---|
+| violence, deployed | 88.0% | 2.0 |
+| violence, 0.25 × 1 + Qwen3-VL-2B | 90.5% | 0.5 |
+| robbery, deployed | 8.3% | 0.5 |
+| robbery, 0.60 × 2 + Qwen3-VL-2B | 51.1% | 2.0 |
+| robbery, 0.50 × 2 + Qwen3-VL-2B | 60.2% | 3.0 |
+
+The robbery result is the largest single gain measured in this project: the
+fast model cannot tell a robbery from a market hand-off, and the verifier can.
+Both were first measured on two hours of camera footage (one alarm =
+0.5/hr), then re-tested on 5 hours (7 Oct): violence + verifier 90.5% at
+0.4/hr; robbery + verifier 51.1% at 2.0/hr and 60.2% at 1.8/hr. The deployed
+violence and vandalism detectors also held: 88.0% at 1.4/hr and 87.1% at
+0.6/hr.
+
+### 7.1 Violence — August (daynight checkpoint)
 
 **95.0% of events** (38/40) on continuous spliced footage at threshold 0.50 /
 `consecutive_required = 3`; **4.50 false alarms/hour** aggregate across three real
@@ -402,7 +465,7 @@ spliced continuous video, cons = 1, 2 and 3 all detect 38/40 while alarms fall
 49.0 → 32.0 → 17.0/hr. **cons = 3 is the last free step; 4 is the first that
 costs** (36/40).
 
-### 7.2 Robbery — deployed
+### 7.2 Robbery — August (threshold 0.70; now 0.85, see §7.0)
 
 At threshold 0.70: **accuracy 84.2%, recall 65.3%, precision 86.5%, FPR 5.6%.**
 
@@ -411,7 +474,7 @@ comes from 139 clips drawn from **eight** source videos — not 139 independent
 samples. Robbery is also the yardstick for scene count: this architecture works
 at **26 training scenes**.
 
-### 7.3 Weapons — rebuilt, not yet deployed
+### 7.3 Weapons — August rebuild (deployed 21 Aug as v2; superseded by v3, see §7.0)
 
 Final checkpoint is **epoch 98 of 120**; the run crashed at epoch 70 on system
 RAM exhaustion, was resumed, and converged (mAP50 flat across epochs 96–100,
@@ -446,7 +509,7 @@ budget). The additional 30 epochs sharpened confident detections — the baselin
 gained 5.4 points — without improving the low-confidence tail. The gain is
 concentrated at deployable thresholds, not spread evenly across the curve.
 
-### 7.4 Vandalism — deployed, after the negatives fix
+### 7.4 Vandalism — August, after the negatives fix (now person-crop confirmed, see §7.0)
 
 | configuration | false alarms/hr | recall |
 |---|---|---|
@@ -481,7 +544,7 @@ That split contains no Davao footage, so it cannot measure what the negatives
 fixed, but the regression is real. `experimental: true` stays set, because the
 test split is five scenes.
 
-### 7.5 Graffiti marks — retrained, beats deployed
+### 7.5 Graffiti marks — retrained, beat v1, deployed 21 Aug
 
 Both models scored in **one run** on the same untouched 165-image benchmark, so
 the comparison cannot drift across sessions:
@@ -788,6 +851,20 @@ reports which files it merged.
 
 ---
 
+### 8.7 October: measured and rejected
+
+- **Robbery v5** — started from the violence model, trained with 1,824 Davao
+  street negatives and 71 of its own mined false alarms: 40.5 false alarms/hr on
+  the held-out cameras at 0.85 × 2 (deployed: 0.5/hr). More data of the same
+  kind does not teach a whole-frame classifier what a robbery is.
+- **A second weapon pass on crops around each person** — +8.6 points on tiny
+  guns at its best setting, for +5% false detections and up to six extra
+  inferences per frame.
+- **Qwen3-VL-4B as the verifier** — no better than the 2B model, and ~32 s per
+  alarm instead of ~6 s. **Cosmos-Embed1** (NVIDIA's surveillance embedding
+  model) also verified well but slightly worse than Qwen3-VL-2B and slower.
+- **Combining two verifiers** — no gain over Qwen3-VL-2B alone.
+
 ## 9. Threats to validity
 
 ### 9.1 Known and open
@@ -873,7 +950,12 @@ this project right now; conflating them is the mistake to avoid at defense.
 
 ## 10. Future work
 
-Ordered cheapest-and-most-certain first.
+Ordered cheapest-and-most-certain first. **October status:** items 1, 2 and 4
+are done (weapon thresholds 0.30 / 0.23 and graffiti v2 deployed 21 Aug; weapons
+then moved to v3 at 960 px), and item 7 is done as a *confirmation* step (§7.0).
+New, in priority order: (a) wire in the Qwen3-VL-2B verifier (confirmed on
+5 hours of held-out footage); (b) record more held-out camera hours; (c) add
+training examples of the violence misses — ground fights, distant crowds.
 
 1. ~~Re-sweep weapon thresholds against the final checkpoint.~~ **Done 21 Aug** — gun 0.30 / knife 0.23 gives 89.0% recall at 3.1% FPR, versus 79.7% at the deployed thresholds. **Apply them to `main.py`'s `CONF_BY_CLASS` and deploy the epoch-98 checkpoint.**
 2. **Deploy graffiti v2** — strictly better on the same benchmark; work complete.
@@ -900,9 +982,11 @@ Ordered cheapest-and-most-certain first.
 
 ## 11. Conclusion
 
-The system detects **95.0% of violent events at 4.50 false alarms per hour** on
-real footage, and the rebuilt weapon detector reaches **89.0% recall at 3.1%
-FPR** — both on a single consumer GPU.
+The system catches **88.0% of held-out fights at 2.0 false alarms per hour**,
+and vandalism **87.1% at 1.0 per hour**, on cameras it never trained on; the
+weapon detector finds 89.6% of large guns at 8x fewer false weapons than its
+predecessor — all on a single consumer GPU. Robbery is the honest weak point,
+and the measured fix for it (a vision-language verifier) is the next step.
 
 The more durable contribution may be methodological. Three published figures were
 withdrawn after measurement exposed how they were produced: a 99.4%-leaked
@@ -911,11 +995,12 @@ against footage containing none of what it detects. Each was found by
 instrumenting a claim rather than accepting it, and each is recorded here with
 its correction.
 
-The vandalism class remains disabled. That is the correct outcome given the
-evidence, and the evidence is now specific: not *"it didn't work"* but *"its gate
-fired 0 times in 3,600 frames, the inverted formulation reached 3 of 4 events but
-alarmed on every camera, and no public video dataset of the graffiti act exists
-to improve it."*
+Vandalism shows the same lesson from the other side. It was disabled for most
+of the project, and the evidence for that was specific — *"its gate fired 0 times
+in 3,600 frames, the inverted formulation reached 3 of 4 events but alarmed on
+every camera, and no public video dataset of the graffiti act exists"* — and it
+was re-enabled only when measurement supported it: real street negatives, then
+person-crop confirmation, took it from 125 to 1.0 false alarm per hour.
 
 A system that reports what it cannot do is more useful than one that reports only
 what it can.

@@ -5,6 +5,19 @@ AMD Ryzen 5 5600G 6C/12T, 16GB system RAM) rather than estimated from spec
 sheets. Answers the direct question first, then shows the measurement and the
 architecture that changes the answer.
 
+> **Status, 7 Oct 2026 — the per-camera cost has gone up since this was
+> measured.** The deployed set is now 8 models per `main.py`: `weapons_v3`
+> runs at **960 px** instead of 640 (about 2.25× the pixels per weapon pass),
+> violence runs a **second X3D model** averaged with the first, and violence
+> and vandalism both score **up to 5 extra person-group crops** per check
+> (batched into the same forward pass). Expect more GPU compute per camera
+> than the 58% below, so the 2–4-camera estimate is now optimistic; re-measure
+> with `tools\measure_min_specs.py` before planning a multi-camera pilot. The
+> architecture conclusions (§3–§4) are unchanged — they only become more
+> pressing. A vision-language verifier under evaluation (Qwen3-VL-2B, ~4 GB
+> VRAM, ~6 s per alarm) would run once per alarm, not per frame, but needs its
+> own VRAM budget.
+
 ---
 
 ## The direct answer
@@ -36,10 +49,10 @@ architecture is:
   | Model | Type | On-disk size |
   |---|---|---|
   | `yolo11s-pose.pt` | YOLO, person/pose | 19 MB |
-  | `weapons_v2.pt` | YOLO, weapon detector | 72 MB |
+  | `weapons_v2.pt` (now `weapons_v3.pt`, at 960 px) | YOLO, weapon detector | 72 MB |
   | `vandalism_marks_v2.pt` | YOLO, graffiti marks | 18 MB |
   | `x3d_xs_violence_best.pt` | X3D-XS, per-track violence | 11 MB |
-  | `x3d_xs_violence_scene_daynight.pt` | X3D-XS, scene violence (deployed) | 11 MB |
+  | `x3d_xs_violence_scene_daynight.pt` (now `..._ucabal.pt` + `..._ucabal_mined.pt`, two models averaged) | X3D-XS, scene violence | 11 MB each |
   | `x3d_xs_robbery_scene.pt` | X3D-XS, robbery | 11 MB |
   | `x3d_xs_vandalism_scene_v3.pt` | X3D-XS, vandalism | 11 MB |
 
