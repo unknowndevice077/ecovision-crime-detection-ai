@@ -93,7 +93,9 @@ EcoVisionCode/
 │   └── x3d_violence_detector.py    model wrapper, ensemble, person-crop confirmation, smoothing
 │
 ├── app/                   backend AND frontend share this folder (see trap #1)
-│   ├── backend.py              FastAPI: incidents, users, permissions, audit, report requests, AI-models API
+│   ├── backend.py              FastAPI app + entry point (launched by path: keep it here)
+│   ├── backend_core.py         config, auth, DB setup, permissions, shared helpers
+│   ├── routers/                every endpoint, one module per area of the API
 │   ├── config_store.py         writes only the config keys someone changed
 │   ├── db.py                   SQLite by default; Postgres if DATABASE_URL set
 │   ├── globals.css             the design tokens everything follows
@@ -136,7 +138,9 @@ exported 12 Aug and the `.md` gained §30–§32 on 14 Aug.
 **1. `app/` mixes Python and TypeScript, and must stay that way.** Next.js's App
 Router requires `layout.tsx`/`page.tsx` at exactly that path, and `package.json`,
 `electron/main.js`, `run_dev_system.bat` and `preflight.py` all reference
-`app/backend.py`. Splitting it is tidier to look at and breaks four things.
+`app/backend.py`. Moving it out of `app/` is tidier to look at and breaks four
+things. (Its endpoints already live in `app/routers/` and its shared code in
+`app/backend_core.py`; `backend.py` itself has to stay where it is.)
 
 **2. `config.json` is the only place to change behaviour.** Keys beginning `_`
 are prose notes explaining why a value is what it is. Read the note before

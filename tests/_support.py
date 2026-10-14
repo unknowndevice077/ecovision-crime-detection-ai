@@ -33,7 +33,8 @@ os.environ.pop("SQLITE_PATH", None)
 sys.path.insert(0, str(REPO / "app"))
 sys.path.insert(0, str(REPO / "maincode"))
 
-import backend as B  # noqa: E402
+import backend  # noqa: E402
+import backend_core as B  # noqa: E402  (shared state/helpers; the app is backend.app)
 from fastapi.testclient import TestClient  # noqa: E402
 
 # Never reach real hardware or the live AI core from a test run:
@@ -53,7 +54,7 @@ def client() -> TestClient:
     """One app instance for the whole run (startup migrations are slow)."""
     global _client
     if _client is None:
-        _client = TestClient(B.app)
+        _client = TestClient(backend.app)
         _client.__enter__()
         import atexit
         atexit.register(_shutdown)

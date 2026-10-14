@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 # Through the shared fixture, so importing the backend never opens the real
 # database (see _support.py).
 import _support  # noqa: F401,E402
-from backend import AiTriggerSchema, ManualClipSchema  # noqa: E402
+from backend_core import AiTriggerSchema, ManualClipSchema  # noqa: E402
 
 
 class BackendSchemaTests(unittest.TestCase):

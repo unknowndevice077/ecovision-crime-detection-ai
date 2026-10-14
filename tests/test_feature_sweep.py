@@ -15,6 +15,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import requests
 
 import _support as S
 
@@ -260,12 +261,12 @@ class Incidents(Base):
                     ok = True
                     def json(self):
                         return {"status": "captured", key: "/static/screenshots/snap_panic.jpg"}
-                real = S.B.requests.post
-                S.B.requests.post = lambda *a, **k: Answer()
+                real = requests.post
+                requests.post = lambda *a, **k: Answer()
                 try:
                     r = self.ok(self.c.post("/api/panic_trigger", json={"event": "PANIC", "device": "pole-1", "barangay_id": self.brgyA}))
                 finally:
-                    S.B.requests.post = real
+                    requests.post = real
                 inc = next(x for x in self.ok(self.c.get("/api/incidents", headers=self.h(self.capA))) if x["id"] == r["id"])
                 self.assertTrue((inc.get("screenshot_path") or "").endswith("snap_panic.jpg"))
 

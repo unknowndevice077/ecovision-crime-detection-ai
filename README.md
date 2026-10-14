@@ -126,7 +126,7 @@ Rules the database itself enforces (`chk_user_scope`, plus partial unique indexe
 - A barangay user has a `barangay_id` and no `station_id`; a PNP user has a `station_id` and no `barangay_id`; `DEVTEAM` has neither. Any other combination is rejected at insert time.
 - One `BARANGAY_ADMIN` per barangay, one `PNP_ADMIN` per station.
 
-`manage_cameras` is **barangay-only** (`BARANGAY_ONLY_PERMISSIONS` in `backend.py`): the barangay funded and installed the hardware, PNP consumes the feed. This holds for `PNP_ADMIN` too — an admin tier does not implicitly grant it. The reverse holds for the crime archive: `view_history` and `view_records` are **police-only** (`POLICE_ONLY_PERMISSIONS`) — a barangay account keeps its live incident queue but cannot open police case records, and the server refuses those two keys for barangay accounts even if a stale grant exists. Other permissions (`view_map`, `confirm_dismiss_alerts`, `manage_notify_targets`) are granular per user; see `app/hooks/usePermissions.ts` and the `user_permissions` table.
+`manage_cameras` is **barangay-only** (`BARANGAY_ONLY_PERMISSIONS` in `backend_core.py`): the barangay funded and installed the hardware, PNP consumes the feed. This holds for `PNP_ADMIN` too — an admin tier does not implicitly grant it. The reverse holds for the crime archive: `view_history` and `view_records` are **police-only** (`POLICE_ONLY_PERMISSIONS`) — a barangay account keeps its live incident queue but cannot open police case records, and the server refuses those two keys for barangay accounts even if a stale grant exists. Other permissions (`view_map`, `confirm_dismiss_alerts`, `manage_notify_targets`) are granular per user; see `app/hooks/usePermissions.ts` and the `user_permissions` table.
 
 **Finer-grained access (added Sept 2026):**
 
@@ -161,7 +161,9 @@ EcoVisionCode/
 │   ├── components/             # Tab views (CrimeReportsView, RecordsView, ProfileView, dashboard/*)
 │   ├── context/WebSocketContext.tsx  # Shared live-update WebSocket + useLiveChannel hook
 │   ├── hooks/                  # useRuntimeConfig, usePermissions
-│   ├── backend.py              # FastAPI server
+│   ├── backend.py              # FastAPI app: middleware, router mounting, uvicorn entry point
+│   ├── backend_core.py         # Shared config, auth, DB setup/migrations, permissions, serializers
+│   ├── routers/                # Endpoints, one module per area (auth, incidents, cameras, admin, devteam_*...)
 │   ├── config_store.py         # Writes only changed config keys over config.json (no stale full snapshots)
 │   ├── notifications.py, telegram_bot.py  # Telegram + SMS responder alerts
 │   ├── db.py                   # SQLite/Postgres dual-backend shim
@@ -243,11 +245,11 @@ Two weight lists have to stay in step whenever you add or rename a model: `packa
 
 | File | Read by | Notes |
 |---|---|---|
-| `.env` | `app/backend.py` (`load_dotenv()`) | `APP_ENV`, `SECRET_KEY`, `CORS_ORIGINS`, `DEVTEAM_BOOTSTRAP_USERNAME`/`PASSWORD`. Copy from `.env.example`. |
+| `.env` | `app/backend_core.py` (`load_dotenv()`) | `APP_ENV`, `SECRET_KEY`, `CORS_ORIGINS`, `DEVTEAM_BOOTSTRAP_USERNAME`/`PASSWORD`. Copy from `.env.example`. |
 | `.env.local` | Next.js | **Must be at the repo root**, not in `app/`. Only `NEXT_PUBLIC_*` reaches the browser; both variables already have working defaults in code. Copy from `.env.local.example`. |
 | `config.json` | backend **and** AI core | Detection thresholds, camera index, cooldowns, ESP32, network. The AI core reads only this — never `.env`. |
 
-One caveat worth knowing: `backend.py` imports `db.py` before it calls `load_dotenv()`, and `db.py` reads `DATABASE_URL` at import time — so a `DATABASE_URL` set in `.env` does not reach the database layer. Export it in the real process environment if you want Postgres.
+One caveat worth knowing: `backend_core.py` imports `db.py` before it calls `load_dotenv()`, and `db.py` reads `DATABASE_URL` at import time — so a `DATABASE_URL` set in `.env` does not reach the database layer. Export it in the real process environment if you want Postgres.
 
 ### Start Development
 
@@ -275,7 +277,7 @@ The first two open in their own windows; the Next.js dev server runs in the fore
 
 Override the data root with `ECOVISION_WRITABLE_DIR`, or point at one specific file with `SQLITE_PATH`. That writable directory also holds `logs/`, `recordings/`, `runtime_ports.json`, a writable `config.json` override, and `devteam_credentials.txt`.
 
-**First run** creates a `devteam` account. If `DEVTEAM_BOOTSTRAP_USERNAME`/`DEVTEAM_BOOTSTRAP_PASSWORD` are set in `.env`, `app/backend.py`'s `init_db()` uses those directly — a fixed login instead of a random one, currently how the packaged installer ships for the testing phase (`TESTING_PHASE_FIXED_CREDENTIALS` in `electron/main.js`; must be reverted before a real deployment). Otherwise it generates a random password (`secrets.token_urlsafe(12)`), prints it to the console, and writes it once to `devteam_credentials.txt` in the writable directory — not shown again.
+**First run** creates a `devteam` account. If `DEVTEAM_BOOTSTRAP_USERNAME`/`DEVTEAM_BOOTSTRAP_PASSWORD` are set in `.env`, `app/backend_core.py`'s `init_db()` uses those directly — a fixed login instead of a random one, currently how the packaged installer ships for the testing phase (`TESTING_PHASE_FIXED_CREDENTIALS` in `electron/main.js`; must be reverted before a real deployment). Otherwise it generates a random password (`secrets.token_urlsafe(12)`), prints it to the console, and writes it once to `devteam_credentials.txt` in the writable directory — not shown again.
 
 Schema lives in `app/schema_final.sql` (Postgres) and `app/schema_sqlite.sql` (SQLite) — keep both in step. Postgres migrations are in `alembic/`; the one-shot hierarchy migration is `app/migrate_pnp_hierarchy.py`.
 

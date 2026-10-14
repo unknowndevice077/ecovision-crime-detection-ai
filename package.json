@@ -99,6 +99,17 @@
         "to": "backend/backend.py"
       },
       {
+        "from": "app/backend_core.py",
+        "to": "backend/backend_core.py"
+      },
+      {
+        "from": "app/routers",
+        "to": "backend/routers",
+        "filter": [
+          "*.py"
+        ]
+      },
+      {
         "from": "app/db.py",
         "to": "backend/db.py"
       },
