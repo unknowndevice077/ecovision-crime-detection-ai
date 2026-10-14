@@ -215,7 +215,7 @@ something in this area looks broken again:**
 
 | | |
 |---|---|
-| **Add a vision-language double-check?** | Qwen3-VL-2B checking each alarm: violence 88.0% → 90.5% of fights at 2.0 → 0.5 false alarms/hr; robbery 8.3% → 51–60% of events at 2–3/hr. ~6 s added per alert. **Confirmed on 5 h of held-out footage (7 Oct)**: violence 90.5% at 0.4/hr, robbery 51.1% at 2.0/hr. Next step is wiring it into the app (training repo, `experiments/crop_recheck`). |
+| **Add a vision-language double-check?** | Qwen3-VL-2B checking each alarm: violence 88.0% → 90.5% of fights at 2.0 → 0.5 false alarms/hr; robbery 8.3% → 51–60% of events at 2–3/hr. ~7 s (GPU) or ~15 s (CPU) added per alert. **Confirmed on 5 h of held-out footage (7 Oct)**: violence 90.5% at 0.4/hr, robbery 51.1% at 2.0/hr. **In the app since 7 Oct, experimental** (`detection.verifier`), with long candidates re-checked every 7 s (fights 94.0% at 0.4/hr): GPU or CPU backend (CPU: llama.cpp 4-bit, no VRAM, same accuracy), and robbery comes from the fight detector's whole-frame candidates checked by two questions — is it criminal, and is it more robbery than fight (robbery alerts 59.4% of events at 0.6/hr, 20.5% of fights also labelled robbery; the robbery model is only the fallback). |
 | **Testing-phase shortcuts to revert before real use** | `TESTING_PHASE_FIXED_CREDENTIALS` in `electron/main.js`; `PrivilegesRequired=lowest` in the `.iss`. |
 | **Rebuild the installer?** | Models and config changed on 3–5 Oct; any `.exe` built before that ships the old models. |
 | **Model on/off for barangay users?** | Recommended: read-only visibility + a request-and-approve flow, **not** a direct switch. A local official with a silent off switch reproduces the project's own worst failure mode. |

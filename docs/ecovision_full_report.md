@@ -448,7 +448,10 @@ The robbery result is the largest single gain measured in this project: the
 fast model cannot tell a robbery from a market hand-off, and the verifier can.
 Both were first measured on two hours of camera footage (one alarm =
 0.5/hr), then re-tested on 5 hours (7 Oct): violence + verifier 90.5% at
-0.4/hr; robbery + verifier 51.1% at 2.0/hr and 60.2% at 1.8/hr. The deployed
+0.4/hr; robbery + verifier 51.1% at 2.0/hr and 60.2% at 1.8/hr. (In the app
+since 7 Oct as an experimental option, with a CPU backend of the same accuracy
+and robbery taken from the fight detector's whole-frame candidates — see
+detection_performance_report.md §1.6.) The deployed
 violence and vandalism detectors also held: 88.0% at 1.4/hr and 87.1% at
 0.6/hr.
 

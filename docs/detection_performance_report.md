@@ -44,6 +44,11 @@ the current system.
 | **Vandalism** | experimental | v3, person-crop confirmed, 0.60 × 3 | **87.1%** (27/31) | **1.0** | acc 74.5% vs 62.7% baseline |
 | **Robbery** | experimental | 0.85 × 3 | 8.3% of events; **39.8%** of test clips | **0.5** | clip FPR 3.0% |
 
+On the 5 h camera set (§1.6), violence with the no-person fallback (§1.3) is
+**90.0% at 1.4/hr**. With the alarm double-check on (experimental, §1.6),
+fights are 94.0% at 0.4/hr (with re-checks, below) and robbery-labelled alerts 59.4% at 0.6/hr
+(with 20.5% of fights also labelled robbery).
+
 **Recall on the actual deployment cameras is unmeasured for every class**,
 because no labelled incident has ever been recorded on them.
 
@@ -80,6 +85,11 @@ smaller, easier set; the 200-fight set replaced it.)
   model found nobody in blurry footage, and 13 the model scored low — ground
   fights, distant crowd scuffles, close-up or occluded views, and 3 vertical
   phone videos unlike any CCTV.
+- **No-person fallback (7 Oct, deployed)**: for the 7 fights blocked because
+  the pose model found nobody — when nobody has been found for 6 checks, a
+  whole-frame score of at least 0.8 counts on its own. Chosen on 2 h and
+  confirmed on 5 h, 3 h of which did not exist when it was chosen: 88.0% →
+  **90.0%** of fights, 1.4 → 1.4 false alarms/hr.
 
 ### 1.4 Vandalism and robbery
 
@@ -117,13 +127,16 @@ track for 4 frames. Measured and rejected (Oct): running the detector a second
 time on crops around each person — +8.6 points on tiny guns for +5% false
 detections and up to 6 extra inferences per frame.
 
-### 1.6 Research, not deployed
+### 1.6 Alarm double-check (in the app since 7 Oct, experimental)
 
 A second-stage check by a vision-language model: the fast detector runs at a
 looser setting and each alarm's 2-second clip is scored by **Qwen3-VL-2B**
-(yes/no question, log-probability of "Yes" minus "No"; ~6 s and ~4 GB VRAM per
-alarm on a GTX 1660). Cut-off fitted on half the source videos and scored on
-the other half.
+(yes/no question, log-probability of "Yes" minus "No"). Cut-off fitted on half
+the source videos and scored on the other half. `maincode/alarm_verifier.py`,
+config `detection.verifier`. If the verifier is off, missing or fails, every
+alarm uses the detectors' original strict settings. Per-person ASSAULT alerts
+also wait for the scene-level alarm (checked or strict), so a per-person score
+cannot go around the check.
 
 | | events caught | false alarms/hr |
 |---|---|---|
@@ -154,6 +167,154 @@ on all 5 hours:
 The verifier's gains held. The deployed robbery model got noisier on the new
 footage (5 of its 7 false alarms came from one hour outside Lyn's Restaurant),
 which is the same failure the verifier removes.
+
+**Two backends (7 Oct).** On the GPU (transformers, fp16) a check takes ~7 s
+and ~4.2 GB of VRAM, and the detectors drop from ~15 to ~2 FPS while it runs.
+On the CPU (llama.cpp, 4-bit GGUF, started by the AI core) it takes ~15 s and
+~2.1 GB of RAM, no VRAM, and the detectors keep ~85% of their frame rate. Same
+alarms, same 5 h, cross-validated:
+
+| | GPU fp16 | CPU 4-bit |
+|---|---|---|
+| fights, 0.25 × 1: separation (AUC) | 0.996 | 0.992 |
+| fights caught / false alarms per hour | 90.5% @ 0.4 | 89.0% @ 0.2 |
+| robbery, 0.60 × 2: separation (AUC) | 0.983 | 0.986 |
+| robbery caught / false alarms per hour | 51.1% @ 2.0 | 49.6% @ 0.6 |
+
+The two score on different scales, so each has its own cut-off. The CPU fight
+cut keeps 97% of true alarms instead of 98%: its camera false alarms sit just
+above the 98% cut, so that cut would be fragile (chosen after seeing the
+results; the table is cross-validated). The app's CPU code reproduces the
+experiment's scores exactly (12 of 12 alarms). llama-server's default 8 GB
+prompt cache is turned off — every check sends different frames, so it is
+never reused, and here it grew the server from 2 GB to 10 GB of memory.
+
+**Robbery from the fight detector (7 Oct).** Street robbery is mostly a
+struggle (a grab, a shove, a snatch) that the robbery model rarely flags and
+the fight model does see. *(The table just below was the first attempt; read
+on — it hid a labelling problem that the final design fixes.)* Where robbery was lost was measured first: Qwen
+confirms 87 of the 92 events any detector raises a candidate on, but only 8 of
+the 25 street events got a candidate at all — person-crop confirmation vetoes
+the small or undetected people of most street footage. So the fight
+ensemble's **whole-frame** score (before confirmation) at a loose 0.25 × 1
+gives candidates, and those are asked the robbery question:
+
+| 133 robbery events, 5 h of cameras, keep 95% | robbery-labelled | any alert | street, any alert | robbery false alarms/hr | checks per camera-hour |
+|---|---|---|---|---|---|
+| robbery model 0.60 × 2 + check | 51.1% | 66.2% | 24% | 2.0 | 62 |
+| + person-confirmed fight candidates | 65.4% | 66.9% | 24% | 2.0 | 75 |
+| **whole-frame fight candidates only (in the app)** | **69.2%** | **70.7%** | **52%** | **0.8** | 67 |
+| robbery model + whole-frame candidates | 75.9% | 75.9% | 52% | 2.8 | 117 |
+
+"Any alert" includes the fight alarm, which already raised ASSAULT on many
+robberies; robbery-labelled counts only ROBBERY alerts. The app runs the third
+row: while the verifier runs, the robbery model is not run at all and stays
+the fallback (0.85 × 3) for whenever the verifier is unavailable. The fourth
+row is one config switch away (`tasks.robbery.enabled`) for a machine with
+room for ~75% more checks. Caveats: the candidate setting was chosen from
+three tried (0.40 × 2, 0.30 × 2, 0.25 × 1) after seeing results, and the
+false-alarm figures are 4 to 14 alarms in 5 h. The app's whole-frame
+candidate fires exactly the offline alarms (372 of 372 on the traces).
+`experiments/crop_recheck/robbery_options.py`, `union_eval.py`.
+
+**Fights labelled as robbery — the check that changed the design.** None of
+the numbers above asked how often a real FIGHT gets a robbery label. On the
+200 held-out fights, the yes/no robbery question passed **86%** of them through
+the whole-frame path (69% through the robbery model + check; 25% for the
+strict robbery model alone). Per alarm, the yes/no question separates crime
+from calm camera footage almost perfectly (AUC 0.999) but robbery from fight
+poorly (0.667) — and for street robbery it scored fights *higher* than the
+robberies (0.14). So the street "gain" above was the question passing violent
+clips with a robbery label, not robbery recognised.
+
+A multiple-choice question (A fight / B robbery, snatch or theft / C nothing)
+separates robbery from fight better: log P(B) − log P(A) reaches AUC 0.877
+(street 0.73). The app now requires **both** — yes/no says criminal, and B
+beats A — with each cut fitted on half the robbery videos only and scored on
+the other half; fights and cameras are never fitted on:
+
+| robbery rule (5 h cameras, 200 held-out fights) | robbery-labelled | street | false alarms/hr | fights labelled robbery |
+|---|---|---|---|---|
+| strict robbery model (before 7 Oct) | 8.3% | — | 1.4 | 25% |
+| robbery model + yes/no check | 51.1% | 8% | 2.0 | 69% |
+| whole-frame candidates + yes/no | 69.2% | 44% | 0.8 | 86% |
+| **whole-frame candidates + yes/no + robbery-vs-fight (in the app)** | **59.4%** | 28% | **0.6** | **20.5%** |
+
+The keep rates (98% yes/no, 80% robbery-vs-fight) were chosen from 8 pairs
+after seeing the results, by one rule: the most robbery recall with fights
+mislabelled no more often than by the old robbery model (25%). The second
+question runs only after the first passes, which on calm footage is rare.
+The app's GPU scores match the experiment's exactly (10 of 10 alarms on both
+questions). The CPU backend (llama.cpp) scores on its own scale, so it has
+its own pair of cut-offs, fitted at the same keep rates (not re-chosen):
+60.9% robbery-labelled (street 36%) at 0.8/hr, with 22.7% of fights also
+labelled robbery (`mc_combined.py --backend cpu`). The app's CPU scores match
+the experiment's exactly too (10 of 10, both questions), once scored requests
+stopped reusing llama-server's cached frames from the previous question —
+that reuse had moved the robbery-vs-fight score by up to 0.65.
+`experiments/crop_recheck/mc_eval.py`, `mc_combined.py`, `robbery_on_fights.py`.
+
+**Weapons through the double-check (14 Oct).** No ARMED THREAT *alert* rate
+had ever been measured -- only raw weapon detections. Replaying the app's own
+weapon pipeline (tracking, static-object filter, weapon-to-wrist assignment,
+4-frame confirmation) on the same 5 h of held-out street cameras gave **14
+alerts, 2.8/hr**, the largest false-alarm source in the system; every one was
+looked at and every one was false (phones in hand, bag straps, shirt prints,
+a belt, market stalls). Each weapon alert now waits for the verifier's
+question "Is this person holding a gun or a knife?" on a square crop around
+that person from full-resolution frames. The cut keeps 98% of real weapons,
+fitted on half of the 1,175 hand-labelled guns and knives in the weapon
+model's test set held by a person and scored on the other half:
+
+| ARMED THREAT, 5 h held-out cameras | false alarms/hr | real weapons kept | street-size guns kept | phones in hand rejected |
+|---|---|---|---|---|
+| weapon pipeline alone | 2.8 | 100% | 100% | 0% |
+| **+ weapon question, keep 98% (in the app)** | **1.4** | 97.9% | 95.2% | 51% |
+| + weapon question, keep 95% | 1.0 | 95.0% | 86.8% | 73% |
+
+All 5 unmistakable guns among the alerts on the robbery footage pass. Keep 95%
+was not chosen: it misses one street-size gun in eight, and for an
+armed-threat alarm a missed gun costs more than a false alert. The 1.4/hr
+rests on only 14 alerts, so read it as "about half". The app's crop and score
+reproduce the experiment exactly (19 of 19 alerts, difference 0.000). GPU
+backend only for now; on the CPU backend weapon alerts go out unverified as
+before. `experiments/weapon_alerts/` (`weapon_alert_eval.py`,
+`testset_people.py`, `vlm_weapon.py`, `weapon_verify_eval.py`,
+`verify_weapon_shipped.py`).
+
+**One incident per struggle (12 Oct).** In the live test on spliced robbery
+footage, two of three robberies raised an ASSAULT incident (fight check,
+~10 s) and then a ROBBERY incident (both robbery questions, ~20 s) for the
+same event. A verified robbery from the fight detector's candidates now
+*upgrades* an ASSAULT alerted in the previous 60 s instead of opening a second
+incident — same incident, type ROBBERY, the verifier's verdict appended to
+its narrative, the original snapshot, hash and clip kept as evidence. An
+incident an operator has already closed or deleted is left alone, and the
+robbery is reported on its own (`main.py` `ROBBERY_MERGE_SECONDS`,
+`/api/ai_trigger` `upgrade`; tests in `test_feature_sweep.py::AiUpgrade`).
+This changes how incidents are counted, not what is detected: the recall and
+false-alarm figures above are per event and unaffected.
+
+**Re-checking long candidates (7 Oct).** With one check per candidate, at
+most 92.5% of fights can be caught at 0.25 × 1 — and lowering the threshold
+does not move that, because 8 of the 15 fights with no check began while a
+candidate was *already* on and so had no rising edge of their own. The fight
+gate now checks again every 7 s while a candidate stays on, unverified, with
+no check pending:
+
+| fights, 0.25 × 1, keep 98% (cross-validated) | fights caught | false alarms/hr | checks per camera-hour |
+|---|---|---|---|
+| one check per candidate | 90.5% | 0.4 | 12.8 |
+| re-check every 15 s (CPU check time) | 92.5% | 0.4 | 12.8 |
+| **re-check every 7 s (GPU check time, in the app)** | **94.0%** | **0.4** | 13.4 |
+
+The interval comes from the check times, set before the result; on the CPU
+backend the "no check pending" rule makes it ~15 s by itself. Scored with the
+CPU backend's own model at its own cut (keep 97%): one check 89.0% at 0.2/hr,
+re-check every 15 s 91.0% at 0.2/hr (`compare_recheck.txt`). The app's gate
+submits re-checks at exactly the evaluated times (325 of 325).
+`experiments/crop_recheck/cascade_eval.py` (`violence_recheck7`),
+`verify_recheck_shipped.py`.
 
 
 ---

@@ -111,10 +111,16 @@ unmeasured, because no labelled incident has ever been recorded on them. That
 follows from the problem — a crime cannot be labelled on footage where none
 has happened — rather than from a gap in the measurement work.
 
-### In research, not deployed
+### Alarm double-check (in the app, experimental)
 
-A second-stage check by a small vision-language model (Qwen3-VL-2B, ~6 s per
-alarm) on the training side: violence 88.0% → 90.5% of fights at 2.0 → 0.5
-false alarms/hr; robbery 8.3% → 51–60% of events at 2–3/hr. Confirmed on 5
-hours of held-out footage on 7 Oct (violence 90.5% at 0.4/hr; robbery 51.1% at
-2.0/hr). Not yet in the app.
+A second-stage check by a small vision-language model (Qwen3-VL-2B): violence
+88.0% → 94.0% of fights at 1.4 → 0.4 false alarms/hr (re-checking long candidates every 7 s); robbery 8.3% → 51.1% of
+events at 2.0/hr, on 5 hours of held-out footage. In the app since 7 Oct
+(`maincode/alarm_verifier.py`, config `detection.verifier`), on the GPU (~7 s
+per alarm, ~4.2 GB VRAM) or the CPU (llama.cpp 4-bit, ~15 s, ~2.1 GB RAM, same
+accuracy). Robbery now comes from the fight detector's whole-frame
+candidates, checked by two questions (is it criminal; is it more robbery than
+fight): 59.4% of robbery events alerted as robbery at 0.6/hr, with 20.5% of
+fights also labelled robbery (robbery model + one question: 51.1% at 2.0/hr,
+69% of fights). The robbery model is only the fallback. Details:
+detection_performance_report.md §1.6.
