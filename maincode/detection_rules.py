@@ -526,9 +526,16 @@ def gate_weapon_detections(raw):
     tracking. raw: iterable of (class name as the model emits it, confidence,
     xyxy box). Returns (weapons, violence_boxes) exactly as main.py's
     _run_weapon_detection used to build them inline -- phones and any class
-    not named in WEAPON_CLASSES / VIOLENCE_CLASSES / SIGN_CLASSES are dropped."""
+    not named in WEAPON_CLASSES / VIOLENCE_CLASSES / SIGN_CLASSES are dropped.
+    Boxes with a NaN/inf coordinate (seen from the FP16 weapon model) are
+    dropped too: cast to int they become INT_MIN and the centre sum below
+    overflows. The int cast happens here, after that check."""
     weapons, vboxes = [], []
     for cls_raw, raw_conf, xyxy in raw:
+        xyxy = np.asarray(xyxy)
+        if not (np.all(np.isfinite(xyxy)) and np.isfinite(raw_conf)):
+            continue
+        xyxy = xyxy.astype(int)
         cls_name = cls_raw.lower().strip()
         required_conf = CONF_BY_CLASS.get(cls_name, WEAPON_CONF)
         if raw_conf < required_conf:

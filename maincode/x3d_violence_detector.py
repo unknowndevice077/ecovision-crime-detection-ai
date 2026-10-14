@@ -130,6 +130,10 @@ TILE_CHECK_INTERVAL = _VIOLENCE_CFG["tile_check_interval"]
 SCENE_PERSON_CONFIRM = bool(_VIOLENCE_CFG["scene_person_confirm"])
 SCENE_ENSEMBLE_PATHS = [os.path.normpath(os.path.join(DETECTOR_PROJECT_ROOT, p))
                         for p in _VIOLENCE_CFG.get("scene_ensemble_paths") or []]
+# None = off. See SceneViolenceDetector._confirmed_conf and config.json's
+# detection.violence._scene_no_person_fallback.
+SCENE_NO_PERSON_MIN = _VIOLENCE_CFG.get("scene_no_person_fallback_min_scene")
+SCENE_NO_PERSON_CHECKS = int(_VIOLENCE_CFG.get("scene_no_person_fallback_checks", 6))
 
 # --- EMA smoothing on raw confidence, per track ---
 EMA_ALPHA = _VIOLENCE_CFG["ema_alpha"]          # 0 = no smoothing (raw), 1 = fully smoothed/slow to react
@@ -190,6 +194,32 @@ def _smooth_and_confirm(prev_ema: float, prev_hits: int, was_confirmed: bool,
         confirmed = ema >= (thr - RELEASE_HYSTERESIS_MARGIN)
 
     return confirmed, ema, hits
+
+
+class CandidateState:
+    """A loose smoothing/confirmation state over one score stream, whose
+    rising edges are candidate alarms for alarm_verifier.VerifiedGate (which
+    reads exactly these three attributes). Same rule as the strict state, via
+    _smooth_and_confirm, at its own threshold/consecutive."""
+
+    def __init__(self, threshold: float, consecutive: int):
+        self.candidate_threshold = float(threshold)
+        self.candidate_consecutive = int(consecutive)
+        self.reset()
+
+    def reset(self):
+        self._ema = None
+        self._hits = 0
+        self.candidate_confirmed = False
+        # True only on the update() call whose check turned the candidate on.
+        self.candidate_started = False
+
+    def update(self, raw_conf: float):
+        was = self.candidate_confirmed
+        self.candidate_confirmed, self._ema, self._hits = _smooth_and_confirm(
+            prev_ema=self._ema, prev_hits=self._hits, was_confirmed=was, raw_conf=raw_conf,
+            threshold=self.candidate_threshold, consecutive=self.candidate_consecutive)
+        self.candidate_started = self.candidate_confirmed and not was
 
 
 class X3DViolenceDetector:
@@ -818,7 +848,8 @@ class SceneViolenceDetector(X3DViolenceDetector):
     def __init__(self, model_path: str = None, device: str = None,
                  threshold: float = None, consecutive: int = None,
                  log_path: str = SCENE_DIAGNOSTIC_LOG_PATH,
-                 person_confirm: bool = False, ensemble_paths=None):
+                 person_confirm: bool = False, ensemble_paths=None,
+                 no_person_min_scene: float = None, no_person_checks: int = 6):
         # Defaults to the whole-frame-trained checkpoint, not the crop one --
         # matching the representation is worth 5.3pp here. Separate log file
         # so it does not interleave with the per-track detector's, which is
@@ -847,6 +878,17 @@ class SceneViolenceDetector(X3DViolenceDetector):
         self._confirm_recent = deque(maxlen=self.CONFIRM_RECENT)
         self._last_scene_conf = 0.0
         self._last_crop_conf = 0.0
+        # NO-PERSON FALLBACK (person_confirm only): when the pose model has
+        # found NOBODY for no_person_checks checks in a row, confirmation has
+        # nothing to confirm with, and blurry or distant footage of a real
+        # fight is exactly where that happens -- 7 of the 24 fights the
+        # deployed setting missed were vetoed this way. Then a whole-frame
+        # score of at least no_person_min_scene stands on its own.
+        self.no_person_min_scene = None if no_person_min_scene is None else float(no_person_min_scene)
+        self._person_counts = deque(maxlen=max(1, int(no_person_checks)))
+        if self.person_confirm and self.no_person_min_scene is not None:
+            print(f"[X3D] No-person fallback ON: whole frame >= {self.no_person_min_scene} counts "
+                  f"when nobody was found for {self._person_counts.maxlen} checks")
         # ENSEMBLE: further checkpoints scored on the very same tensor, every
         # model's calibrated probabilities averaged (_forward below). Measured
         # 2026-10-04 (experiments/crop_recheck, ensemble_traces.py): deployed
@@ -859,6 +901,39 @@ class SceneViolenceDetector(X3DViolenceDetector):
                           for p in (ensemble_paths or [])]
         if self._partners:
             print(f"[X3D] Ensemble ON: averaging {1 + len(self._partners)} models")
+        # CANDIDATE STATE (set_candidate): a second, looser smoothing/
+        # confirmation state over the very same raw confidence -- no extra
+        # forward pass. Its rising edges are the candidate alarms that
+        # alarm_verifier.py checks; the strict state above stays the
+        # fallback whenever the verifier is unavailable.
+        self.candidate_threshold = None
+        self.candidate_consecutive = None
+        self._reset_candidate()
+        # WHOLE-FRAME CANDIDATE (set_scene_candidate): the same kind of loose
+        # state over the whole-frame score alone, BEFORE person-crop
+        # confirmation. Confirmation vetoes small or undetected people, which
+        # is most street robbery; main.py asks this state's candidates the
+        # robbery question (alarm_verifier task robbery_from_fight).
+        self.scene_candidate = None
+
+    def set_scene_candidate(self, threshold: float, consecutive: int):
+        self.scene_candidate = CandidateState(threshold, consecutive)
+        print(f"[X3D] Whole-frame candidate alarms for verification: threshold={threshold} "
+              f"consecutive={consecutive}")
+
+    def set_candidate(self, threshold: float, consecutive: int):
+        self.candidate_threshold = float(threshold)
+        self.candidate_consecutive = int(consecutive)
+        self._reset_candidate()
+        print(f"[X3D] Candidate alarms for verification: threshold={self.candidate_threshold} "
+              f"consecutive={self.candidate_consecutive}")
+
+    def _reset_candidate(self):
+        self._cand_ema = None
+        self._cand_hits = 0
+        self.candidate_confirmed = False
+        # True only on the update() call whose check turned the candidate on.
+        self.candidate_started = False
 
     def _forward(self, tensor: torch.Tensor) -> torch.Tensor:
         probs = super()._forward(tensor)
@@ -883,6 +958,10 @@ class SceneViolenceDetector(X3DViolenceDetector):
         self._confirm_recent.clear()
         self._last_scene_conf = 0.0
         self._last_crop_conf = 0.0
+        self._person_counts.clear()
+        self._reset_candidate()
+        if self.scene_candidate is not None:
+            self.scene_candidate.reset()
 
     def _confirmed_conf(self, person_boxes) -> float:
         """One check with person-crop confirmation: scores the whole frame and
@@ -925,6 +1004,10 @@ class SceneViolenceDetector(X3DViolenceDetector):
         crop = max((c for _, c in res[1:]), default=0.0)
         self._confirm_recent.append(crop)
         self._last_scene_conf, self._last_crop_conf = scene, crop
+        self._person_counts.append(len(boxes))
+        if (self.no_person_min_scene is not None and scene >= self.no_person_min_scene
+                and len(self._person_counts) == self._person_counts.maxlen and max(self._person_counts) == 0):
+            return scene
         return min(scene, max(self._confirm_recent))
 
     def update(self, frame: np.ndarray, frame_count: int, person_boxes=None) -> tuple:
@@ -949,6 +1032,9 @@ class SceneViolenceDetector(X3DViolenceDetector):
                     person_boxes = [[v * s for v in b[:4]] for b in person_boxes]
             self._full_buffer.append(frame)
 
+        self.candidate_started = False
+        if self.scene_candidate is not None:
+            self.scene_candidate.candidate_started = False
         # No MIN_BUFFER_FOR_INFERENCE gate. The buffer is scene-wide and
         # starts filling on frame 1, so requiring a warm-up here would
         # reintroduce exactly the blind spot this class removes. _run_inference
@@ -974,6 +1060,15 @@ class SceneViolenceDetector(X3DViolenceDetector):
         self._scene_hits = hits
         self._scene_confirmed = confirmed
         self._scene_result = (confirmed, raw_conf)
+        if self.candidate_threshold is not None:
+            was = self.candidate_confirmed
+            self.candidate_confirmed, self._cand_ema, self._cand_hits = _smooth_and_confirm(
+                prev_ema=self._cand_ema, prev_hits=self._cand_hits, was_confirmed=was,
+                raw_conf=raw_conf, threshold=self.candidate_threshold,
+                consecutive=self.candidate_consecutive)
+            self.candidate_started = self.candidate_confirmed and not was
+        if self.scene_candidate is not None:
+            self.scene_candidate.update(self._last_scene_conf if self.person_confirm else raw_conf)
 
         self._log_row(self.SCENE_TID, frame_count, raw_conf, ema,
                       hits, confirmed, len(self._scene_buffer))

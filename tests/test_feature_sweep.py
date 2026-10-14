@@ -189,6 +189,12 @@ class Incidents(Base):
         finally:
             B.TRUSTED_SERVICE_HOSTS.add("testclient")
 
+    def test_deleted_incident_cannot_be_changed_by_its_own_barangay(self):
+        iid = S.make_incident(self.brgyA)
+        self.ok(self.c.delete(f"/api/incidents/{iid}", headers=self.h(self.dev)))
+        self.assertEqual(self.c.patch(f"/api/incidents/{iid}/status", headers=self.h(self.capA),
+                                      json={"status": "Confirmed"}).status_code, 404)
+
     def test_status_confirm_dismiss_and_invalid_value(self):
         iid = S.make_incident(self.brgyA)
         self.assertEqual(self.c.patch(f"/api/incidents/{iid}/status", headers=self.h(self.staffA),
@@ -281,6 +287,59 @@ class Incidents(Base):
             S.B.ESP32_ENABLED, S.B.ESP32_IP = was
         self.assertEqual(r["status"], "unreachable")
         self.assertFalse(r["delivered"])
+
+
+class AiUpgrade(Base):
+    """A struggle that is also a robbery passes both checks of one fight
+    candidate; the AI core then upgrades the open ASSAULT instead of opening
+    a second incident (main.py ROBBERY_MERGE_SECONDS)."""
+
+    def row(self, iid):
+        conn = S.db()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT i.type, i.confidence, d.narrative, d.ai_context, v.screenshot_path "
+                        "FROM incidents i JOIN incident_details d ON d.incident_id = i.id "
+                        "JOIN incident_visibility v ON v.incident_id = i.id WHERE i.id = ?", (iid,))
+            return dict(cur.fetchone())
+        finally:
+            conn.close()
+
+    def upgrade(self, iid, conf=0.6):
+        return self.c.post("/api/ai_trigger", json={
+            "id": iid, "event": "ROBBERY", "confidence": conf, "barangay_id": self.brgyA,
+            "camera_id": self.camsA[0], "upgrade": True, "context": {"verifier": {"mc_score": 5.0}}})
+
+    def test_robbery_upgrades_the_open_assault(self):
+        iid = S.ai_alert(self.brgyA, self.camsA[0], conf=0.5, screenshot="/static/screenshots/snap_x.jpg")
+        r = self.upgrade(iid, 0.8)
+        self.assertEqual(r.json()["status"], "upgraded")
+        got = self.row(iid)
+        self.assertEqual(got["type"], "ROBBERY")
+        self.assertAlmostEqual(got["confidence"], 0.8)
+        self.assertEqual(got["screenshot_path"], "/static/screenshots/snap_x.jpg")   # evidence kept
+        ctx = json.loads(got["ai_context"])
+        self.assertEqual(ctx["upgraded_from"], "ASSAULT")
+        self.assertEqual(ctx["detector"], "test")                                     # original kept
+        self.assertIn("Re-labelled from assault", got["narrative"])
+
+    def test_upgrade_without_an_open_incident_reports_a_new_one(self):
+        iid = S.ai_alert(self.brgyA, self.camsA[0])
+        self.ok(self.c.delete(f"/api/incidents/{iid}", headers=self.h(self.dev)))
+        missing = S.uid("ai")
+        r = self.upgrade(missing)
+        self.assertEqual(r.json()["status"], "processed")
+        self.assertEqual(self.row(missing)["type"], "ROBBERY")
+
+    def test_upgrade_of_a_closed_incident_reports_a_new_one(self):
+        iid = S.ai_alert(self.brgyA, self.camsA[0])
+        self.ok(self.c.delete(f"/api/incidents/{iid}", headers=self.h(self.dev)))
+        r = self.upgrade(iid)
+        self.assertEqual(r.status_code, 200, r.text)
+        new = r.json()["incident_id"]
+        self.assertNotEqual(new, iid)
+        self.assertEqual(self.row(new)["type"], "ROBBERY")
+        self.assertEqual(self.row(iid)["type"], "ASSAULT")      # the closed one is left as it was
 
 
 class Records(Base):
@@ -501,6 +560,16 @@ class DevTeamTools(Base):
                                       json={"enabled": True}).status_code, 404)
         status = self.ok(self.c.get("/api/devteam/optimize_weights/status", headers=self.h(self.dev)))
         self.assertIn("running", status)
+
+    def test_overview_totals_skip_soft_deleted_incidents(self):
+        iid = S.ai_alert(self.brgyA, self.camsA[0])
+        before = self.ok(self.c.get("/api/devteam/overview", headers=self.h(self.dev)))
+        self.ok(self.c.delete(f"/api/incidents/{iid}", headers=self.h(self.dev)))
+        after = self.ok(self.c.get("/api/devteam/overview", headers=self.h(self.dev)))
+        self.assertEqual(after["totals"]["incidents"], before["totals"]["incidents"] - 1)
+        self.assertEqual(after["totals"]["active_incidents"], before["totals"]["active_incidents"] - 1)
+        by_loc = lambda ov: sum(r["c"] for r in ov["incidents_by_location"])
+        self.assertEqual(by_loc(after), by_loc(before) - 1)
 
     def test_audit_log_filters(self):
         rows = self.ok(self.c.get("/api/devteam/audit_log?q=station&limit=5", headers=self.h(self.dev)))

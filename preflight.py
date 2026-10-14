@@ -217,6 +217,49 @@ def main():
     except Exception as e:
         warn(f"could not read package.json: {e}")
 
+    # ---- 4c. Alarm verifier (alarm_verifier.py) --------------------------
+    # Added 2026-10-12: the 12 Oct build nearly shipped without the gpu
+    # backend's weights and without transformers in python-env, and every
+    # check above still said READY -- the verifier just never loaded on the
+    # installed machine. It is optional (the detectors fall back to their
+    # strict settings), so a missing piece is a WARN, not a FAIL.
+    vcfg = _CONFIG["detection"].get("verifier", {})
+    if vcfg.get("enabled"):
+        print(f"\n[4c] Alarm verifier (backend {vcfg.get('backend', 'gpu')})")
+        backend = vcfg.get("backend", "gpu")
+        ccfg = vcfg.get("cpu", {})
+        rel = lambda k, d: REPO / (ccfg.get(k) or d)  # noqa: E731
+        usable = []
+        if backend in ("gpu", "auto"):
+            gdir = REPO / vcfg.get("model_path", "weights/qwen3_vl_2b")
+            try:
+                import transformers
+                tv = transformers.__version__
+            except ImportError:
+                tv = None
+            st = list(gdir.glob("*.safetensors")) if gdir.is_dir() else []
+            if not st:
+                warn(f"gpu backend: weights missing ({gdir})")
+            elif tv is None:
+                warn("gpu backend: transformers not installed in this Python")
+            else:
+                ok(f"gpu backend: {sum(f.stat().st_size for f in st) / 2**30:.1f} GB weights, transformers {tv}")
+                usable.append("gpu")
+        if backend in ("cpu", "auto"):
+            parts = {"llama-server": rel("server", "tools/llamacpp/llama-server.exe"),
+                     "model": rel("model", "weights/qwen3_vl_2b_gguf/Qwen3VL-2B-Instruct-Q4_K_M.gguf"),
+                     "mmproj": rel("mmproj", "weights/qwen3_vl_2b_gguf/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf")}
+            gone = [k for k, p in parts.items() if not p.exists()]
+            if gone:
+                warn(f"cpu backend: missing {', '.join(gone)}")
+            else:
+                ok("cpu backend: llama-server, model and mmproj present")
+                usable.append("cpu")
+        if not usable:
+            warn("no verifier backend can load -- fights and robbery run at their strict "
+                 "settings (fights 88.0% at 1.4 false alarms/hr instead of 94.0% at 0.4)")
+            warnings.append("alarm verifier unavailable")
+
     # ---- 5. Database ----------------------------------------------------
     print("\n[5] Database")
     if os.environ.get("DATABASE_URL"):

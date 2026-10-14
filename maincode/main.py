@@ -93,8 +93,10 @@ except ImportError:
 # 0.1 ROBBERY / VANDALISM CORE DETECTION IMPORTS
 # ──────────────────────────────────────────────────────────────────────────────
 from robbery_vandalism import RobberyTracker, VandalismTrackState, score_vandalism
+from alarm_verifier import AlarmVerifier, VerifiedGate
 from x3d_violence_detector import (
     X3DViolenceDetector, SceneViolenceDetector, TiledSceneViolenceDetector, VIOLENCE_MODE,
+    SCENE_NO_PERSON_MIN, SCENE_NO_PERSON_CHECKS,
     MODEL_PATH as TRACK_MODEL_PATH, SCENE_PERSON_CONFIRM, SCENE_ENSEMBLE_PATHS,
 )
 
@@ -636,7 +638,9 @@ if SCENE_MODE_ON and VIOLENCE_ON:
         # to look violent (config.json detection.violence.scene_person_confirm;
         # measured trade-off in SceneViolenceDetector's class docstring).
         scene_detector = SceneViolenceDetector(device=TARGET_DEVICE, person_confirm=SCENE_PERSON_CONFIRM,
-                                               ensemble_paths=SCENE_ENSEMBLE_PATHS)
+                                               ensemble_paths=SCENE_ENSEMBLE_PATHS,
+                                               no_person_min_scene=SCENE_NO_PERSON_MIN,
+                                               no_person_checks=SCENE_NO_PERSON_CHECKS)
     print(f"🎬 Violence mode: {VIOLENCE_MODE} (whole-frame detection active)")
 elif not VIOLENCE_ON:
     pass  # already printed "🚫 Physical Violence: disabled" above -- a mode line here would contradict it
@@ -657,11 +661,9 @@ else:
 VANDALISM_ON = bool(sys_config.get("detection", {})
                     .get("vandalism", {}).get("enabled", False))
 if not VANDALISM_ON:
-    print("🚫 Vandalism: disabled -- see config detection.vandalism._why_disabled. "
-          "v3 (deployed here, off) measures 21.75 false alarms/hr on four real "
-          "held-out cameras, down from 125.25 once real Davao street footage was "
-          "added as negatives. The violence detector runs at 4.50/hr, so this is "
-          "still ~5x too noisy to put in front of an operator.")
+    print("🚫 Vandalism: disabled via config.json detection.vandalism.enabled "
+          "(normally on, labelled experimental: 87.1% of held-out acts at "
+          "1.0 false alarm/hr with person-crop confirmation)")
 
 # VANDALISM MODEL, wired 2026-08-22. Until now detection.vandalism.model_path
 # was named in config and loaded by nothing: VANDALISM_ON gated only the
@@ -713,6 +715,33 @@ if ROBBERY_ON:
         print(f"⚠️  Robbery model failed to load ({e}); "
               f"falling back to the rule-based path")
         ROBBERY_ON = False
+
+# ── Second-stage alarm verification (detection.verifier) ─────────────────
+# Fight and robbery candidates from a LOOSER detector setting are checked by a
+# small video-language model before they become alerts; see
+# alarm_verifier.py for the measured trade-off and the fallback rules. Off on
+# machines without CUDA: the detectors themselves then already use the whole
+# CPU, and the verifier's cpu backend would take it from them.
+_VERIFIER_CFG = dict(sys_config.get("detection", {}).get("verifier", {}))
+if not USE_CUDA:
+    _VERIFIER_CFG["enabled"] = False
+alarm_verifier = AlarmVerifier(_VERIFIER_CFG, os.path.dirname(BASE_DIR), device=TARGET_DEVICE)
+_verify_gates = {"violence": VerifiedGate("violence", alarm_verifier,
+                                          recheck=alarm_verifier.tasks.get("violence", {}).get("recheck_seconds")),
+                 "robbery": VerifiedGate("robbery", alarm_verifier),
+                 # the FIGHT detector's whole-frame candidates, asked the
+                 # ROBBERY question
+                 "robbery_from_fight": VerifiedGate("robbery_from_fight", alarm_verifier)}
+for _task, _det in (("violence", scene_detector), ("robbery", robbery_detector)):
+    _s1 = alarm_verifier.stage1(_task) if alarm_verifier.enabled else None
+    # Exactly SceneViolenceDetector: the tiled subclass has its own update()
+    # and no candidate state, so it keeps its strict setting.
+    if _s1 and _det is not None and type(_det) is SceneViolenceDetector:
+        _det.set_candidate(*_s1)
+_s1 = alarm_verifier.stage1("robbery_from_fight") if alarm_verifier.enabled else None
+if _s1 and scene_detector is not None and type(scene_detector) is SceneViolenceDetector:
+    scene_detector.set_scene_candidate(*_s1)
+_rob_model_running = True   # see "robbery model only as the fallback" below
 
 print(f"📦 [ENGINE LOADER] Using Pose Pipeline: {pose_file_name}")
 print(f"📦 [ENGINE LOADER] Using Weapon Pipeline: {weapon_file_name}")
@@ -771,7 +800,7 @@ def _run_weapon_detection(frame_copy):
     if res[0].boxes:
         for box in res[0].boxes:
             raw.append((res[0].names[int(box.cls)], float(box.conf[0].cpu()),
-                        box.xyxy[0].cpu().numpy().astype(int)))
+                        box.xyxy[0].cpu().numpy()))  # int cast after the NaN check in the gate
     weapons, vboxes = gate_weapon_detections(raw)
     with _weapon_lock:
         _weapon_cache["weapons"] = weapons
@@ -791,7 +820,10 @@ def _run_vandal_mark_detection(frame_copy):
         for box in res[0].boxes:
             raw_conf = float(box.conf[0].cpu())
             if raw_conf >= VANDAL_MARK_CONF:
-                xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                xyxy = box.xyxy[0].cpu().numpy()
+                if not np.all(np.isfinite(xyxy)):
+                    continue          # NaN box: the int cast would be garbage
+                xyxy = xyxy.astype(int)
                 cy = (int(xyxy[1]) + int(xyxy[3])) / 2.0 / max(fh, 1)
                 if cy < VANDAL_MARK_EDGE_BAND or cy > 1.0 - VANDAL_MARK_EDGE_BAND:
                     continue          # DVR overlay band -- see constant
@@ -802,8 +834,9 @@ def _run_vandal_mark_detection(frame_copy):
 # ──────────────────────────────────────────────────────────────────────────────
 # 9. MATH / SCORING HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
-def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_path: str = None, context: dict = None):
-    print(f"🔥 [ALERT] Posting {event} event | case_id={incident_id} | conf={conf:.2f}")
+def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_path: str = None, context: dict = None,
+                upgrade: bool = False):
+    print(f"🔥 [ALERT] {'Upgrading to' if upgrade else 'Posting'} {event} event | case_id={incident_id} | conf={conf:.2f}")
     try:
         # BUG FOUND 2026-08-19: these were camelCase (barangayId,
         # screenshotPath), but backend.py's AiTriggerSchema declares
@@ -845,6 +878,8 @@ def _post_alert(incident_id, conf: float, event: str = "ASSAULT", screenshot_pat
             payload["screenshot_path"] = screenshot_path
         if context:
             payload["context"] = context
+        if upgrade:
+            payload["upgrade"] = True
         r = requests.post(BACKEND_URL, json=payload, timeout=2.0)
         print(f"   ✅ Backend {r.status_code}: {r.text[:120]}")
     except Exception as e:
@@ -1436,6 +1471,21 @@ else:
 # ──────────────────────────────────────────────────────────────────────────────
 # 14.1 CAMERA RECONNECT HELPER
 # ──────────────────────────────────────────────────────────────────────────────
+_stream_restarted = threading.Event()
+
+
+def _reset_temporal_state():
+    """Forget every frame from before a reconnect or camera switch."""
+    x3d_detector.reset_all_tracks()
+    for det in (scene_detector, robbery_detector, vandalism_detector):
+        if det is not None and hasattr(det, "reset_scene"):
+            det.reset_scene()
+    if alarm_verifier is not None:
+        alarm_verifier.history.clear()
+        if alarm_verifier.full_history is not None:
+            alarm_verifier.full_history.clear()
+
+
 def _reopen_camera():
     """Attempts to fully reinitialize the capture device after a drop.
 
@@ -1450,6 +1500,13 @@ def _reopen_camera():
         pass
     new_cap = _open_capture(camera_source)
     cap = new_cap if new_cap is not None else cv2.VideoCapture()
+    if cap.isOpened():
+        # The temporal models classify the last 13+ frames; their first
+        # clip after a gap (or a different camera) would splice the old
+        # picture onto the new one, and that jump reads as motion. The main
+        # loop clears them on its next good frame (this can run on the
+        # stream server's thread, from the camera-switch endpoints).
+        _stream_restarted.set()
     return cap.isOpened()
 
 
@@ -1840,6 +1897,14 @@ class PanicCaptureRequest(BaseModel):
     incident_id: str
 
 
+@stream_app.get("/verifier_status")
+def verifier_status():
+    """Alarm double-check state for the dashboard: loaded or not, and how
+    many candidates it has checked / passed / rejected this run."""
+    v = globals().get("alarm_verifier")
+    return v.describe() if v is not None else {"status": "starting", "active": False}
+
+
 @stream_app.post("/panic_capture")
 def panic_capture(payload: PanicCaptureRequest):
     """Hit by backend.py's /api/panic_trigger the instant the hardware panic
@@ -1920,6 +1985,53 @@ RULE_VANDALISM_PLACEHOLDER_CONF = 0.84
 
 scene_last_alert_frame = -SCENE_COOLDOWN_FRAMES
 
+# A struggle that is also a robbery passes both checks of one fight candidate:
+# "violence" (~10 s on the GPU) and then robbery_from_fight (two questions,
+# ~20 s; ~30 s on the CPU backend). Seen live on 2026-10-08 as two incidents
+# for one event, ASSAULT then ROBBERY, ~11 s apart. A verified robbery from
+# that path within this many seconds of an ASSAULT alert upgrades it instead
+# (backend: AiTriggerSchema.upgrade). 60 s covers the CPU backend's two
+# questions plus a queued check.
+ROBBERY_MERGE_SECONDS = 60.0
+
+# ARMED THREAT through the verifier (2026-10-14). Replayed on 5 h of held-out
+# street cameras the weapon pipeline raised 2.8 alerts/hr, and all 14 were
+# phones, bag straps, shirt prints and market stalls -- the largest false-
+# alarm source in the system (fights 0.4/hr, robbery 0.6/hr). Each alert now
+# waits for the verifier's weapon question on a crop around that person:
+# passed -> alert (with the verdict), rejected -> dropped, check failed or
+# verifier unavailable -> alert as before. Measured: experiments/weapon_alerts.
+_weapon_verdicts = deque()          # (passed, info, alert) from the verifier thread
+
+
+def _weapon_check_on() -> bool:
+    return alarm_verifier.full_history is not None and alarm_verifier.can_run("weapon")
+
+
+def _weapon_done(passed, info, alert):
+    _weapon_verdicts.append((passed, info, alert))
+
+
+def _submit_weapon_check(alert, p_box, ts):
+    clip = alarm_verifier.full_history.crop_clip([float(v) for v in p_box], ts, n=alarm_verifier.frames,
+                                                 span=alarm_verifier.span, side=alarm_verifier.side)
+    if clip is None or not alarm_verifier.submit("weapon", _weapon_done, end_ts=ts, context=alert, clip=clip):
+        _weapon_verdicts.append((None, {"error": "verifier could not take it"}, alert))
+
+
+def _drain_weapon_checks() -> list:
+    out = []
+    while _weapon_verdicts:
+        passed, info, alert = _weapon_verdicts.popleft()
+        if passed is False:
+            print(f"🔎 [VERIFIER] ARMED THREAT {alert['id']} dropped: no weapon in the person's hands")
+            continue
+        if info:
+            alert["ctx"]["verifier"] = info
+        out.append(alert)
+    return out
+_last_assault_alert = {"id": None, "t": float("-inf")}
+
 _running = True
 def _shutdown(*_):
     global _running
@@ -1974,6 +2086,15 @@ while _running:
     # frames carrying its own overlays learns the overlays. Saved next to
     # the evidence image only when an alert fires; see the snapshot flush.
     clean_frame = frame.copy()
+    _frame_ts = time.perf_counter()
+    if _stream_restarted.is_set():
+        _stream_restarted.clear()
+        _reset_temporal_state()
+        print("🔄 New camera stream: detector frame buffers cleared.")
+    if alarm_verifier.enabled:
+        alarm_verifier.history.push(clean_frame, _frame_ts)
+        if alarm_verifier.full_history is not None:
+            alarm_verifier.full_history.push(clean_frame, _frame_ts)
 
     frame_count += 1
     fps_frame_count += 1
@@ -2018,9 +2139,44 @@ while _running:
             frame, frame_count,
             person_boxes=_confirm_person_boxes if vandalism_detector.person_confirm else None)
 
+    # Robbery model only as the fallback: while the verifier checks the fight
+    # detector's whole-frame candidates with the robbery questions
+    # (robbery_from_fight), that path catches more robbery, with fewer false
+    # alarms and fewer fights mislabelled as robbery, than this model did
+    # (alarm_verifier.QUESTIONS / MC_QUESTION), so the model is not run at
+    # all. Whenever that path is unavailable -- verifier off, not loaded yet,
+    # failed, no cut-offs fitted for its backend, or violence detection
+    # switched off -- it runs again at its strict setting, from a fresh clip.
+    _rob_from_fight = (ROBBERY_ON and SCENE_MODE_ON and VIOLENCE_ON
+                       and alarm_verifier.can_run("robbery_from_fight")
+                       and getattr(scene_detector, "scene_candidate", None) is not None)
+    _run_rob_model = (ROBBERY_ON and robbery_detector is not None
+                      and ("robbery" in alarm_verifier.tasks or not _rob_from_fight))
+    if _run_rob_model and not _rob_model_running and hasattr(robbery_detector, "reset_scene"):
+        robbery_detector.reset_scene()
+    _rob_model_running = _run_rob_model
     robbery_hit, robbery_conf = (False, 0.0)
-    if ROBBERY_ON and robbery_detector is not None:
+    if _run_rob_model:
         robbery_hit, robbery_conf = robbery_detector.update(frame, frame_count)
+
+    # Verified on/off signals (alarm_verifier.VerifiedGate). With the
+    # verifier off or unavailable these are exactly scene_violent /
+    # robbery_hit -- the strict settings.
+    scene_on = scene_violent
+    if SCENE_MODE_ON and VIOLENCE_ON and scene_detector is not None:
+        scene_on = _verify_gates["violence"].step(scene_detector, scene_violent, _frame_ts,
+                                                  clean_frame, scene_conf)
+    robbery_on = robbery_hit
+    if _run_rob_model:
+        robbery_on = _verify_gates["robbery"].step(robbery_detector, robbery_hit, _frame_ts,
+                                                   clean_frame, robbery_conf)
+    # No strict fallback on this path (strict_hit=False): a candidate the
+    # verifier could not answer raises nothing here, and if the verifier goes
+    # down the robbery model above takes over on the next frame.
+    if _rob_from_fight:
+        robbery_on = _verify_gates["robbery_from_fight"].step(
+            scene_detector.scene_candidate, False, _frame_ts, clean_frame,
+            getattr(scene_detector, "_last_scene_conf", scene_conf)) or robbery_on
 
     res_half_flag = (USE_CUDA and pose_file_name.endswith(".pt"))
     pose_res = pose_model.track(frame, persist=True, verbose=False, imgsz=POSE_IMGSZ, half=res_half_flag)
@@ -2148,7 +2304,13 @@ while _running:
             # through a detector the dashboard shows as Off. ARMED THREAT is
             # untouched here -- that's has_weapon's call, gated by its own
             # WEAPON_DETECTION_ENABLED flag below.
-            is_assault = VIOLENCE_ON and (is_violent_x3d or in_vbox)
+            # In scene mode the per-track model decides WHO, never WHETHER:
+            # a per-track verdict only counts while the scene-level alarm
+            # (strict, or verified) is on. Before 2026-10-07 it could raise an
+            # ASSAULT alert on its own, a source no measurement covered --
+            # every false-alarm figure on record is the scene-level alarm.
+            scene_ok = scene_on if SCENE_MODE_ON else True
+            is_assault = VIOLENCE_ON and ((is_violent_x3d and scene_ok) or in_vbox)
 
             override_confirm = max(1, ASSAULT_CONFIRM_FRAMES - 1) if (crowded and in_vbox) else None
             state = ts.update(is_assault, has_weapon, frame_count, override_assault_confirm=override_confirm)
@@ -2200,12 +2362,20 @@ while _running:
                 track_weapons = [{"name": w["name"], "conf": round(float(w.get("conf", 0)), 3),
                                   **({"box": [round(float(v), 1) for v in w["box"]]} if w.get("box") is not None else {})}
                                  for w in weapon_assigns.get(tid, []) if w.get("name")]
-                triggered_alerts_this_frame.append({"id": incident_id, "conf": conf, "event": event_type, "ctx": {
+                _alert = {"id": incident_id, "conf": conf, "event": event_type, "ctx": {
                     "detector": "weapon detector + pose tracking" if state == "ARMED" else "X3D violence-recognition model",
                     "attribution": "track", "track_id": int(tid),
                     "people_in_frame": people_in_frame, "weapons": track_weapons,
                     "person_box": [round(float(v), 1) for v in p_box],
-                }})
+                }}
+                if state == "ARMED" and _weapon_check_on():
+                    # Held until the verifier has looked at this person
+                    # (_submit_weapon_check); the episode is marked alerted
+                    # above, so it is asked once.
+                    _alert["snap_src"] = clean_frame.copy()
+                    _submit_weapon_check(_alert, p_box, _frame_ts)
+                else:
+                    triggered_alerts_this_frame.append(_alert)
 
             _draw_overlay(frame, p_box, tid, state, weapon_assigns.get(tid))
 
@@ -2282,13 +2452,26 @@ while _running:
     # this dataset is frequently one person at a vehicle, which is exactly the
     # case a tracker loses.
     if ROBBERY_ON:
-        incident_id = _episode_incident_id("robbery-model", robbery_hit, frame_count)
+        incident_id = _episode_incident_id("robbery-model", robbery_on, frame_count)
         if incident_id:
+            _vx = _verify_gates["robbery"].alert_extras()
+            _ctx = {"detector": "robbery video-classification model",
+                    "attribution": "scene", "people_in_frame": people_in_frame}
+            _merge = False
+            if not _vx:
+                _vx = _verify_gates["robbery_from_fight"].alert_extras()
+                if _vx:
+                    _ctx["detector"] = ("X3D violence model (whole frame) candidate, "
+                                        "confirmed as robbery by the verifier")
+                    _merge = True
+            if _vx.get("verifier"):
+                _ctx["verifier"] = _vx["verifier"]
             triggered_alerts_this_frame.append({"id": incident_id,
-                                                "conf": float(robbery_conf),
+                                                "conf": float(_vx.get("conf", robbery_conf)),
                                                 "event": "ROBBERY",
-                                                "ctx": {"detector": "robbery video-classification model",
-                                                        "attribution": "scene", "people_in_frame": people_in_frame}})
+                                                "snap_src": _vx.get("snap_src"),
+                                                "merge_into_assault": _merge,
+                                                "ctx": _ctx})
 
     # ─── VANDALISM MODEL ALERT ───
     # Outside the pose block for the same reason as robbery: property damage is
@@ -2325,14 +2508,18 @@ while _running:
         # kind of double-fire this whole mechanism exists to prevent.
         already_alerted = any(a["event"] in ("ASSAULT", "ARMED THREAT")
                               for a in triggered_alerts_this_frame)
-        incident_id = _episode_incident_id("scene-fallback", scene_violent, frame_count,
+        incident_id = _episode_incident_id("scene-fallback", scene_on, frame_count,
                                             debounce_frames=SCENE_COOLDOWN_ASSAULT)
         if incident_id and not already_alerted:
             scene_last_alert_frame = frame_count
+            _vx = _verify_gates["violence"].alert_extras()
+            _ctx = {"detector": "X3D scene-level violence model", "attribution": "scene",
+                    "people_in_frame": people_in_frame}
+            if _vx.get("verifier"):
+                _ctx["verifier"] = _vx["verifier"]
             triggered_alerts_this_frame.append(
-                {"id": incident_id, "conf": scene_conf, "event": "ASSAULT",
-                 "ctx": {"detector": "X3D scene-level violence model", "attribution": "scene",
-                         "people_in_frame": people_in_frame}}
+                {"id": incident_id, "conf": float(_vx.get("conf", scene_conf)), "event": "ASSAULT",
+                 "snap_src": _vx.get("snap_src"), "ctx": _ctx}
             )
 
     now = time.perf_counter()
@@ -2365,17 +2552,37 @@ while _running:
     cv2.rectangle(frame, (0, 0), (len(hud) * 8 + 10, 26), (0, 0, 0), -1)
     cv2.putText(frame, hud, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 80), 1, cv2.LINE_AA)
 
+    # Weapon alerts the verifier has answered since the last frame.
+    triggered_alerts_this_frame.extend(_drain_weapon_checks())
+
     # ─── SECURE POST-RENDER ANNOTATION SNAPSHOT FLUSH ───
     for alert in triggered_alerts_this_frame:
+        _now = time.perf_counter()
+        if alert["event"] == "ASSAULT":
+            _last_assault_alert.update(id=alert["id"], t=_now)
+        elif (alert.get("merge_into_assault") and _last_assault_alert["id"] is not None
+              and _now - _last_assault_alert["t"] <= ROBBERY_MERGE_SECONDS):
+            # The same struggle, seen by both checks of one fight candidate:
+            # upgrade the open ASSAULT incident to ROBBERY instead of opening a
+            # second one. Its snapshot and clip stay the evidence (the
+            # snapshot's hash was recorded when it was created).
+            _alert_exec.submit(_post_alert, _last_assault_alert["id"], alert["conf"], "ROBBERY",
+                               None, alert.get("ctx"), True)
+            continue
         snap_filename = f"snap_{alert['id']}.jpg"
         snap_path = os.path.join(SCREENSHOTS_DIR, snap_filename)
         # Copy first: the banner must land ONLY in the evidence image, not in
         # the live stream or the event clip (both consume `frame` below).
-        snap_frame = _draw_alert_banner(frame.copy(), alert["event"], alert["conf"])
+        # A verified alert is raised seconds after the detector fired (the
+        # check takes ~6 s); its evidence is the frame from that moment, not
+        # whatever the camera shows by the time the verdict arrives.
+        _src = alert.get("snap_src")
+        snap_frame = _draw_alert_banner((_src if _src is not None else frame).copy(), alert["event"], alert["conf"])
         cv2.imwrite(snap_path, snap_frame)
         # Same name + "_clean": served alongside the evidence image, read by
         # tools/export_feedback_dataset.py once an operator has decided.
-        cv2.imwrite(os.path.join(SCREENSHOTS_DIR, f"snap_{alert['id']}_clean.jpg"), clean_frame)
+        cv2.imwrite(os.path.join(SCREENSHOTS_DIR, f"snap_{alert['id']}_clean.jpg"),
+                    _src if _src is not None else clean_frame)
         screenshot_url_path = f"/static/screenshots/{snap_filename}"
         _alert_exec.submit(_post_alert, alert['id'], alert['conf'], alert['event'], screenshot_url_path, alert.get('ctx'))
         _start_pending_clip(alert['id'], alert['event'], alert['conf'])

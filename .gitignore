@@ -68,6 +68,14 @@ weights/**/*.pt
 weights/**/*.pth
 weights/**/*.onnx
 weights/**/*.engine
+weights/**/*.safetensors
+# The alarm verifier (Qwen3-VL-2B, ~4 GB) is a whole Hugging Face folder;
+# its CPU backend is a 4-bit GGUF (~1.5 GB) run by llama.cpp's server
+# (tools/llamacpp, CPU build b11459, ~48 MB of binaries).
+weights/qwen3_vl_2b/
+weights/qwen3_vl_2b_gguf/
+*.gguf
+tools/llamacpp/
 weights/archive/
 !weights/**/*.meta.json
 !weights/README.md

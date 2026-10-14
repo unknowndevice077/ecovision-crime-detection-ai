@@ -101,6 +101,10 @@ async def set_detection_model(
 
     if "threshold" in body and payload["role"] != "DEVTEAM":
         raise HTTPException(status_code=403, detail="Only DevTeam can change a detection threshold")
+    if "threshold" in body and name == "verifier":
+        # Its cut-offs are per task (detection.verifier.tasks) and were fitted
+        # on measured data; a single 0-1 slider has no meaning for it.
+        raise HTTPException(status_code=400, detail="The alarm double-check has no single threshold")
 
     try:
         cfg = _read_config_file()

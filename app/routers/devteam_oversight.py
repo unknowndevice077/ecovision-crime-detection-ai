@@ -285,15 +285,17 @@ async def devteam_overview(authorization: Optional[str] = Header(None)):
         u["has_face_photo"] = bool(u.pop("face_photo_path"))
         u["verification_status"] = u.get("verification_status") or "unverified"
 
-    cursor.execute("SELECT COUNT(*) AS c FROM incidents")
+    # deleted_at IS NULL: a soft-deleted incident is gone from every
+    # incident list, so it must not keep inflating these totals either.
+    cursor.execute("SELECT COUNT(*) AS c FROM incidents WHERE deleted_at IS NULL")
     incident_count = cursor.fetchone()["c"]
-    cursor.execute("SELECT COUNT(*) AS c FROM incidents WHERE status = 'Active'")
+    cursor.execute("SELECT COUNT(*) AS c FROM incidents WHERE status = 'Active' AND deleted_at IS NULL")
     active_incident_count = cursor.fetchone()["c"]
     cursor.execute("SELECT COUNT(*) AS c FROM cameras")
     camera_count = cursor.fetchone()["c"]
     cursor.execute("SELECT COUNT(*) AS c FROM video_records")
     record_count = cursor.fetchone()["c"]
-    cursor.execute("SELECT barangay_id, COUNT(*) AS c FROM incidents GROUP BY barangay_id")
+    cursor.execute("SELECT barangay_id, COUNT(*) AS c FROM incidents WHERE deleted_at IS NULL GROUP BY barangay_id")
     incidents_by_location = [dict(r) for r in cursor.fetchall()]
 
     # Full camera roster (not just a count) so DevteamView can group cameras

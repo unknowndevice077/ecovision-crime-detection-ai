@@ -415,6 +415,15 @@ def build_ai_report_draft(cursor, incident_id: str) -> Optional[dict]:
         obs.append(f"The alert was attributed to tracked person #{ctx['track_id']}.")
     elif attribution == "scene":
         obs.append("The alert was raised on the scene as a whole; the system could not attribute it to one specific person.")
+    verifier = ctx.get("verifier") if isinstance(ctx.get("verifier"), dict) else None
+    if verifier and verifier.get("passed"):
+        # Set by maincode/alarm_verifier.py: a second model reviewed the clip
+        # before the alert was raised. Its description is the model's words,
+        # so it is quoted and attributed rather than stated as fact.
+        line = "A second AI model reviewed the two seconds before the alert and confirmed it"
+        if verifier.get("reason"):
+            line += f', describing the scene as: "{verifier["reason"]}"'
+        obs.append(line + ".")
     if weapons:
         obs.append("Suspected weapon(s) detected: " + ", ".join(
             f"{w['name']} ({round(float(w.get('conf', 0)) * 100)}%)" for w in weapons) + ".")

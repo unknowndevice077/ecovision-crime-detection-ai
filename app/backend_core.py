@@ -1334,10 +1334,13 @@ def _incident_owned_by(cursor, incident_id: str, payload: dict) -> bool:
     DEVTEAM: unrestricted, as everywhere else."""
     if payload.get("role") == "DEVTEAM":
         return True
+    # 2026-10-12: a deleted incident is gone for everyone but DevTeam (who
+    # restore it from the audit log). Without this, anyone still holding its
+    # id -- an open tab, a notification -- could keep changing its status or
+    # filing reports on an incident no list shows any more.
     frag, params = scope_clause(payload)
-    if not frag:
-        return True
-    cursor.execute(f"SELECT 1 FROM incidents WHERE id = ? AND {frag}", [incident_id] + params)
+    cursor.execute(f"SELECT 1 FROM incidents WHERE id = ? AND deleted_at IS NULL"
+                   + (f" AND {frag}" if frag else ""), [incident_id] + params)
     return cursor.fetchone() is not None
 
 class AiTriggerSchema(BaseModel):
@@ -1361,6 +1364,10 @@ class AiTriggerSchema(BaseModel):
     # people_in_frame, track_id, weapons [{name, conf}]. Free-form on purpose
     # so the AI core can add keys without a backend release.
     context: Optional[dict] = None
+    # Added 2026-10-12: true when the AI core re-labels an incident it
+    # already reported (a verified robbery on the same struggle as an open
+    # ASSAULT, main.py ROBBERY_MERGE_SECONDS) instead of reporting a second one.
+    upgrade: bool = False
 
 class ManualClipSchema(BaseModel):
     filename: str
@@ -1977,7 +1984,7 @@ def _review_verification(payload: dict, user_id: int, body: VerificationReview, 
 # numbers, which was invisible in this panel while being live in the pipeline.
 # A deployed model the dev team cannot see is one nobody checks.
 DETECTION_CLASSES = ("violence", "robbery", "vandalism", "vandalism_marks",
-                     "weapon")
+                     "weapon", "verifier")
 
 
 def _read_config_file():

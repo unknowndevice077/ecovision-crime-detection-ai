@@ -84,6 +84,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; output under the ceiling while staying far faster than lzma/max.
 Compression=lzma2/fast
 SolidCompression=yes
+; 2026-10-12: the alarm verifier's two models (Qwen3-VL-2B fp16, 4 GB, and
+; its 1.7 GB GGUF) barely compress and push the payload past the single-file
+; ceiling, so the output is now Setup.exe + .bin slices kept in one folder.
+; build_installer.ps1 zips them into one file for sharing (a Google Drive
+; folder download over ~2 GB is split into several zips -- the way slices
+; get lost).
+DiskSpanning=yes
+DiskSliceSize=max
 
 ; Detect (and offer to close) a running EcoVisionSentinel.exe via the real
 ; Windows Restart Manager API -- both on install and uninstall. Replaces
@@ -101,7 +109,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 WizardStyle=modern
 SetupLogging=yes
-DiskSpanning=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

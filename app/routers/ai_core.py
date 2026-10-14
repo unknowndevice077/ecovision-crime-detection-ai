@@ -30,12 +30,67 @@ def _ai_one_liner(event: str, conf: float, location_name: Optional[str], ctx: di
     return s
 
 
+async def _upgrade_ai_incident(data: AiTriggerSchema):
+    """Re-label an AI incident the AI core already reported (see
+    AiTriggerSchema.upgrade). Only AI-created incidents that nobody has
+    deleted, and only while still Active -- an operator who has already
+    acted on it keeps what they acted on. Keeps the original snapshot, its
+    hash and the clip; appends the new verdict to the narrative and context.
+    None when there is nothing to upgrade."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT type, confidence, barangay_id, location_name, camera_id FROM incidents "
+                   "WHERE id = ? AND source = 'AI_AUTOMATION' AND status = 'Active' AND deleted_at IS NULL",
+                   (data.id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    previous = row["type"]
+    cursor.execute("UPDATE incidents SET type = ?, confidence = ? WHERE id = ?",
+                   (data.event, max(float(row["confidence"] or 0), data.confidence), data.id))
+    cursor.execute("SELECT narrative, ai_context FROM incident_details WHERE incident_id = ?", (data.id,))
+    det = cursor.fetchone()
+    ctx = data.context or {}
+    if det:
+        try:
+            old_ctx = json.loads(det["ai_context"]) if det["ai_context"] else {}
+        except (TypeError, ValueError):
+            old_ctx = {}
+        merged = {**old_ctx, "upgraded_from": previous, "upgrade": ctx}
+        narrative = ((det["narrative"] or "") + " Re-labelled from " + previous.lower() + ": "
+                     + _ai_one_liner(data.event, data.confidence, data.location_name, ctx)).strip()
+        cursor.execute("UPDATE incident_details SET narrative = ?, ai_context = ? WHERE incident_id = ?",
+                       (narrative, json.dumps(merged), data.id))
+    conn.commit()
+    conn.close()
+    await manager.broadcast({
+        "channel": "incidents", "status": "CRITICAL", "id": data.id, "type": data.event,
+        "location": row["location_name"], "conf": data.confidence, "camera_link_id": row["camera_id"],
+        "barangay_id": (row["barangay_id"] or "").lower(), "upgraded_from": previous,
+    })
+    return {"status": "upgraded", "incident_id": data.id, "from": previous}
+
+
 @router.post("/api/ai_trigger")
 async def ai_trigger(data: AiTriggerSchema, request: Request):
     # Deliberately NOT behind require_auth -- called by the local AI
     # pipeline (main.py on 8001), not a browser. See TRUSTED_SERVICE_HOSTS.
     _require_local_service(request)
     incident_id = data.id if data.id else str(uuid.uuid4())
+    if data.upgrade and data.id:
+        upgraded = await _upgrade_ai_incident(data)
+        if upgraded:
+            return upgraded
+        # Nothing open to upgrade (the backend was down when the ASSAULT was
+        # posted, or an operator already closed or deleted it): report this
+        # one on its own -- under a new id when the old one is taken.
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM incidents WHERE id = ?", (data.id,))
+        if cur.fetchone():
+            incident_id = str(uuid.uuid4())[:8]
+        conn.close()
     case_id = f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4()).replace('-', '')[:8].upper()}"
     now = datetime.now()
     screenshot_url = data.screenshot_path or ""

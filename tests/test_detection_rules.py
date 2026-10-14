@@ -61,6 +61,19 @@ class WeaponGates(unittest.TestCase):
         self.assertEqual(vboxes, [])
         self.assertEqual(weapons[0]["center"], [30.0, 30.0])
 
+    def test_gating_drops_nan_boxes_without_warnings(self):
+        # A NaN box from the model used to be cast to int (INT_MIN) and then
+        # overflow in the centre sum -- RuntimeWarnings and a garbage track.
+        import warnings
+        good = np.array([10.0, 10.0, 50.0, 50.0], dtype=np.float32)
+        bad = np.array([np.nan, 10.0, 50.0, 50.0], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            weapons, vboxes = R.gate_weapon_detections(
+                [("Gun", 0.9, bad), ("Gun", 0.9, good), ("Gun", float("nan"), good)])
+        self.assertEqual(len(weapons), 1)
+        self.assertEqual(list(weapons[0]["box"]), [10, 10, 50, 50])
+
     def test_trackers_are_independent(self):
         # Two cameras must not share weapon tracks (was module-global state).
         a, b = R.WeaponTracker(), R.WeaponTracker()

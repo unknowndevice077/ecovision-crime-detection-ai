@@ -170,6 +170,17 @@
         "to": "maincode/x3d_violence_detector.py"
       },
       {
+        "from": "maincode/alarm_verifier.py",
+        "to": "maincode/alarm_verifier.py"
+      },
+      {
+        "from": "tools/llamacpp",
+        "to": "tools/llamacpp",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "preflight.py",
         "to": "preflight.py"
       },
@@ -192,7 +203,10 @@
           "x3d_xs_robbery_scene.pt.meta.json",
           "x3d_xs_vandalism_scene_v3.pt",
           "x3d_xs_vandalism_scene_v3.pt.meta.json",
-          "vandalism_marks_v2.pt"
+          "vandalism_marks_v2.pt",
+          "qwen3_vl_2b/**",
+          "qwen3_vl_2b_gguf/Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+          "qwen3_vl_2b_gguf/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
         ]
       },
       {

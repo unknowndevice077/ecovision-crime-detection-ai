@@ -64,8 +64,8 @@ type DetectionModel = {
   display_name: string;
   enabled: boolean;
   experimental: boolean;
-  threshold: number;
-  consecutive_required: number;
+  threshold: number | null;
+  consecutive_required: number | null;
   model_path: string;
   weights_present: boolean;
   metrics?: ModelMetrics;
@@ -1624,10 +1624,14 @@ export default function DevteamView() {
                 {/* settings + provenance */}
                 <div className="px-4 py-3 space-y-2">
                   <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-[9.5px] text-[var(--text-2)] font-mono">
-                    <span title="Chosen on the validation split for the best measured accuracy -- not something to hand-tune from the dashboard.">
-                      threshold <span className="text-[var(--text)]">{m.threshold}</span>
-                    </span>
-                    <span>confirmations <span className="text-[var(--text)]">{m.consecutive_required}</span></span>
+                    {m.threshold != null && (
+                      <span title="Chosen on the validation split for the best measured accuracy -- not something to hand-tune from the dashboard.">
+                        threshold <span className="text-[var(--text)]">{m.threshold}</span>
+                      </span>
+                    )}
+                    {m.consecutive_required != null && (
+                      <span>confirmations <span className="text-[var(--text)]">{m.consecutive_required}</span></span>
+                    )}
                     {thresholdCounts[m.name] > 0 && (
                       <span
                         title="Cameras running their own calibrated threshold instead of this global value -- see docs/progress_report_violence_detection.md §28.1 and tools/calibrate_camera_quiet.py."

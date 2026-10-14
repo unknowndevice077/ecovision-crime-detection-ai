@@ -87,5 +87,21 @@ if (-not (Test-Path $output)) { throw "ISCC reported success but $output does no
 
 $mb = (Get-Item $output).Length / 1MB
 Write-Host ("`nBUILT  {0}  ({1:N0} MB)" -f (Split-Path $output -Leaf), $mb)
+
+# DiskSpanning (installer.iss): Setup.exe needs its .bin slices beside it.
+# One zip of all of them is what gets shared, so nothing gets separated.
+$base = "EcoVisionSentinel-Installer-$version"
+$parts = @(Get-Item $output) + @(Get-ChildItem $dist -Filter "$base-*.bin")
+$share = Join-Path $dist "$base"
+if (Test-Path $share) { Remove-Item $share -Recurse -Force }
+New-Item -ItemType Directory $share | Out-Null
+$parts | ForEach-Object { Move-Item $_.FullName $share }
+$zip = Join-Path $dist "$base.zip"
+if (Test-Path $zip) { Remove-Item $zip -Force }
+# Windows' own bsdtar: a Git-for-Windows tar earlier on PATH reads "D:" as a host.
+& (Join-Path $env:SystemRoot "System32\tar.exe") -a -c -f $zip -C $dist $base
+if ($LASTEXITCODE -ne 0) { throw "zipping the installer failed (exit $LASTEXITCODE)" }
+$zipMb = (Get-Item $zip).Length / 1MB
+Write-Host ("SHARE  {0}  ({1:N0} MB): extract, keep the files together, run {2}" -f (Split-Path $zip -Leaf), $zipMb, (Split-Path $output -Leaf))
 Write-Host "NOTE: unsigned, so Windows SmartScreen will warn on first run"
 Write-Host "      (More info -> Run anyway). Test on the demo machine beforehand."

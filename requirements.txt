@@ -32,7 +32,7 @@ python-dotenv==1.2.2
 itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.3
-click==8.3.3
+click==8.5.0
 colorama==0.4.6
 
 # Rate limiting (backend.py: slowapi Limiter) + its deps
@@ -55,7 +55,7 @@ requests==2.33.1
 urllib3==2.6.3
 certifi==2026.4.22
 charset-normalizer==3.4.7
-idna==3.7
+idna==3.20
 
 # ── AI / vision core ─────────────────────────────────────────────────────
 torch==2.5.1+cu121
@@ -99,6 +99,28 @@ polars-runtime-32==1.43.0
 python-dateutil==2.9.0.post0
 tzdata==2026.2
 six==1.17.0
+
+# ── Alarm verifier (maincode/alarm_verifier.py, Qwen3-VL-2B) ─────────────
+# transformers 5.x is the first line with Qwen3-VL. Exact versions are the
+# ones the verifier was measured with (transformers 5.18.0 on torch 2.5.1) --
+# the cut-offs in config.json were fitted on its scores. accelerate lets the
+# model load straight onto the GPU instead of through a 4 GB copy in RAM.
+# Optional at runtime: without these the AI core keeps its strict settings.
+transformers==5.18.0
+accelerate==1.15.0
+huggingface_hub==1.33.0
+tokenizers==0.23.2
+safetensors==0.8.0
+regex==2026.9.29
+hf-xet==1.7.0
+httpx==0.28.1
+httpcore==1.0.9
+typer==0.25.1
+shellingham==1.5.4
+rich==15.0.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+pygments==2.21.0
 
 # ── TensorRT / ONNX export (optimize_weights.py -> weights/*.engine) ─────
 # main.py prefers weights/*.engine over *.pt when present. These are what
