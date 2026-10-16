@@ -252,8 +252,18 @@ export function useLiveChannel(channel: string, onEvent: () => void, ready: bool
   // initial call finally sees a real currentUser. Defaults to true so every
   // other call site (mounted only after currentUser already exists, inside
   // the dashboard's own `if (!currentUser) return` guard) is unaffected.
+  // BUG FOUND 2026-10-15: callers build their URL from useRuntimeConfig(),
+  // which starts on the localhost:8000 placeholder until
+  // runtime-config.json has loaded. The initial call fired in that window,
+  // so whenever the backend was NOT on 8000 (Electron moves it when 8000 is
+  // taken) a page's first load went to the wrong port -- the incident map
+  // sat on "Backend unreachable" until the 60 s fallback tick. Hold
+  // everything until the real address is known; the component re-renders
+  // with it in the same pass, so the ref above already holds that closure.
+  const { loaded: configLoaded } = useRuntimeConfig();
+
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !configLoaded) return;
     onEventRef.current(); // initial load
     const unsubscribe = subscribe(channel, () => onEventRef.current());
     // Belt-and-suspenders: still poll, but slowly (60s) as a fallback in
@@ -264,5 +274,5 @@ export function useLiveChannel(channel: string, onEvent: () => void, ready: bool
       unsubscribe();
       clearInterval(fallback);
     };
-  }, [channel, subscribe, ready]);
+  }, [channel, subscribe, ready, configLoaded]);
 }

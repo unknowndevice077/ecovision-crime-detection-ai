@@ -4,11 +4,10 @@ import React, { useState } from 'react';
 import { Shield, Lock, User, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useRuntimeConfig } from '../../hooks/useRuntimeConfig';
+import { getRuntimeConfig } from '../../lib/runtime-config';
 import ThemeToggle from '../../components/ThemeToggle';
 
 export default function LoginPage() {
-  const { apiUrl: API_URL } = useRuntimeConfig();
   const [creds, setCreds] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -20,7 +19,12 @@ export default function LoginPage() {
     setError('');
     setIsSubmitting(true);
     try {
-      const res = await fetch(`${API_URL}/api/login`, {
+      // The hook's value is the localhost:8000 placeholder until
+      // runtime-config.json loads; a fast (or autofilled) sign-in could go
+      // to the wrong port when Electron moved the backend. Ask for the real
+      // address -- cached, so this is instant after the first time.
+      const { apiUrl } = await getRuntimeConfig();
+      const res = await fetch(`${apiUrl}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(creds),
