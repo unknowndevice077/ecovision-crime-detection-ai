@@ -42,6 +42,7 @@ index, most of it working material rather than presentation material.
 | `statistics_summary.md` | **The October statistics**: 95% confidence intervals for every headline recall and false-alarm rate, the tests behind "does the double-check really help", and how to say it honestly (the robbery gain is clear; the fight gain is marginal; the false-alarm drops are not individually significant on 5 hours). |
 | `how_ecovision_sees.html`, `detection_metrics.html` | Visual explainer and a metrics ledger, self-contained HTML. |
 | `EcoVision - Manuscript (REVISED).docx` | The paper itself. Edited by hand; check its numbers against `detection_performance_report.md`. |
+| `EcoVision - Manuscript (REVISED, Oct 2026).docx` | The paper with the October results added as section 4.14 (8 figures, 3 tables), an abstract addendum, two new conclusions, and corrected statements about robbery and vandalism. Built from the August file, which is unchanged. Update the table of contents and the lists of figures and tables in Word. |
 
 ## Draft material
 
