@@ -38,7 +38,8 @@ index, most of it working material rather than presentation material.
 | `model_behavior_defense.html` | 13 sections, confusion-matrix charts for all three detectors, 3 animations, a glossary, and a section anticipating likely questions. Self-contained HTML, opens in a browser. |
 | `EcoVision_Defense_Reference.pdf` | The same document, print-styled. |
 | `convolution_explainer.md` | What YOLO does vs what X3D does, with animations. |
-| `figures/` | 7 figures, PNG at 300 dpi and vector PDF. Made in August — they show the models of that time, not the October ones. |
+| `figures/` | Figures 1-7 (August, the models of that time) and **figures 8-15 (October)**: violence progression, the double-check's effect, its operating points, weapons, robbery design, training data, missed fights, and confidence intervals. PNG at 300 dpi and vector PDF. Regenerate the October ones with `tools/make_october_figures.py`. |
+| `statistics_summary.md` | **The October statistics**: 95% confidence intervals for every headline recall and false-alarm rate, the tests behind "does the double-check really help", and how to say it honestly (the robbery gain is clear; the fight gain is marginal; the false-alarm drops are not individually significant on 5 hours). |
 | `how_ecovision_sees.html`, `detection_metrics.html` | Visual explainer and a metrics ledger, self-contained HTML. |
 | `EcoVision - Manuscript (REVISED).docx` | The paper itself. Edited by hand; check its numbers against `detection_performance_report.md`. |
 
