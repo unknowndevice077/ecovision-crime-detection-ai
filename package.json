@@ -81,6 +81,7 @@
       ".next/**/*",
       "!.next/dev/**/*",
       "!.next/cache/**/*",
+      "!**/.env*",
       "node_modules/**/*",
       "public/**/*",
       "next.config.*",

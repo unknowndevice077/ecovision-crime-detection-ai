@@ -38,6 +38,18 @@ if (!fs.existsSync(STANDALONE)) {
   process.exit(1);
 }
 
+// `next build` copies the project's .env files into .next/standalone, and
+// electron-builder packs that folder -- so the developer's real secrets
+// (bot token, API keys) ended up inside the installer. The dashboard only
+// reads NEXT_PUBLIC_* values, which are inlined at build time, so the
+// standalone server never needs them.
+for (const name of fs.readdirSync(STANDALONE)) {
+  if (name.startsWith(".env")) {
+    fs.rmSync(path.join(STANDALONE, name), { force: true });
+    console.log(`[copy_standalone_assets] removed ${name} from standalone`);
+  }
+}
+
 copyDir(path.join(ROOT, "public"), path.join(STANDALONE, "public"));
 copyDir(path.join(ROOT, ".next", "static"), path.join(STANDALONE, ".next", "static"));
 

@@ -73,6 +73,16 @@ $chunks = @(Get-ChildItem $staticDir -Recurse -File -Filter *.js -EA SilentlyCon
 if ($chunks -lt 1) { throw "static/ exists but contains no JS chunks" }
 Write-Host ("       OK  {0} JS chunks present" -f $chunks)
 
+# The Oct 12 installer shipped the developer's real .env (bot token, API keys):
+# `next build` copies it into .next/standalone. copy_standalone_assets.js and
+# package.json now strip it; this refuses to package if one slips back in.
+Write-Host "[2c] Verifying no .env files are packaged..."
+$envFiles = @(Get-ChildItem $unpacked -Recurse -Force -File -Filter ".env*" -EA SilentlyContinue)
+if ($envFiles.Count -gt 0) {
+    throw "packaged app contains .env files (secrets would ship): " + ($envFiles.FullName -join ", ")
+}
+Write-Host "       OK  none"
+
 # ---- compile ----------------------------------------------------------
 $version = (Get-Content (Join-Path $repo "package.json") -Raw | ConvertFrom-Json).version
 Write-Host "[3/3] Compiling installer with Inno Setup (version $version)..."

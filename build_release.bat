@@ -144,38 +144,22 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo  =^> Locating Inno Setup compiler...
-set "ISCC="
-if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if not defined ISCC if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
-if not defined ISCC (
-    where ISCC.exe >nul 2>nul && set "ISCC=ISCC.exe"
-)
-if not defined ISCC (
-    echo [ERROR] Inno Setup 6 not found. Install it ^(free, ~10 MB, no admin needed^):
-    echo    https://jrsoftware.org/isdl.php
-    echo    Then re-run this script.
-    pause
-    exit /b 1
-)
-
-echo  =^> Compiling installer with Inno Setup...
-"%ISCC%" installer\EcoVisionSentinel.iss
+echo  =^> Compiling installer (preflight, .env check, Inno Setup, zip)...
+REM tools\build_installer.ps1 supersedes compiling installer\EcoVisionSentinel.iss
+REM directly: the payload is ~7.5 GB with the Qwen3-VL weights, over Inno Setup's
+REM single-file limit, so it uses DiskSpanning (.exe + .bin) and zips them. It also
+REM refuses to package if a .env file is inside dist\win-unpacked.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_installer.ps1
 if %errorlevel% neq 0 (
-    echo [ERROR] Inno Setup compile failed. See log above.
+    echo [ERROR] Installer build failed. See log above.
     pause
     exit /b 1
 )
 
 echo.
-echo [5/5] Done. Your installer is in the dist\ folder, alongside win-unpacked:
-dir /b dist\*.exe
-echo Give this .exe to users. Running it installs EcoVision Sentinel
-echo end-to-end into ONE folder they choose -- shortcut, uninstaller,
-echo database, weights, python-env, everything together. No admin/UAC
-echo needed for this testing-phase build ^(installer\EcoVisionSentinel.iss
-echo has PrivilegesRequired=lowest -- flip that to "admin" before a real
-echo production rollout^).
+echo [5/5] Done. Your installer is dist\EcoVisionSentinel-Installer-^<version^>.zip
+echo Give users the zip: they extract it and run the .exe beside its .bin.
+echo The build is unsigned, so Windows SmartScreen warns on first run.
 
 echo -------------------------------------------------------------
 echo Reminder: this is a CLEAN build - any package.json extraResources
