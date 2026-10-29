@@ -131,3 +131,20 @@ fine-tuned on any of the datasets above). See
 [Ultralytics YOLO11](https://github.com/ultralytics/ultralytics) — AGPL-3.0
 licensed, which is why this project is AGPL-3.0 too; see the License section
 of `README.md`.
+
+## Alarm double-check (`weights/qwen3_vl_2b/`, `weights/qwen3_vl_2b_gguf/`)
+
+Used as released, **not fine-tuned**: the double-check asks the model fixed
+yes/no questions and only its cut-offs were fitted, on this project's held-out
+data (see `docs/detection_performance_report.md` §1.6).
+
+- **Qwen3-VL-2B-Instruct** — Qwen Team, Alibaba. Apache-2.0 (per the model
+  card shipped in `weights/qwen3_vl_2b/README.md`). Model card:
+  <https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct>. The CPU backend uses a
+  4-bit GGUF conversion of the same model (`Qwen3VL-2B-Instruct-Q4_K_M.gguf`
+  plus its `mmproj` vision projector).
+- **llama.cpp** (`tools/llamacpp/`, CPU build b11459) — ggml-org,
+  <https://github.com/ggml-org/llama.cpp>, MIT. Its `llama-server` runs the
+  GGUF model for the CPU backend. Note: the MIT licence asks for its notice to
+  travel with the binaries; `tools/llamacpp/` currently carries only
+  `LICENSE-LLVM-OpenMP`, so llama.cpp's own `LICENSE` should be added there.

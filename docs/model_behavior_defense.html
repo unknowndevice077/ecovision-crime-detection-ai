@@ -239,7 +239,7 @@ footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line);
 </style>
 
 <div class="wrap">
-<div role="note" style="margin:16px 0 20px;padding:12px 16px;border:1px solid #d97706;border-radius:8px;background:#fff7ed;color:#7c2d12;font:14px/1.5 system-ui,sans-serif"><strong>Dated: August 2026.</strong> The explanations here still hold; the numbers are from the August models. Current (7 Oct 2026): violence 88.0% of 200 held-out fights at 2.0 false alarms/hr (two models averaged, every alarm confirmed against crops around the people present); weapons v3 89.6% / 39.4% recall on large / street-size guns; vandalism re-enabled (experimental), 87.1% at 1.0/hr; robbery (experimental) 0.5/hr. See <code>docs/detection_performance_report.md</code> &sect;1.</div>
+<div role="note" style="margin:16px 0 20px;padding:12px 16px;border:1px solid #d97706;border-radius:8px;background:#fff7ed;color:#7c2d12;font:14px/1.5 system-ui,sans-serif"><strong>Sections 01&ndash;11 are dated: August 2026.</strong> The explanations still hold; the numbers are from the August models. Current (22 Oct 2026): violence 88.0% of 200 held-out fights at 1.4 false alarms/hr on 5 h of cameras (two models averaged, every alarm confirmed against crops around the people present), 93.1% accuracy on 1,310 test clips; weapons v3 89.6% / 39.4% recall on large / street-size guns; vandalism re-enabled (experimental), 87.1% at 0.6/hr; robbery (experimental) 0.5/hr on its own. <b>With the Qwen3-VL-2B alarm double-check</b> (in the app, experimental): fights 94.0% at 0.4/hr, robbery 59.4% of events at 0.6/hr, false ARMED THREAT alerts 2.8 &rarr; 1.4/hr. See <code>docs/detection_performance_report.md</code> &sect;1. Section 00 below is current.</div>
 
 <header>
   <p class="eyebrow">Defense reference · EcoVision Sentinel</p>
@@ -250,10 +250,75 @@ footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line);
     script in the repository — where a number rests on something thin, it says
     so on the same line.</p>
   </div>
-  <p class="meta">GTX 1660 SUPER · written 2026-08-14, updated 2026-08-19 · violence, robbery configured on · vandalism disabled</p>
+  <p class="meta">GTX 1660 SUPER · written 2026-08-14 · section 00 and the banner updated 2026-10-22 · sections 01&ndash;11 are the August record</p>
   <p class="meta" style="margin-top:6px;"><b>Nothing in this document describes a real-world deployment.</b> Every figure is measured on benchmark footage, held-out source videos, or spliced reconstructions during development and testing — not on incidents an installed system has ever actually observed. "Configured on" means the detector is the one the app currently ships and runs with, not that it has been field-validated.</p>
   <p class="meta" style="margin-top:10px;">Unfamiliar term? §10 defines every one used here — FPR, recall, precision, leakage, EMA and the rest.</p>
 </header>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="n">00</span><h2>The system today (22 October 2026)</h2></div>
+  <div class="col">
+    <p>The sections after this one were written in August and describe the August
+    models &mdash; read them for <em>why</em>, not for the current numbers. Since then
+    the violence detector became two models averaged, weapons moved to a
+    higher-resolution model, vandalism was re-enabled, and a <b>second AI now
+    double-checks every alarm</b> before anyone is notified. Every figure below is on
+    footage the models never trained on: 5 hours of held-out street cameras for
+    false alarms, and held-out crime clips spliced into continuous footage for events caught.</p>
+  </div>
+
+  <div class="grid g3">
+    <div class="tile">
+      <div class="k">Fights, with the double-check <span class="pill ship">In the app</span></div>
+      <div class="v good">94.0%</div>
+      <div class="s">of 200 held-out fights, at 0.4 false alarms per hour (88.0% at 1.4/hr without it).</div>
+    </div>
+    <div class="tile">
+      <div class="k">Robbery, with the double-check <span class="pill ship">Experimental</span></div>
+      <div class="v warn">59.4%</div>
+      <div class="s">of 133 events labelled as robbery, at 0.6/hr (8.3% without it). Still the weakest class.</div>
+    </div>
+    <div class="tile">
+      <div class="k">Armed-threat false alerts <span class="pill ship">In the app</span></div>
+      <div class="v good">1.4/hr</div>
+      <div class="s">down from 2.8/hr, while keeping 97.9% of real weapons.</div>
+    </div>
+  </div>
+
+  <div class="tbl-wrap"><table>
+      <thead><tr><th>Detector</th><th>Without the double-check</th><th>With it (GPU)</th><th>With it (CPU, 4 GB laptops)</th></tr></thead>
+      <tbody>
+        <tr><td><b>Violence</b></td><td>88.0% at 1.4/hr</td><td><b>94.0% at 0.4/hr</b></td><td>91.0% at 0.2/hr</td></tr>
+        <tr><td><b>Robbery</b> (experimental)</td><td>8.3% at 1.4/hr</td><td><b>59.4% at 0.6/hr</b></td><td>60.9% at 0.8/hr</td></tr>
+        <tr><td><b>Weapons</b> (alerts, not detections)</td><td>2.8 false/hr</td><td><b>1.4 false/hr</b>, 97.9% of real weapons kept</td><td>not checked yet</td></tr>
+        <tr><td><b>Vandalism</b> (experimental)</td><td colspan="3">87.1% of 31 acts at 0.6/hr &mdash; not double-checked</td></tr>
+      </tbody>
+    </table></div>
+
+  <div class="col">
+    <h3>What the double-check is</h3>
+    <p>A small vision-language model, <b>Qwen3-VL-2B</b>, is shown the last two seconds
+    of an alarm (for weapons, a crop around the person holding it) and asked a plain
+    question &mdash; &ldquo;is anyone physically fighting?&rdquo;, &ldquo;is someone being robbed?&rdquo;,
+    &ldquo;is this person holding a gun or a knife?&rdquo;. It is <b>not retrained</b>: only its
+    pass/fail cut-offs were fitted, on half the source videos and scored on the other
+    half. Because it removes false alarms, the fast detectors can run looser and miss
+    less &mdash; that is where the gain comes from.</p>
+    <p>Robbery is asked two questions, because one yes/no question passed 86% of real
+    <em>fights</em> as robbery: is a crime happening, and is it more like a robbery than a
+    fight. A robbery confirmed within 60 seconds of an assault alert upgrades that one
+    incident instead of opening a second.</p>
+
+    <div class="note flag"><b>Limits, said plainly.</b> A check delays the alert by
+    about 7 s (GPU) or 15 s (CPU). It needs memory: on a 4 GB graphics card it runs on
+    the CPU, and with too little free RAM it stays off and the strict August-style
+    settings apply &mdash; nothing crashes. Weapon alerts are only double-checked on the GPU
+    backend so far. The weapon figure rests on 14 alerts in 5 hours, so read it as
+    &ldquo;about half&rdquo;. And, as everywhere in this document, recall on the actual
+    deployment cameras is unmeasured.</div>
+  </div>
+</section>
 
 <!-- ============================================================ -->
 <section>
@@ -840,7 +905,27 @@ footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line);
   <div class="col">
     <p class="meta">arXiv identifiers are from memory — verify each before citing
     in the paper. The GitHub paths are the ones to search on if a link has moved.</p>
-  </div>
+  
+    <h3>"What is the second AI, and why not just train the first one better?"</h3>
+    <p>Qwen3-VL-2B is a general video-language model used as it was released &mdash;
+    nothing about it was retrained. The fast detectors have to run on every frame of
+    every camera, so they are small; one frame cannot tell a robbery from an ordinary
+    hand-off in a busy market. The second model is too slow to run constantly (7 to 15
+    seconds per look) but only has to look at the few clips the detectors flag. A robbery
+    retrain and a bigger verifier (Qwen3-VL-4B, no better and four times slower) were both
+    measured and rejected.</p>
+
+    <h3>"Does it work on a laptop?"</h3>
+    <p>Yes, in one of three modes picked automatically: on the graphics card if 4.3 GB is
+    free, otherwise on the processor (about 2 GB of RAM, slower but nearly as accurate:
+    91.0% of fights at 0.2/hr), otherwise off. The test laptop (RTX 3050 with 4 GB, 8 GB of
+    RAM) uses the processor mode, which keeps the camera AI at about 85% of its speed.</p>
+
+    <h3>"Isn't the AI making the decision?"</h3>
+    <p>No. A person always confirms or dismisses an alert on the dashboard, and the
+    double-check only decides whether an alarm is worth a person's attention. If it is
+    unavailable, every detector falls back to its stricter settings.</p>
+</div>
 </section>
 
 
@@ -896,6 +981,9 @@ footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line);
 <!-- ============================================================ -->
 <section>
   <div class="sec-head"><span class="n">09</span><h2>How the system works, step by step</h2></div>
+  <div class="col"><div class="note flag"><b>One step added since this was written.</b>
+  After a detector raises an alarm and before an alert is sent, the clip goes to the
+  Qwen3-VL-2B double-check (section 00). The steps below describe the detectors themselves.</div></div>
   <div class="col">
     <p>In the order a single frame travels through it. Every name below is a real
     function in the repository, so a question about any step has somewhere to

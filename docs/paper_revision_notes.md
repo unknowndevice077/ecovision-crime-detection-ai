@@ -1,9 +1,14 @@
-> **Check every number before submission (7 Oct 2026).** This draft predates
+> **Check every number before submission (22 Oct 2026).** This draft predates
 > the October models. Current headline figures: violence 88.0% of 200 held-out
 > fights at 2.0 false alarms/hr (1.4/hr on 5 h of cameras), 93.1% accuracy on
 > 1,310 test clips; weapons v3 89.6% / 39.4% recall on large / street-size guns;
-> vandalism 87.1% at 1.0/hr (experimental); robbery 0.5/hr at ~40% clip recall
-> (experimental). Source: `detection_performance_report.md` §1.
+> vandalism 87.1% at 1.0/hr (0.6/hr on 5 h, experimental); robbery 0.5/hr at
+> ~40% clip recall (experimental). With the Qwen3-VL-2B alarm double-check
+> (experimental, GPU): fights 94.0% at 0.4/hr, robbery 59.4% of events at
+> 0.6/hr, ARMED THREAT alerts 2.8 → 1.4/hr. The draft has no section on the
+> double-check yet; `ecovision_full_report.md` §7.0 and
+> `model_training_and_data.md` §6b have text to adapt. Source:
+> `detection_performance_report.md` §1.
 
 # EcoVision Manuscript — What Needs Updating
 

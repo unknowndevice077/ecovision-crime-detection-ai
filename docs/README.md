@@ -3,7 +3,7 @@
 The files here are not equal. Five are the research core, four are defense
 material, five are operations plans for a real pilot, a few are engineering
 records, two are drafts, and the archive holds stale exports that would
-misrepresent the work if cited. Updated 7 Oct 2026.
+misrepresent the work if cited. Updated 22 Oct 2026.
 
 ---
 
@@ -67,7 +67,8 @@ Document what was built rather than what was found.
 |---|---|
 | `final_checks.md` | Dated snapshot (14 Aug) of bugs found and fixed, with how each was found. Describes that date's build state, not necessarily the current one. |
 | `USER_HIERARCHY_PLAN.md` | Original role and permission design (August). The September additions — diced permissions, custom roles, identity verification, report requests, audit log — are summarised in the root `README.md` under Organization & Roles. |
-| `INSTALLER_NOTES.md` | Why the installer is built the way it is. |
+| `ADMIN_AND_DEVTEAM_GUIDE.md` | **Every function of the admin and DevTeam panels**: roles, scoping, permissions, approvals, stations, audit log, AI Models tab, personnel, notifications, report requests, and a who-can-do-what table. |
+| `INSTALLER_NOTES.md` | Why the installer is built the way it is, why it is now an `.exe` + `.bin` in a zip (Oct, ~7.5 GB), and how `.env` is kept out of it. |
 | `vandalism_data_collection.md` | The filming protocol that would make the vandalism-in-progress detector viable. Not yet executed. |
 
 ---
@@ -91,7 +92,7 @@ authoritative copy.
 
 ---
 
-## Headline figures, as of 7 Oct 2026
+## Headline figures, as of 22 Oct 2026
 
 All measured on data the models never trained on: four held-out street cameras
 (2 h, nothing criminal in them) for false alarms per hour, and held-out crime
@@ -122,5 +123,11 @@ accuracy). Robbery now comes from the fight detector's whole-frame
 candidates, checked by two questions (is it criminal; is it more robbery than
 fight): 59.4% of robbery events alerted as robbery at 0.6/hr, with 20.5% of
 fights also labelled robbery (robbery model + one question: 51.1% at 2.0/hr,
-69% of fights). The robbery model is only the fallback. Details:
+69% of fights). The robbery model is only the fallback. A robbery confirmed
+within 60 s of an ASSAULT alert upgrades that incident instead of opening a
+second one (12 Oct). Weapons (14 Oct): every ARMED THREAT alert is asked "is
+this person holding a gun or a knife?" on a crop around that person — 2.8 →
+1.4 false alerts/hr on 5 h of cameras, 97.9% of real weapons kept; **GPU
+backend only** so far. On a 4 GB card (e.g. a laptop RTX 3050) the CPU backend
+is used: fights 91.0% at 0.2/hr, weapon alerts unverified. Details:
 detection_performance_report.md §1.6.

@@ -51,10 +51,40 @@ entry, shortcuts and folder choice natively.
 npm run installer
 ```
 
-which runs `npm run app:build` and then `toolsuild_installer.ps1`, which
+which runs `npm run app:build` and then `tools\build_installer.ps1`, which
 compiles `tools\installer.iss` with `ISCC.exe` (Inno Setup 6 or 7; install with
 `winget install JRSoftware.InnoSetup.7`). The CI workflow and
-`build_release.bat` compile `installer\EcoVisionSentinel.iss` the same way.
+`build_release.bat` compile the older `installer\EcoVisionSentinel.iss`, which
+has no disk spanning and has not been updated for the current payload (below).
+
+## Over 4 GB: disk spanning and a zip (Oct 2026)
+
+Adding Qwen3-VL-2B for the alarm double-check (fp16 for the GPU backend, a
+4-bit GGUF for the CPU one) took the compressed payload to ~7.5 GB. Inno
+Setup cannot put more than ~4.2 GB in one setup file, so `tools\installer.iss`
+sets `DiskSpanning=yes` and `DiskSliceSize=max`: the output is a small
+`EcoVisionSentinel-Installer-<version>.exe` plus
+`EcoVisionSentinel-Installer-<version>-1.bin`. They must stay in the same
+folder, so `build_installer.ps1` zips them (Windows' own
+`%SystemRoot%\System32	ar.exe` — Git's `tar` misreads `D:` as a remote host)
+into `dist\EcoVisionSentinel-Installer-<version>.zip`. Ship the zip.
+
+## Secrets: no `.env` in the package (fixed 22 Oct)
+
+`next build` with `output: "standalone"` copies the project's `.env` into
+`.next\standalone`, and electron-builder packs that folder — so the Oct 12
+installer contained this machine's real `.env` (Telegram bot token, Roboflow
+key, `SECRET_KEY`, DevTeam bootstrap login). The dashboard only reads
+`NEXT_PUBLIC_*` values, which are inlined at build time, so the standalone
+server never needed it. Now three layers keep it out:
+
+1. `tools\copy_standalone_assets.js` deletes `.next\standalone\.env*` after every `next build`;
+2. `package.json`'s `build.files` excludes `**/.env*`;
+3. `build_installer.ps1` step [2c] refuses to compile if any `.env*` file is in `dist\win-unpacked`.
+
+The installed app still writes its own `.env` at first run
+(`electron/main.js` `writeGeneratedEnv`, fresh `SECRET_KEY` per install).
+Any installer built before 22 Oct should be treated as containing the secrets.
 
 The build gates itself on `preflight.py`, which checks that every model named
 in `config.json` is present **and** bundled by `package.json`'s
@@ -62,7 +92,7 @@ in `config.json` is present **and** bundled by `package.json`'s
 when that whitelist still named superseded checkpoints.
 
 An earlier pipeline built a 7-Zip self-extracting `.exe`
-(`toolsuild_sfx_installer.ps1`, now retired): it was not a real installer,
+(`tools\build_sfx_installer.ps1`, now retired): it was not a real installer,
 and the hand-written uninstall and registration scripts it needed each had
 their own bug.
 

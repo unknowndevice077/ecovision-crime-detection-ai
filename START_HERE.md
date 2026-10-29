@@ -1,7 +1,7 @@
 # Start here
 
 The one page. What to run, which models are live, where everything lives, and
-the traps. Current as of 7 Oct 2026 (testing phase).
+the traps. Current as of 22 Oct 2026 (testing phase).
 
 ---
 
@@ -10,9 +10,9 @@ the traps. Current as of 7 Oct 2026 (testing phase).
 | Goal | Command | Notes |
 |---|---|---|
 | **Run everything on this PC** | `run_dev_system.bat` | Backend + detector + dashboard, hot reload. Uses `.venv`. |
-| **Build the installer** | `build_release.bat` | → `dist_installer\EcoVisionSentinel-Setup-1.0.0.exe`, ~3 GB, single file. ~15 min (`--dir` packaging) + ~7 min (Inno Setup compile). |
-| …with the GPU optimizer bundled | `build_release.bat --with-tensorrt` | Adds ~3.2 GB. Only if the target PC has no internet and you want the optimize step there. |
-| **Install on another PC** | copy `EcoVisionSentinel-Setup-1.0.0.exe`, run it once | One installer, one folder-choice screen, everything lands in the folder you pick. No Python, no pip, no terminal, no internet needed at install time. Requires Inno Setup 6 on the *build* machine only — see trap #9. |
+| **Build the installer** | `npm run app:build` then `powershell -ExecutionPolicy Bypass -File tools\build_installer.ps1` | → `dist\EcoVisionSentinel-Installer-1.0.0.zip`, ~7.5 GB: an `.exe` plus a `-1.bin` data file (the payload is over Inno Setup's single-file limit). ~12 min Inno Setup compile after packaging. `build_release.bat` / CI still use the old single-file `installer\EcoVisionSentinel.iss` and have not been updated for this size — see trap #9. |
+| …with the GPU optimizer bundled | `build_release.bat --with-tensorrt` | Old path (see above). Adds ~3.2 GB. Only if the target PC has no internet and you want the optimize step there. |
+| **Install on another PC** | extract the zip, keep the `.exe` and `.bin` together, run the `.exe` | One folder-choice screen, everything lands in the folder you pick. No Python, no pip, no terminal, no internet needed at install time. Unsigned, so SmartScreen warns (More info → Run anyway). The 22 Oct build is in the private Hugging Face bucket `eeeeeaaaJ/research`. |
 | **Check a machine can run it** | `.venv\Scripts\python.exe preflight.py` | Weights, schema, GPU, RAM, throughput. |
 | **Speed up models for this GPU** | `.venv\Scripts\python.exe optimize_weights.py` | Optional. Prints before/after. `--revert` undoes it. |
 | **Turn a detector on/off** | Dashboard → **AI Models** tab | DevTeam login. All four classes are toggleable — violence, weapons, vandalism, robbery. Robbery and vandalism carry an **Experimental** badge. Restart detection to apply. |
@@ -44,6 +44,8 @@ again, exactly as before.
 | `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery, **experimental**, threshold 0.85, 3 in a row. |
 | `x3d_xs_vandalism_scene_v3.pt` | `detection.vandalism.model_path` | Vandalism, **experimental**, threshold 0.60, 3 in a row, person-crop confirmed. |
 | `vandalism_marks_v2.pt` | `detection.vandalism.marks_model_path` | Graffiti / tag detector feeding the vandalism wrist-motion rule. |
+| `qwen3_vl_2b/` | `detection.verifier.model_path` (GPU backend) | **Alarm double-check**, experimental (since 7 Oct). Qwen3-VL-2B fp16, ~4.2 GB VRAM, ~7 s per check. |
+| `qwen3_vl_2b_gguf/` | `detection.verifier.cpu` (CPU backend) | Same model, 4-bit GGUF for llama.cpp's `llama-server` (`tools/llamacpp/`), ~2.1 GB RAM, ~15 s per check. Used when the GPU one does not fit. |
 
 ### Present but not running
 
@@ -57,16 +59,17 @@ back to it.
 
 ### Measured performance
 
-All on footage the models never trained on: four held-out street cameras
-(2 h, nothing criminal in them) for false alarms, and held-out crime clips
+All on footage the models never trained on: held-out street cameras
+(5 h, nothing criminal in them) for false alarms, and held-out crime clips
 spliced into continuous street footage for how many events raise an alarm.
+"With check" is the alarm double-check on the GPU backend.
 
 | Class | State | Headline | Say this before you are asked |
 |---|---|---|---|
-| Violence | on | 88.0% of 200 fights, 2.0 false alarms/hr | 93.1% accuracy on 1,310 test clips. The 24 misses are mostly ground fights, distant crowds and close-up/occluded views. |
-| Weapons | on | 89.6% of large guns, 39.4% of street-size guns | Small, distant guns are the hard case — under ~5% of the frame, recall is ~6%. |
-| Vandalism | on, experimental | 87.1% of 31 acts, 1.0 false alarm/hr | Only 31 test acts from few source videos — approximate. |
-| Robbery | on, experimental | 0.5 false alarms/hr | **Catches only ~40% of test clips** (8.3% of events in continuous footage). Tuned to stay quiet rather than cry wolf. |
+| Violence | on | 88.0% of 200 fights, 1.4 false alarms/hr; **with check 94.0% at 0.4/hr** (CPU backend 91.0% at 0.2/hr) | 93.1% accuracy on 1,310 test clips. The misses are mostly ground fights, distant crowds and close-up/occluded views. |
+| Weapons | on | 89.6% of large guns, 39.4% of street-size guns; ARMED THREAT alerts 2.8/hr, **with check 1.4/hr** (97.9% of real weapons kept) | Small, distant guns are the hard case — under ~5% of the frame, recall is ~6%. The weapon check is **GPU backend only**; on the CPU backend weapon alerts go out unverified. |
+| Vandalism | on, experimental | 87.1% of 31 acts, 0.6 false alarms/hr | Only 31 test acts from few source videos — approximate. Not double-checked. |
+| Robbery | on, experimental | **with check 59.4% of 133 events at 0.6/hr**; without it 8.3% at 1.4/hr | With the check, robbery comes from the fight detector's candidates and two questions; 20.5% of held-out fights are also labelled robbery. A robbery within 60 s of an ASSAULT alert upgrades that incident instead of opening a second. Without the check, the strict robbery model is tuned to stay quiet rather than cry wolf. |
 
 **Recall on the actual deployment cameras is still unmeasured for every class** —
 no labelled incident has ever been recorded on them. Property of the problem,
@@ -90,6 +93,7 @@ EcoVisionCode/
 │   ├── main.py                 camera loop, alert emission
 │   ├── detection_rules.py      every alert rule (weapon gates, tracking, ARMED/ASSAULT) —
 │   │                           the evaluation scripts import this same file
+│   ├── alarm_verifier.py       the Qwen3-VL double-check: questions, cut-offs, GPU/CPU backends
 │   └── x3d_violence_detector.py    model wrapper, ensemble, person-crop confirmation, smoothing
 │
 ├── app/                   backend AND frontend share this folder (see trap #1)
@@ -127,6 +131,7 @@ videos extracted for future MIL work).
 | Figures for the thesis | `docs/figures/*.pdf` (vector) and `*.png` (300 dpi) |
 | What changed and why | `docs/final_checks.md` |
 | Roles, permissions, DevTeam console | `README.md` → Organization & Roles |
+| Every admin / DevTeam panel function | `docs/ADMIN_AND_DEVTEAM_GUIDE.md` |
 
 **Never cite** `progress_report_violence_detection.pdf` or `.html` — they were
 exported 12 Aug and the `.md` gained §30–§32 on 14 Aug.
@@ -174,7 +179,12 @@ buffer.
 **9. There is no NSIS build and no portable `.exe` anymore — both were
 replaced by Inno Setup on 18-19 Aug.** `package.json`'s `win.target` is `dir`
 now; electron-builder only produces the plain `dist\win-unpacked` folder, and
-`installer\EcoVisionSentinel.iss` wraps that into the one real installer.
+Inno Setup wraps that into the real installer. **Since the Qwen3-VL weights
+(Oct) the payload is ~7.5 GB, over Inno Setup's ~4.2 GB single-file limit**, so
+`tools\installer.iss` (used by `tools\build_installer.ps1`) sets
+`DiskSpanning=yes`: the output is an `.exe` plus a `-1.bin`, zipped together.
+`installer\EcoVisionSentinel.iss` (used by `build_release.bat` and CI) is the
+older single-file script and has not been updated for that size.
 Reasons, in order of discovery:
   - **NSIS** (`nsis` and `portable` targets both): `makensis.exe` is a 32-bit
     process that mmaps the entire combined payload into one archive at BUILD
@@ -204,10 +214,18 @@ something in this area looks broken again:**
     `config.json`. It was set in **two places** (the generated `.env` *and* an
     explicit override in `launchMainApp()`'s `spawnPython()` calls, which wins
     since it's set before `load_dotenv()` runs) — both must stay in sync.
-  - Backend/AI-core ports (8000/8001) are still hardcoded with no retry, only
-    the frontend searches for a free port. `launchMainApp()` now checks both
-    before spawning anything and fails with a specific "already in use,
-    probably a leftover process" message instead of a silent 60s timeout.
+  - Ports: backend and AI core now *prefer* 8000/8001 but take the next free
+    port (`port_utils.find_free_port`) and write it to `runtime_ports.json`;
+    Electron reads it and writes `runtime-config.json` for the dashboard. The
+    dashboard must wait for that file before calling the API — two pages
+    (live channel, login) used to call `localhost:8000` first; fixed 15 Oct.
+
+**10. `next build` copies `.env` into `.next\standalone`, which gets packaged.**
+The Oct 12 installer shipped this machine's real `.env` (bot token, API keys)
+that way. `tools\copy_standalone_assets.js` now deletes it after every build,
+`package.json` excludes `**/.env*`, and `tools\build_installer.ps1` refuses to
+compile if any `.env` is in `dist\win-unpacked`. The dashboard only reads
+`NEXT_PUBLIC_*` values, which are inlined at build time, so nothing needs it.
 
 ---
 
@@ -215,7 +233,8 @@ something in this area looks broken again:**
 
 | | |
 |---|---|
-| **Add a vision-language double-check?** | Qwen3-VL-2B checking each alarm: violence 88.0% → 90.5% of fights at 2.0 → 0.5 false alarms/hr; robbery 8.3% → 51–60% of events at 2–3/hr. ~7 s (GPU) or ~15 s (CPU) added per alert. **Confirmed on 5 h of held-out footage (7 Oct)**: violence 90.5% at 0.4/hr, robbery 51.1% at 2.0/hr. **In the app since 7 Oct, experimental** (`detection.verifier`), with long candidates re-checked every 7 s (fights 94.0% at 0.4/hr): GPU or CPU backend (CPU: llama.cpp 4-bit, no VRAM, same accuracy), and robbery comes from the fight detector's whole-frame candidates checked by two questions — is it criminal, and is it more robbery than fight (robbery alerts 59.4% of events at 0.6/hr, 20.5% of fights also labelled robbery; the robbery model is only the fallback). |
+| **Weapon double-check on the CPU backend?** | The weapon question has only a GPU cut-off, so on a 4 GB card (laptop RTX 3050) ARMED THREAT alerts go out unverified. Fitting a CPU cut-off is the same procedure as the fight and robbery ones (~5 h of llama.cpp scoring). |
+| **Live test of the weapon check in the running app** | Measured offline and reproduced by the app's own code (19 of 19 alerts), but never run live end to end: this PC never had the ~3.5 GB of free RAM it needs alongside everything else. |
 | **Testing-phase shortcuts to revert before real use** | `TESTING_PHASE_FIXED_CREDENTIALS` in `electron/main.js`; `PrivilegesRequired=lowest` in the `.iss`. |
-| **Rebuild the installer?** | Models and config changed on 3–5 Oct; any `.exe` built before that ships the old models. |
+| **Installer** | Rebuilt 22 Oct with the weapon check, the runtime-port fixes, the Figma script removed and no `.env`. Rebuild again after any model or config change. |
 | **Model on/off for barangay users?** | Recommended: read-only visibility + a request-and-approve flow, **not** a direct switch. A local official with a silent off switch reproduces the project's own worst failure mode. |

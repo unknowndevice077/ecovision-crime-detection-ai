@@ -130,7 +130,7 @@ anywhere (checked: no `phone`, `contact_number`, `mobile`, or
   scoping pattern already used for cameras and incidents.
 - A devteam/admin UI to manage these per barangay/station (same shape as the
   existing user/camera management screens).
-- The actual send call wired into `confirm_and_report()` in `app/backend.py`,
+- The actual send call wired into `confirm_and_report()` (now in `app/routers/incidents.py`),
   with delivery success/failure logged against the incident row so a failed
   send is visible, not silent (see `docs/recovery_plan.md` §7).
 
@@ -174,7 +174,7 @@ proof it's the exact, unmodified output of the detection system at
    time, not be editable after the fact through the report-details flow.
    Worth confirming `IncidentReportSchema`'s fields (narrative, nature_of_call,
    arrival_reason, additional_officers) don't allow silently overwriting
-   the original timestamp — a quick check against `app/backend.py`, not a
+   the original timestamp — a quick check against `app/routers/incidents.py`, not a
    new feature.
 
 None of this needs to be forensics-grade for a capstone pilot — but "we hash

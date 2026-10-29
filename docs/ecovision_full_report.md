@@ -37,7 +37,16 @@ on synthetic street-camera weapons, finds **89.6% of large and 39.4% of
 street-size guns** with 8x fewer false weapons than its predecessor. Robbery is
 deliberately conservative — **0.5 false alarms per hour at ~40% clip recall** —
 because every attempt to raise its recall flooded busy street scenes with false
-alarms; a vision-language verifier is the measured way forward (§7.0).
+alarms.
+
+**A second stage now checks every alarm** (in the app since 7 Oct,
+experimental): a small vision-language model, Qwen3-VL-2B, watches each
+alarm's 2-second clip — for weapons, a crop around the person — and answers a
+yes/no question before anyone is alerted. Because it removes false alarms, the
+detectors can run looser: on 5 hours of held-out cameras, fights caught rose
+to **94.0% at 0.4 false alarms per hour**, robbery to **59.4% of events at 0.6
+per hour** (from 8.3%), and false ARMED THREAT alerts halved (2.8 → 1.4 per
+hour) while keeping 97.9% of real weapons (§7.0).
 
 **The vandalism class was disabled for most of this project's life and is now
 deployed**, and the path there is the report's most instructive result. Four
@@ -208,8 +217,19 @@ frame ─┬─► YOLO11s-pose (imgsz 416) ──► keypoints + person boxes �
        ├─► YOLO11s graffiti (imgsz 416) ──► static_targets
        └─► X3D-XS scene classifier (every 15 frames, 13-frame buffer)
                     │
-                    └──► EMA smoothing ──► consecutive-frame confirmation ──► alert
+                    └──► EMA smoothing ──► consecutive-frame confirmation ──► candidate
+                                                                                 │
+     candidate alarm (fight, robbery, ARMED THREAT) ─► Qwen3-VL-2B yes/no on its 2-s clip
+                                                         ├─ passed  ──► alert
+                                                         ├─ rejected ─► dropped
+                                                         └─ unavailable ─► strict settings, as before
 ```
+
+The double-check (`maincode/alarm_verifier.py`) runs on the GPU when 4.3 GB of
+VRAM is free (~7 s per check) and otherwise on the CPU through llama.cpp with a
+4-bit copy of the same model (~15 s, ~2.1 GB of RAM); with neither available,
+or on a machine with no CUDA GPU, every detector falls back to its strict
+settings.
 
 **Temporal gating is where per-frame noise becomes an operator-grade alert.**
 `ARMED_CONFIRM_FRAMES = 4`, a 3-of-8 evidence window, `ALERT_COOLDOWN_FRAMES =
@@ -431,7 +451,7 @@ still on, 7 were vetoed because the pose model found no one in blurry footage,
 and 13 were scored low: ground fights, distant crowds, close-up or occluded
 views, and three vertical phone videos.
 
-**Verification with a vision-language model — measured, not deployed.** The
+**Verification with a vision-language model — measured, then shipped.** The
 fast detector runs looser and each alarm's 2-second clip is asked a yes/no
 question by Qwen3-VL-2B (~6 s, ~4 GB VRAM on the target GPU), with the cut-off
 fitted on half the source videos and scored on the other half:
@@ -454,6 +474,33 @@ and robbery taken from the fight detector's whole-frame candidates — see
 detection_performance_report.md §1.6.) The deployed
 violence and vandalism detectors also held: 88.0% at 1.4/hr and 87.1% at
 0.6/hr.
+
+**The double-check as it ships (7–14 Oct), all on 5 h of held-out cameras.**
+
+| | events caught | false alarms/hr |
+|---|---|---|
+| violence, deployed without the check | 88.0% | 1.4 |
+| violence + check, long candidates re-checked every 7 s (GPU) | **94.0%** | **0.4** |
+| violence + check, CPU backend (re-check every ~15 s) | 91.0% | 0.2 |
+| robbery from fight candidates + two questions (GPU) | **59.4%** of 133 | **0.6** |
+| ARMED THREAT alerts, weapon pipeline alone | — | 2.8 |
+| ARMED THREAT + "is this person holding a gun or a knife?" (GPU) | 97.9% of real weapons kept | **1.4** |
+
+Three design points came from measurement rather than intuition. *Robbery from
+the fight detector*: most street robbery is a struggle the robbery model rarely
+flags and the fight model does see, so the fight detector's whole-frame
+candidates are asked the robbery question — but a single yes/no question
+passed 86% of held-out *fights* as robbery, so a second, multiple-choice
+question (fight vs robbery) is also required, which brought that to 20.5%.
+*One incident per struggle*: a robbery confirmed within 60 s of an ASSAULT
+alert upgrades that incident instead of opening a second. *Weapons on a crop*:
+the weapon question is asked on a square crop around the person holding it,
+from full-resolution frames, because a whole street frame leaves a gun a few
+pixels wide. Every cut-off was fitted on half the source videos and scored on
+the other half, and the app's code reproduces the experiment's scores exactly
+(10/10 robbery, 12/12 CPU, 19/19 weapon alerts). Limits: the weapon check has
+a GPU cut-off only, so on a 4 GB card (CPU backend) weapon alerts go out
+unverified; and a check delays the alert by 7–15 s.
 
 ### 7.1 Violence — August (daynight checkpoint)
 
@@ -956,9 +1003,11 @@ this project right now; conflating them is the mistake to avoid at defense.
 Ordered cheapest-and-most-certain first. **October status:** items 1, 2 and 4
 are done (weapon thresholds 0.30 / 0.23 and graffiti v2 deployed 21 Aug; weapons
 then moved to v3 at 960 px), and item 7 is done as a *confirmation* step (§7.0).
-New, in priority order: (a) wire in the Qwen3-VL-2B verifier (confirmed on
-5 hours of held-out footage); (b) record more held-out camera hours; (c) add
-training examples of the violence misses — ground fights, distant crowds.
+The Qwen3-VL-2B verifier is wired in (7–14 Oct, §7.0). New, in priority order:
+(a) a CPU cut-off for the weapon question, so low-VRAM machines verify weapon
+alerts too; (b) a live end-to-end test of the weapon check in the running app;
+(c) record more held-out camera hours; (d) add training examples of the
+violence misses — ground fights, distant crowds.
 
 1. ~~Re-sweep weapon thresholds against the final checkpoint.~~ **Done 21 Aug** — gun 0.30 / knife 0.23 gives 89.0% recall at 3.1% FPR, versus 79.7% at the deployed thresholds. **Apply them to `main.py`'s `CONF_BY_CLASS` and deploy the epoch-98 checkpoint.**
 2. **Deploy graffiti v2** — strictly better on the same benchmark; work complete.
@@ -985,11 +1034,13 @@ training examples of the violence misses — ground fights, distant crowds.
 
 ## 11. Conclusion
 
-The system catches **88.0% of held-out fights at 2.0 false alarms per hour**,
-and vandalism **87.1% at 1.0 per hour**, on cameras it never trained on; the
+The system catches **88.0% of held-out fights at 1.4 false alarms per hour**,
+and vandalism **87.1% at 0.6 per hour**, on cameras it never trained on; the
 weapon detector finds 89.6% of large guns at 8x fewer false weapons than its
-predecessor — all on a single consumer GPU. Robbery is the honest weak point,
-and the measured fix for it (a vision-language verifier) is the next step.
+predecessor — all on a single consumer GPU. With the vision-language
+double-check, fights rise to **94.0% at 0.4 per hour** and robbery, the honest
+weak point, from 8.3% to **59.4% of events at 0.6 per hour** — still the
+weakest class, and still marked experimental.
 
 The more durable contribution may be methodological. Three published figures were
 withdrawn after measurement exposed how they were produced: a 99.4%-leaked

@@ -167,7 +167,18 @@ making them.
 One limitation got sharper rather than smaller: false alarms per hour rest on
 **2 hours** of camera footage, where a single alarm moves a rate by 0.5/hr.
 Differences of one or two alarms between settings are noise; the 6 Oct
-recordings exist to fix that.
+recordings exist to fix that — every figure since 7 Oct is on the full 5 hours.
+
+- **Alarm double-check cut-offs (7–14 Oct).** Qwen3-VL-2B is not trained, but
+  each task's cut-off is a fitted value, so it is treated like a threshold: fitted
+  on half the source videos (fights, robbery events) and scored on the other
+  half, and the held-out camera hours are never used to fit. The
+  weapon cut-off is fitted on half of the 1,175 person-held guns and knives in
+  the weapon model's **test** split and scored on the other half — so for that
+  check the test split is split again rather than left untouched; the weapon
+  detector's own test figures were measured before and are unaffected. The
+  keep rates themselves (98%, and 80% for robbery-vs-fight) were chosen after
+  seeing results, which each config note says on the line it applies to.
 
 ---
 

@@ -6,10 +6,12 @@ but it is not what you should sit down and read.
 
 **These four are.**
 
-> **Check the dates (7 Oct 2026).** The three HTML documents and the PDF were
+> **Check the dates (22 Oct 2026).** The three HTML documents and the PDF were
 > written in August, before the October models: the two-model violence
-> ensemble (88.0% of fights at 2.0 false alarms/hr), `weapons_v3`, and
-> vandalism re-enabled with person-crop confirmation (87.1% at 1.0/hr). For any
+> ensemble (88.0% of fights at 1.4 false alarms/hr on 5 h of cameras),
+> `weapons_v3`, vandalism re-enabled with person-crop confirmation (87.1% at
+> 0.6/hr), and the Qwen3-VL-2B alarm double-check (fights 94.0% at 0.4/hr,
+> robbery 59.4% of events at 0.6/hr, weapon alerts 2.8 → 1.4/hr). For any
 > number you say out loud, use `detection_performance_report.md` or the root
 > `README.md` — they are current. The *explanations* in the HTML documents
 > (how a convolution works, why two model families) are still accurate.
@@ -76,7 +78,7 @@ Read these three sections of `ecovision_full_report.md`:
 
 ---
 
-## Four things worth having ready to say
+## Five things worth having ready to say
 
 1. **"We withdrew three published numbers after measuring how they were
    produced."** A 99.4%-leaked validation split, a detector class that had never
@@ -98,7 +100,14 @@ Read these three sections of `ecovision_full_report.md`:
    robbery detector was not running at all. Found by running the system and
    reading which files it loaded, not by trusting a green check.
 
-4. **"We measure the way it runs."** Every number is false alarms per hour on
+4. **"A second model checks every alarm before anyone is told."** A small
+   vision-language model (Qwen3-VL-2B) watches each alarm's 2-second clip and
+   answers a yes/no question. That let the detectors run looser: fights caught
+   went from 88.0% to 94.0% while false alarms fell from 1.4 to 0.4 an hour.
+   Its cut-offs were fitted on half the source videos and scored on the
+   other half, and the app's code reproduces the experiment's scores exactly.
+
+5. **"We measure the way it runs."** Every number is false alarms per hour on
    cameras the models never trained on, and events caught in continuous
    footage — through the exact decision rules that ship (`detection_rules.py`),
    not a clean offline copy of them.

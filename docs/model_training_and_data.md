@@ -1,7 +1,8 @@
 # How every model was trained, and where its data came from
 
 Compiled 2026-08-21, updated 2026-10-07 for the October models (violence ensemble,
-`weapons_v3`, vandalism re-enabled, robbery at 0.85). One section per model: what it does, how it is implemented,
+`weapons_v3`, vandalism re-enabled, robbery at 0.85) and 2026-10-22 for the
+Qwen3-VL-2B alarm double-check (§6b). One section per model: what it does, how it is implemented,
 which datasets it was built from with links, the exact training configuration,
 what it measures, and what would improve it.
 
@@ -146,7 +147,7 @@ above replaced it.)
 
 - **Person-crop two-stage** — [CUE-Net (CVPR 2024W)](https://arxiv.org/abs/2404.18952) reaches SOTA by cropping around detected people specifically to handle distant subjects. **Done in October as a confirmation step** (above); using crops to *add* detections was also measured and gave the same recall at 3–6× the false alarms. Distant subjects remain the limit: at 15% person height the model detects 7/40; at 9%, **0/40**.
 - **More examples of the misses** — of the 24 fights the ensemble misses, 13 are scored low by the model: ground fights, distant crowd scuffles, close-up or occluded views.
-- **A vision-language verifier** — see §8.
+- **A vision-language verifier** — done (§6b): fights 94.0% at 0.4 false alarms/hr with it, on the GPU backend.
 - **Scene-bias debiasing** — [Choi et al., NeurIPS 2019](https://proceedings.neurips.cc/paper_files/paper/2019/file/ab817c9349cf9c4f6877e1894a1faa00-Paper.pdf), adversarial scene loss + human-mask confusion loss.
 - **Mean Teacher on unlabeled Philippine capture** — removes the current risk that footage *assumed* violence-free is trained as negative when a real incident occurs in it.
 
@@ -177,7 +178,10 @@ as negatives (13.3% recall, 17.5/hr), and **robbery v5** — started from the
 violence model, with 1,824 Davao street negatives and 71 of its own mined false
 alarms — 40.5/hr on the held-out cameras at 0.85 × 2. A single look at a whole
 frame cannot separate a robbery from an ordinary hand-off in a busy market; a
-vision-language verifier is the measured way forward (§8).
+vision-language verifier was the measured way forward, and is now in the app
+(§6b): robbery taken from the fight detector's candidates and checked by two
+questions reaches 59.4% of events at 0.6/hr, and this model is only the
+fallback.
 
 **Why it matters to the vandalism section:** robbery is the reference point for
 how many scenes this architecture needs. It works at 26 training scenes. That
@@ -455,6 +459,57 @@ any two-stage person-crop architecture and is a measurement, not an assumption.
 
 ---
 
+## 6b. Alarm double-check — Qwen3-VL-2B (prompted, not trained)
+
+**What it does.** A second stage behind the detectors: each candidate alarm's
+last 2 seconds (8 frames, longest side 448 px) go to Qwen3-VL-2B-Instruct with
+a fixed question, and the alarm passes only if the score — log P("Yes") −
+log P("No") for the first answer token, one forward pass, no text generation —
+is at or above a cut-off. Because it removes false alarms, the detectors in
+front of it run looser and miss less.
+
+| task | candidate | question(s) | asked on |
+|---|---|---|---|
+| fight | violence ensemble, 0.25 × 1, re-checked every 7 s while it stays on | is anyone physically fighting, punching, kicking or attacking another person? | the whole frame |
+| robbery | the fight ensemble's whole-frame score (before person-crop confirmation) | yes/no: is someone being robbed, held up, having belongings grabbed, or stealing; then multiple choice: A fight / B robbery, snatch or theft / C nothing — B must beat A | the whole frame |
+| weapon | every ARMED THREAT alert from the weapon pipeline | is this person holding a gun or a knife? | a square crop around that person (pad 0.5) from full-resolution frames |
+
+**Not trained — calibrated.** No weights were changed. The only fitted values
+are the cut-offs, each chosen as a *keep rate on true alarms* (fight 98% — 97% on
+the CPU backend, robbery 98% and 80%, weapon 98%) on half the source videos and scored on the
+other half, so the reported numbers are cross-validated. The weapon cut was
+fitted on 1,175 hand-labelled guns and knives held by a person in the weapon
+model's own test set.
+
+**Two backends, one model.** GPU: transformers fp16 (`weights/qwen3_vl_2b/`),
+~4.2 GB VRAM, ~7 s per check. CPU: llama.cpp `llama-server` with a 4-bit GGUF
+(`weights/qwen3_vl_2b_gguf/`), ~2.1 GB RAM, ~15 s per check. They score on
+different scales, so each task has its own CPU cut-off (`cut_cpu`), fitted at
+the same keep rates; the weapon task has no CPU cut-off yet, so on the CPU
+backend weapon alerts go out unverified. `backend: "auto"` uses the GPU when
+4.3 GB of VRAM is free after the detectors load, else the CPU when ~2.6 GB of
+RAM is free, else neither (strict detector settings); machines with no CUDA
+GPU never load it.
+
+**Measured (5 h held-out cameras, 200 held-out fights, 133 robbery events).**
+
+| | without | with (GPU) | with (CPU) |
+|---|---|---|---|
+| fights caught / false alarms per hour | 88.0% / 1.4 | **94.0% / 0.4** | 91.0% / 0.2 |
+| robbery events labelled robbery / per hour | 8.3% / 1.4 | **59.4% / 0.6** | 60.9% / 0.8 |
+| held-out fights also labelled robbery | 25% | 20.5% | 22.7% |
+| ARMED THREAT false alerts per hour | 2.8 | **1.4** (97.9% of real weapons kept) | 2.8 (unverified) |
+
+**Rejected on measurement:** Qwen3-VL-4B (no better, ~32 s per alarm), NVIDIA
+Cosmos-Embed1 as the verifier (slightly worse), two verifiers combined (no
+gain), and a single yes/no robbery question (passed 86% of fights as robbery).
+
+**Licence and source:** Apache-2.0, Qwen Team; llama.cpp MIT — see
+`CITATIONS.md`. Code: `maincode/alarm_verifier.py`; experiments in the training
+repo, `experiments/crop_recheck/` and `experiments/weapon_alerts/`.
+
+---
+
 ## 7. Cross-cutting practices
 
 Applied to every model above; each exists because its absence caused a
@@ -480,18 +535,16 @@ Updated Oct 2026. Done since August: weapon thresholds re-swept and deployed
 (0.30 / 0.23); graffiti v2 deployed; weapon `imgsz` resolved (960, v3);
 person-crop confirmation for violence and vandalism.
 
-1. **Vision-language verifier for alarms** — measured on the training side:
-   Qwen3-VL-2B checking each alarm's 2-second clip lifts violence to 90.5% of
-   fights at 0.5 false alarms/hr and robbery from 8.3% to 51–60% of events at
-   2–3/hr, for ~6 s per alert. Confirmed on 5 hours of held-out footage
-   (7 Oct); next is wiring it into the app.
+1. ~~Vision-language verifier for alarms~~ — **in the app since 7 Oct** (§6b).
+   What remains: a CPU cut-off for the weapon question, and a live end-to-end
+   test of the weapon check in the running app.
 2. **More held-out camera hours.** Two hours made every false-alarm rate coarse
    (one alarm = 0.5/hr); 6 Oct recordings brought it to 5 hours. More, including
    night footage, would tighten it further.
 3. **Violence misses**: ground fights, distant crowds, close-up/occluded views;
-   and a "nobody found" fallback (a very high whole-frame score may alarm when
-   the pose model finds no one) measured at +2 points with no extra false
-   alarms on 2 h — needs the larger camera set to confirm.
+   the "nobody found" fallback (a whole-frame score of 0.8+ counts on its own
+   when the pose model has found no one for 6 checks) was confirmed on 5 h and
+   deployed 7 Oct: 88.0% → 90.0% of fights at the same 1.4/hr.
 4. **Film ~20 vandalism locations.** Still the only lever for the act itself —
    public data is exhausted at four graffiti scenes.
 5. **Request MSAD access.** Maps to the property-damage class.

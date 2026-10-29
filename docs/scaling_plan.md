@@ -5,7 +5,7 @@ AMD Ryzen 5 5600G 6C/12T, 16GB system RAM) rather than estimated from spec
 sheets. Answers the direct question first, then shows the measurement and the
 architecture that changes the answer.
 
-> **Status, 7 Oct 2026 — the per-camera cost has gone up since this was
+> **Status, 22 Oct 2026 — the per-camera cost has gone up since this was
 > measured.** The deployed set is now 8 models per `main.py`: `weapons_v3`
 > runs at **960 px** instead of 640 (about 2.25× the pixels per weapon pass),
 > violence runs a **second X3D model** averaged with the first, and violence
@@ -14,9 +14,13 @@ architecture that changes the answer.
 > than the 58% below, so the 2–4-camera estimate is now optimistic; re-measure
 > with `tools\measure_min_specs.py` before planning a multi-camera pilot. The
 > architecture conclusions (§3–§4) are unchanged — they only become more
-> pressing. A vision-language verifier under evaluation (Qwen3-VL-2B, ~4 GB
-> VRAM, ~6 s per alarm) would run once per alarm, not per frame, but needs its
-> own VRAM budget.
+> pressing. The alarm double-check (Qwen3-VL-2B, in the app since 7 Oct) runs
+> once per candidate alarm, not per frame — about 13 checks per camera-hour on
+> the held-out cameras — but each check takes ~7 s on the GPU (4.2 GB VRAM, the
+> detectors drop to ~2 FPS meanwhile) or ~15 s on the CPU (2.1 GB RAM). One
+> verifier serves every camera, queueing at most 6 checks, so with many
+> cameras the check, not the detectors, may become the bottleneck — measure
+> the queue before scaling past a few cameras.
 
 ---
 
@@ -155,7 +159,7 @@ works with either architecture.
 | **20-camera target** | Requires either (a) 2–3 GPUs of this class behind the batched service, or (b) pushing pose/weapon detection to per-camera edge devices (Jetson-class) and keeping only the X3D classification pass centralized | Achievable, not on one consumer GPU |
 
 The `cameras` table, RTSP URLs, and barangay/station ownership already exist
-in `app/backend.py` — none of this needs new database design. The gap is
+in the backend (`app/backend_core.py`, `app/routers/cameras.py`) — none of this needs new database design. The gap is
 entirely in `maincode/main.py`'s one-process-per-camera assumption.
 
 ---

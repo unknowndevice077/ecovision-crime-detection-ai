@@ -161,7 +161,7 @@ an export folder as footage under the same policy).
 RA 10173 §20 requires organizational, physical, and technical security
 measures proportional to the risk. What's already real in this codebase:
 
-- JWT-based auth on every API route (`app/backend.py`).
+- JWT-based auth on every API route (`require_auth` in `app/backend_core.py`).
 - Role- and permission-gated access (`VALID_PERMISSION_KEYS`, `confirm_dismiss_alerts`,
   `manage_cameras`) — an operator cannot confirm/dismiss alerts or manage
   cameras outside their barangay/station scope (`apply_scope`).

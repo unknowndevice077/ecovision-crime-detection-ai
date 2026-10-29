@@ -7,14 +7,17 @@ Real-time AI-powered security monitoring and threat detection system. It watches
 
 Built for **always-on deployment**: the intended use case is a dedicated machine (with a GPU) running continuously, watching a camera feed 24/7 and flagging incidents automatically for review.
 
-> **Status (as of 7 Oct 2026) — testing phase.** The full pipeline runs end-to-end: backend, AI core, dashboard and desktop shell. All four detection classes — violence, weapons, vandalism and robbery — are trained, measured on cameras they never trained on, and individually toggleable from the AI Models tab; robbery and vandalism are labelled **experimental** in the app. Since August the access model grew a DevTeam console, permissions that can be narrowed to single cameras or crime types, custom roles, identity verification, barangay→police report requests and a full audit log (see [Organization & Roles](#organization--roles)). [START_HERE.md](START_HERE.md) has the live model table; [docs/detection_performance_report.md](docs/detection_performance_report.md) has every number and how it was measured.
+> **Status (as of 22 Oct 2026) — testing phase.** The full pipeline runs end-to-end: backend, AI core, dashboard and desktop shell. All four detection classes — violence, weapons, vandalism and robbery — are trained, measured on cameras they never trained on, and individually toggleable from the AI Models tab; robbery and vandalism are labelled **experimental** in the app. Since August the access model grew a DevTeam console, permissions that can be narrowed to single cameras or crime types, custom roles, identity verification, barangay→police report requests and a full audit log (see [Organization & Roles](#organization--roles)). [START_HERE.md](START_HERE.md) has the live model table; [docs/detection_performance_report.md](docs/detection_performance_report.md) has every number and how it was measured.
 >
 > | Detector | Caught | False alarms on held-out cameras |
 > |---|---|---|
-> | Violence (two-model ensemble, person-crop confirmed) | 88.0% of 200 fights | 2.0 / hr |
-> | Weapons (`weapons_v3`, 960 px) | 89.6% of large guns, 39.4% of street-size guns | see report (needs a person holding it to alert) |
-> | Vandalism (person-crop confirmed) — experimental | 87.1% of 31 acts | 1.0 / hr |
-> | Robbery — experimental | 39.8% of test clips | 0.5 / hr |
+> | Violence (two-model ensemble, person-crop confirmed) | 88.0% of 200 fights | 1.4 / hr (5 h) |
+> | Violence + alarm double-check (Qwen3-VL-2B, GPU) | **94.0%** of 200 fights | **0.4 / hr** |
+> | Weapons (`weapons_v3`, 960 px) | 89.6% of large guns, 39.4% of street-size guns | ARMED THREAT alerts 2.8 / hr → **1.4 / hr** with the double-check (GPU) |
+> | Vandalism (person-crop confirmed) — experimental | 87.1% of 31 acts | 0.6 / hr (5 h) |
+> | Robbery — experimental, via the double-check | 59.4% of 133 events | 0.6 / hr |
+>
+> The double-check is **experimental** and needs memory to load: on a 4 GB graphics card (e.g. a laptop RTX 3050) it runs on the CPU instead (fights 91.0% at 0.2/hr, weapon alerts unverified), and with too little free RAM it stays off and every detector uses its strict settings (the 88.0% row). See [Alarm double-check](#alarm-double-check).
 
 
 
@@ -31,9 +34,11 @@ The system runs three integrated components, packaged as one desktop application
 - All alert decision rules live in one module, `maincode/detection_rules.py`, which the evaluation scripts import too — so the numbers in the docs come from the exact rules that ship
 - "Episode" tracking per track/pair so a continuously-active state (e.g. one ongoing assault) mints one incident, not one every frame
 - GPU (CUDA) used automatically when available, with `.engine` (TensorRT) preferred over `.pt` when present; falls back to CPU
+- **Alarm double-check** (`maincode/alarm_verifier.py`, `detection.verifier`, experimental): each alarm's 2-second clip — for weapons, a crop around the person holding it — is asked a yes/no question by Qwen3-VL-2B before it becomes an alert. See [Alarm double-check](#alarm-double-check)
 - Configured through `config.json`, **not** through `.env` — the AI core never loads a `.env` file
 
-### 2. **Backend API** (`app/backend.py`, FastAPI)
+### 2. **Backend API** (`app/backend.py` + `app/backend_core.py` + `app/routers/`, FastAPI)
+- `backend.py` is only the entry point (middleware, router mounting, uvicorn); shared config, auth, DB setup and permissions live in `backend_core.py`, and each area has its own router (`incidents`, `records`, `cameras`, `report_requests`, `hardware`, `ai_core`, `devteam_*`, …)
 - Stores alerts, incident records, and video clips
 - Dual database backend: **SQLite by default**, Postgres when `DATABASE_URL` is set — see `app/db.py` and [Database](#database) below
 - Manages connected device (ESP32) telemetry and siren control; siren calls report whether the board was actually reached (`sent` / `skipped` / `unreachable`) instead of assuming success
@@ -314,16 +319,27 @@ Training itself happens outside this repo, against a separate training-data chec
 
 **How the current numbers are measured.** Clip accuracy alone hides what matters in a 24/7 deployment, so every deployed detector is also scored the way it runs live: on **held-out real cameras** (footage of four Davao/Iloilo street cameras no model ever trained on) for **false alarms per hour**, and on **spliced continuous footage** (held-out crime clips cut into calm street video) for the share of events that raise an alarm, both through the shipped smoothing and confirmation rules (`detection_rules.py`). Training sets are checked for train/test leakage by content hash and by source video, and every new dataset is inspected on a contact sheet before training. The harness lives in the training repository (`experiments/crop_recheck`).
 
-## Research in progress
+## Alarm double-check
 
-Not in the app yet; measured in the training repository, October 2026.
+In the app since 7 Oct 2026 (experimental, `detection.verifier`); every figure measured in the training repository on held-out footage.
 
-- **Two-stage verification with a vision-language model.** The fast detectors run at a looser setting, and each alarm's two-second clip is checked by **Qwen3-VL-2B**, a small video-language model that runs on the same GPU (about 6 s per alarm, about 4 GB of VRAM). On the same held-out footage: violence went from 88.0% of fights at 2.0 false alarms/hr to **90.5% at 0.5/hr**; robbery went from 8.3% of events at 0.5/hr to **51–60% at 2–3/hr**. NVIDIA Cosmos-Embed1 as the verifier did slightly worse; the larger Qwen3-VL-4B was no better and five times slower. Re-tested on 5 hours of held-out camera footage (7 Oct): violence + Qwen3-VL-2B 90.5% at 0.4/hr, robbery + Qwen3-VL-2B 51.1% at 2.0/hr or 60.2% at 1.8/hr — the gains held. **Now in the app (experimental, `detection.verifier`)**, re-checking long candidates every 7 s (fights 94.0% at 0.4/hr), with two backends: the GPU one above, or a CPU one (llama.cpp with a 4-bit model, ~15 s per alarm, ~2.1 GB of RAM, no VRAM) that measured the same accuracy and leaves the detectors their GPU — the option for low-spec laptops. Robbery now comes from the fight detector's whole-frame candidates, checked by two questions — is something criminal happening, and is it more like a robbery than a fight: 59.4% of robbery events alerted as robbery at 0.6 false alarms/hr, with 20.5% of held-out fights also labelled robbery (a single yes/no robbery question labelled 69–86% of fights as robbery, which is why the second question exists). The robbery model is kept only as the fallback when the check is unavailable.
+- **Two-stage verification with a vision-language model.** The fast detectors run at a looser setting, and each alarm's two-second clip is checked by **Qwen3-VL-2B**, a small video-language model that runs on the same GPU (about 6 s per alarm, about 4 GB of VRAM). On the same held-out footage: violence went from 88.0% of fights at 2.0 false alarms/hr to **90.5% at 0.5/hr**; robbery went from 8.3% of events at 0.5/hr to **51–60% at 2–3/hr**. NVIDIA Cosmos-Embed1 as the verifier did slightly worse; the larger Qwen3-VL-4B was no better and five times slower. Re-tested on 5 hours of held-out camera footage (7 Oct): violence + Qwen3-VL-2B 90.5% at 0.4/hr, robbery + Qwen3-VL-2B 51.1% at 2.0/hr or 60.2% at 1.8/hr — the gains held. **Now in the app (experimental, `detection.verifier`)**, re-checking long candidates every 7 s (fights 94.0% at 0.4/hr), with two backends: the GPU one above, or a CPU one (llama.cpp with a 4-bit model, ~15 s per alarm, ~2.1 GB of RAM, no VRAM) that measured the same accuracy and leaves the detectors their GPU — the option for low-spec laptops. Robbery now comes from the fight detector's whole-frame candidates, checked by two questions — is something criminal happening, and is it more like a robbery than a fight: 59.4% of robbery events alerted as robbery at 0.6 false alarms/hr, with 20.5% of held-out fights also labelled robbery (a single yes/no robbery question labelled 69–86% of fights as robbery, which is why the second question exists). The robbery model is kept only as the fallback when the check is unavailable. A robbery confirmed within 60 s of an ASSAULT alert from the same struggle **upgrades** that incident instead of opening a second one.
+- **Weapons (14 Oct).** Every ARMED THREAT alert waits for "Is this person holding a gun or a knife?" on a square crop around that person from full-resolution frames. On 5 h of held-out cameras the alert rate fell from 2.8/hr (all 14 alerts false: phones, bag straps, shirt prints) to 1.4/hr, keeping 97.9% of real weapons and 95.2% of street-size guns. **GPU backend only for now** — on the CPU backend weapon alerts go out unverified, as before.
+- **Which backend runs** (`backend: "auto"`, the default): the GPU one when at least 4.3 GB of VRAM is free once the detectors are loaded, otherwise the CPU one if about 2.6 GB of RAM is free, otherwise none (strict settings, nothing crashes). A machine with no CUDA GPU never loads it — the detectors already use the whole CPU there. The AI core log line starting `Alarm verifier` says which. A check adds 7 s (GPU) or ~15 s (CPU) before an alert goes out.
 - **Rejected**, with the measurements kept in the training repo: a robbery retrain with Davao street negatives (40.5 false alarms/hr on held-out cameras), and running the weapon detector a second time on crops around each person (+9 small guns in 100 for 5% more false weapons and much more GPU time).
 
 ## Building a Release
 
-Releases are created via GitHub Actions and produce a single Inno Setup installer. `build_release.bat` does the same thing locally, bundling `python-env/`.
+**The working path (Oct 2026):**
+
+```bash
+npm run app:build
+powershell -ExecutionPolicy Bypass -File tools\build_installer.ps1
+```
+
+`app:build` runs `next build`, copies the static assets into the standalone server (and **removes the `.env` that `next build` copies there**), then packages `dist\win-unpacked` with electron-builder. `build_installer.ps1` runs preflight, checks every model in `config.json` is packaged, the frontend has its JS chunks and **no `.env` file is anywhere in the package**, then compiles `tools/installer.iss` with Inno Setup and zips the result into `dist\EcoVisionSentinel-Installer-<version>.zip` (~7.5 GB). The payload is over Inno Setup's single-file limit, so the installer is `EcoVisionSentinel-Installer-<version>.exe` plus a `-1.bin` data file (`DiskSpanning`); the zip keeps the two together.
+
+The older paths below — the GitHub Actions workflow and `build_release.bat` — compile `installer/EcoVisionSentinel.iss`, which has no disk spanning, and have not been updated for the ~7.5 GB payload since the Qwen3-VL weights were added.
 
 ### Trigger a Release Build
 
@@ -344,7 +360,7 @@ You can also manually trigger a build from the **Actions** tab without pushing a
 
 ### Run a Release Build
 
-Run `EcoVisionSentinel-Setup-<version>.exe` directly. One folder-choice screen, then it installs like any normal Windows application. The app:
+Extract `EcoVisionSentinel-Installer-<version>.zip`, keep the `.exe` and the `.bin` in the same folder, and run the `.exe`. One folder-choice screen, then it installs like any normal Windows application. The app:
 - Spawns backend and AI processes locally
 - Waits for both to be ready
 - Opens the dashboard
@@ -353,7 +369,7 @@ Run `EcoVisionSentinel-Setup-<version>.exe` directly. One folder-choice screen, 
 
 ⚠️ **GPU Recommended** — Violence detector and detection models use CUDA if available, CPU inference may not keep up with 24/7 live feeds
 
-⚠️ **Build Size** — The bundled python-env (CUDA PyTorch + Ultralytics + PyTorchVideo, TensorRT optional via `--with-tensorrt`) alone is several GB; expect a finished installer in the 3 GB range. This is normal for ML-heavy applications, but it is not a small download. It's shipped as a Release asset or a separate link (Google Drive, etc.), never committed to the repo — GitHub rejects any tracked blob over 100 MB, and `dist_installer/` is gitignored specifically to prevent this from happening by accident.
+⚠️ **Build Size** — The bundled python-env (CUDA PyTorch + Ultralytics + PyTorchVideo, TensorRT optional via `--with-tensorrt`) alone is several GB; with the Qwen3-VL-2B weights (fp16 for the GPU backend plus a 4-bit GGUF for the CPU one) the zip is about 7.5 GB. This is normal for ML-heavy applications, but it is not a small download. It's shipped as a separate link (a private Hugging Face bucket, Google Drive, etc.), never committed to the repo — GitHub rejects any tracked blob over 100 MB, and `dist_installer/` is gitignored specifically to prevent this from happening by accident.
 
 ⚠️ **Unsigned Build** — Not code-signed; Windows SmartScreen may show a warning on first run
 

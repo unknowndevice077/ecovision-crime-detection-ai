@@ -15,7 +15,7 @@ Derived from measurement on a GTX 1660 SUPER, not from spec sheets.
 | **GPU** | 2 GB VRAM, CUDA-capable | 4 GB+ |
 | **System RAM** | 6 GB | 8 GB+ |
 | **CPU** | 4 cores | 6+ cores |
-| **Disk** | 8 GB free | 20 GB (recordings grow) |
+| **Disk** | 25 GB free (7.5 GB zip + extracted installer + install) | 40 GB (recordings grow) |
 | **OS** | Windows 10/11 64-bit | — |
 | **Python** | none needed | — |
 
@@ -74,6 +74,29 @@ sub-1 GB need; 6 cores against 4; 8 GB RAM against 1.2 GB resident. The only
 practical constraint is **other applications competing for the 8 GB** — close
 browsers before a long run. Preflight warns when free RAM drops below 3 GB.
 
+**The alarm double-check on this laptop.** The GPU backend needs 4.3 GB of
+*free* VRAM after the detectors load, which a 4 GB card never has, so
+`backend: "auto"` picks the **CPU backend** (llama.cpp, 4-bit Qwen3-VL-2B):
+~2.1 GB of RAM, ~15 s per check, the detectors keep ~85% of their frame rate on
+the GPU. It loads only if ~2.6 GB of RAM is free about 30 s after the AI core
+starts; otherwise it stays off and the detectors use their strict settings
+(nothing crashes). On 8 GB that is tight — close Chrome, Discord and games
+before starting. What it gives there: fights 91.0% at 0.2 false alarms/hr
+(vs 88.0% at 1.4 without it), robbery from the fight candidates; weapon alerts
+are **not** double-checked on the CPU backend (no CPU cut-off yet). The AI core
+log line beginning `Alarm verifier` says which backend loaded, or why none did.
+
+### The alarm double-check in general
+
+| backend | when `auto` picks it | needs | per check | detectors meanwhile |
+|---|---|---|---|---|
+| GPU (transformers fp16) | ≥ 4.3 GB VRAM free after the detectors load | ~4.2 GB VRAM, ~1.8 GB RAM, 5.8 GB commit headroom | ~7 s | drop to ~2 FPS |
+| CPU (llama.cpp 4-bit) | otherwise | ~2.1 GB RAM (2.6 GB free) | ~15 s | keep ~85% |
+| none | neither fits, or the machine has no CUDA GPU at all (the detectors already use the whole CPU there) | — | — | unchanged, strict settings |
+
+`config.json` `detection.verifier.backend` can force `gpu` or `cpu`, and
+`detection.verifier.enabled: false` turns it off.
+
 ---
 
 ## 1. Installing on a target machine — double-click, nothing else
@@ -85,35 +108,56 @@ the target machine.** There are two machines with two different jobs:
 |---|---|---|
 | needs Python + Node | yes | **no** |
 | needs internet | yes, to fetch packages | **no** |
-| what you do | run `build_release.bat` once | **run the Setup .exe once** |
+| what you do | build the installer once | **run the installer .exe once** |
 
 ### On this PC, once
 
 ```
-build_release.bat
+npm run app:build
+powershell -ExecutionPolicy Bypass -File tools\build_installer.ps1
 ```
 
-It verifies weights, schema and database mode via preflight, builds the
-frontend, and packages everything — including a complete Python environment
-with PyTorch, the four model weights, and the SQLite schema — into **one**
-file in `dist_installer\`:
+`app:build` builds the frontend and packages everything — a complete Python
+environment with PyTorch, every model weight including Qwen3-VL-2B (fp16 and
+4-bit), and the SQLite schema — into `dist\win-unpacked`. `build_installer.ps1`
+runs preflight, checks every model in `config.json` and the frontend's static
+files are packaged and that **no `.env` file is**, compiles the installer with
+Inno Setup (~12 min) and zips it:
 
 | file | use it for |
 |---|---|
-| `EcoVisionSentinel-Setup-<version>.exe` | **the only one shipped.** ~3 GB, single file, built with Inno Setup. One folder-choice screen; everything — app, weights, Python runtime, database, config, logs — lands inside the one folder you pick. No admin/UAC needed for this testing-phase build. |
+| `dist\EcoVisionSentinel-Installer-<version>.zip` | **the only thing shipped.** ~7.5 GB. Inside: `EcoVisionSentinel-Installer-<version>.exe` and `EcoVisionSentinel-Installer-<version>-1.bin`. The payload is over Inno Setup's single-file limit, so it is split into the small `.exe` and one data file; they must stay in the same folder. |
+
+`build_release.bat` now calls `tools\build_installer.ps1` too. The CI workflow is the older path: it compiles
+`installer\EcoVisionSentinel.iss`, a single-file script that predates the
+Qwen3-VL weights and has not been updated for a 7.5 GB payload.
 
 There used to be a second, "portable" variant that re-extracted its entire
 Python/PyTorch environment on every launch (slow, and it left nothing
-installed between runs). It's gone — replaced entirely by the single Inno
-Setup installer above on 18-19 Aug, after the NSIS-based toolchain that built
-both variants turned out to have a hard ~2 GB build-time size ceiling. See
-`START_HERE.md` trap #9 for the full story if you're curious.
+installed between runs). It's gone — replaced entirely by Inno Setup on
+18-19 Aug, after the NSIS-based toolchain that built both variants turned out
+to have a hard ~2 GB build-time size ceiling. See `START_HERE.md` trap #9.
+
+**Getting it to the laptop.** A USB drive (exFAT or NTFS — FAT32 cannot hold a
+file over 4 GB) or a shared folder is fastest. For a download link, the 22 Oct
+build is in the private Hugging Face bucket `eeeeeaaaJ/research`; download it
+with the `hf` CLI rather than the browser (the browser's temporary link can
+expire part-way through 7.5 GB; re-running the CLI command resumes):
+
+```
+pip install -U "huggingface_hub[cli]"
+hf auth login
+hf buckets cp hf://buckets/eeeeeaaaJ/research/EcoVisionSentinel-Installer-1.0.0.zip EcoVisionSentinel-Installer-1.0.0.zip
+```
+
+The finished file is 7,863,868,149 bytes.
 
 ### On the laptop
 
-1. Copy `EcoVisionSentinel-Setup-<version>.exe` across.
-2. Run it, click through (it's a normal Windows installer — pick a folder,
-   Next, Install).
+1. Copy or download the zip, then **Extract All**.
+2. Run `EcoVisionSentinel-Installer-<version>.exe` from the extracted folder,
+   with the `.bin` beside it. It's unsigned, so SmartScreen warns: More info →
+   Run anyway. Click through (pick a folder, Next, Install).
 3. Launch it from the shortcut it creates. Every launch after the first is
    fast: nothing is re-extracted, because nothing was extracted at launch time
    in the first place — it all happened once, during install.

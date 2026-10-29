@@ -1,6 +1,6 @@
 # EcoVision Detection Performance — Full Report
 
-Updated 2026-10-07. Every number is measured and traceable to a script — in
+Updated 2026-10-14 (alarm double-check for weapons, one incident per struggle); reviewed 2026-10-22. Every number is measured and traceable to a script — in
 this repository or in the training repository's `experiments/crop_recheck` —
 and to the `config.json` note beside the setting it justifies. Nothing is
 estimated, and where a figure rests on something thin it says so on the same

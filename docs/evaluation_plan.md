@@ -1,11 +1,11 @@
 # Evaluation plan — plain-language version
 
-Written 2026-08-26. **Status, 7 Oct 2026:** the protocol described here is
+Written 2026-08-26. **Status, 22 Oct 2026:** the protocol described here is
 what every deployed number now comes from — events caught on held-out crime
 clips spliced into continuous street footage (200 fights, 133 robbery events,
 31 vandalism acts), and false alarms per hour on held-out street cameras (5
 hours from five cameras no model trained on), all
-through the shipped rules. Current figures are in
+through the shipped rules — including, since 7 Oct, the alarm double-check, whose cut-offs are fitted on half the source videos and scored on the other half. Current figures are in
 `detection_performance_report.md` §1. The figures quoted below are from August. This explains what "evaluating" the detection system
 actually means, in order, before laying out the protocol. If the only thing
 you take from this document is the difference between §2 and §3, that's the

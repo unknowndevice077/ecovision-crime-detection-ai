@@ -17,9 +17,11 @@ friends), not by this list -- check there first if the two ever disagree.
 | `x3d_xs_violence_scene_ucabal.pt` | `detection.violence.scene_model_path` | **The deployed violence model** (2026-10-03). daynight + timestamped UCF-Crime fights and same-venue calm clips. Mode is `scene`, so this is the one that runs. |
 | `x3d_xs_violence_scene_ucabal_mined.pt` | `detection.violence.scene_ensemble_paths` | **Ensemble partner** (2026-10-05). The ucabal recipe plus 6 false-alarm clips mined from training cameras; averaged with ucabal it catches 88.0% of fights at 2.0 false alarms/hr (ucabal alone 86.5%). Not used on its own. |
 | `x3d_xs_violence_scene_daynight.pt` | rollback only | Previous violence model. Not packaged. |
-| `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery (experimental), threshold 0.85 x 3 in a row: 0.5 false alarms/hr on held-out cameras, 39.8% clip recall. Every retrain since has been measured and rejected -- see config's `_confidence_threshold_085`. |
+| `x3d_xs_robbery_scene.pt` | `detection.robbery.model_path` | Robbery (experimental), threshold 0.85 x 3 in a row: 0.5 false alarms/hr on held-out cameras, 39.8% clip recall. Every retrain since has been measured and rejected -- see config's `_confidence_threshold_085`. While the alarm double-check is loaded, robbery alerts come from the fight detector's candidates and this model is only the fallback. |
 | `vandalism_marks_v2.pt` | `detection.vandalism.marks_model_path` | Graffiti / marks detector used by the vandalism rule |
 | `x3d_xs_vandalism_scene_v3.pt` | `detection.vandalism.model_path` | Vandalism (experimental), 0.60 x 3 with person-crop confirmation: 87.1% of 31 held-out acts at 1.0 false alarm/hr (6.0/hr whole-frame only). See config's `_person_confirm`. |
+| `qwen3_vl_2b/` | `detection.verifier.model_path` | **Alarm double-check, GPU backend** (2026-10-07, experimental). Qwen3-VL-2B-Instruct, fp16 via transformers: ~4.2 GB VRAM, ~7 s per check. Only loads if 4.3 GB of VRAM is free after the detectors. |
+| `qwen3_vl_2b_gguf/` | `detection.verifier.cpu` | **Alarm double-check, CPU backend.** The same model as a 4-bit GGUF (`Qwen3VL-2B-Instruct-Q4_K_M.gguf` + vision projector) for llama.cpp's `llama-server` (`tools/llamacpp/`): ~2.1 GB RAM, ~15 s per check. Used by `backend: "auto"` when the GPU one does not fit (e.g. a 4 GB laptop card). |
 
 ## Present but not currently running
 

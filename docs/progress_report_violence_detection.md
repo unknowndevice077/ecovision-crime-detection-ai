@@ -1947,7 +1947,7 @@ extra false alarms on 2 h, which is too little footage to adopt it yet. **13**
 the model scored low: ground fights, distant crowd scuffles, close-up or
 occluded views — and three vertical phone videos unlike any CCTV.
 
-### 35.6 Second-stage verification (measured, not deployed)
+### 35.6 Second-stage verification (measured here; in the app since 7 Oct, see §35.7)
 
 Loosening the detector raises its ceiling only slightly (92.5% at 0.25 × 1, at
 10.5 false alarms/hr), so the question became whether a slower model could
@@ -1967,6 +1967,32 @@ alarms/hr. First measured on 2 hours of camera footage, then re-tested on 5
 hours (three more hours of the held-out streams recorded 6 Oct): the deployed
 ensemble held at 88.0% with 1.4 false alarms/hr, and the Qwen3-VL-2B cascade at
 90.5% with 0.4/hr.
+
+### 35.7 Into the app (7–22 Oct)
+
+- **The verifier ships** (7 Oct, experimental, `maincode/alarm_verifier.py`).
+  Long candidates are re-checked every 7 s while they stay on — 8 of the 15
+  fights with no check had begun while a candidate was already on, so had no
+  rising edge of their own: **94.0% of fights at 0.4/hr**. A CPU backend
+  (llama.cpp, 4-bit, ~15 s, ~2.1 GB RAM) scores on its own scale with its own
+  cut-offs: 91.0% at 0.2/hr. `backend: "auto"` picks the GPU only when 4.3 GB
+  of VRAM is free after the detectors, so a 4 GB laptop card uses the CPU.
+- **The no-person fallback** from §35.5 was confirmed on the 5 h set and
+  deployed: 88.0% → 90.0% of fights at the same 1.4/hr.
+- **Robbery from the fight detector** with two questions (yes/no, then fight
+  vs robbery multiple choice): 59.4% of robbery events at 0.6/hr, 20.5% of
+  fights also labelled robbery. A robbery within 60 s of an ASSAULT alert now
+  upgrades that incident instead of opening a second (12 Oct).
+- **Weapons through the check** (14 Oct): the first measured ARMED THREAT alert
+  rate was 2.8/hr on the 5 h set, every alert false; asking "is this person
+  holding a gun or a knife?" on a crop around the person cut it to 1.4/hr,
+  keeping 97.9% of real weapons. GPU backend only so far.
+- **One measurement trap found:** llama-server's prompt cache reused the
+  previous question's frames and moved robbery-vs-fight scores by up to 0.65;
+  scored requests now disable it, after which the app matched the experiment
+  exactly (10 of 10).
+
+Full tables: `detection_performance_report.md` §1.6.
 
 ---
 
