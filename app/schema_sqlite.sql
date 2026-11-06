@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS cameras (
     lat         REAL,
     lng         REAL,
     location_label TEXT,
+    onvif_port  INTEGER,
     created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_cameras_barangay ON cameras(barangay_id);

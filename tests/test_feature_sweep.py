@@ -129,6 +129,62 @@ class Cameras(Base):
         self.assertEqual(self.c.post("/api/ptz/move", headers=self.h(self.capA), json={"pan": 0.2}).status_code, 503)
 
 
+class CameraPTZ(Base):
+    """PTZ per camera (2026-11-03): host and login from the camera's own RTSP
+    URL, ONVIF port stored on the camera. Before this PTZ read only
+    environment variables, which an installed app gives no way to set."""
+
+    def add(self, url="rtsp://admin:pw@127.0.0.1:554/s", port=None, who=None):
+        body = {"name": "PTZ pole", "url": url, "barangay_id": self.brgyA}
+        if port is not None:
+            body["onvif_port"] = port
+        return self.ok(self.c.post("/api/cameras", headers=self.h(who or self.capA), json=body))["id"]
+
+    def listed(self, cid):
+        return {x["id"]: x for x in self.ok(self.c.get("/api/cameras", headers=self.h(self.capA)))}[cid]
+
+    def test_port_set_on_register_and_edited_later(self):
+        cid = self.add(port=2020)
+        self.assertEqual(self.listed(cid)["onvif_port"], 2020)
+        self.ok(self.c.put(f"/api/cameras/{cid}/ptz", headers=self.h(self.capA), json={"onvif_port": 80}))
+        self.assertEqual(self.listed(cid)["onvif_port"], 80)
+        self.assertTrue(S.audit_rows("camera.ptz_set", cid))
+        self.ok(self.c.put(f"/api/cameras/{cid}/ptz", headers=self.h(self.capA), json={"onvif_port": None}))
+        self.assertIsNone(self.listed(cid)["onvif_port"])
+
+    def test_port_validated_and_owned(self):
+        cid = self.add()
+        self.assertEqual(self.c.put(f"/api/cameras/{cid}/ptz", headers=self.h(self.capA), json={"onvif_port": 70000}).status_code, 422)
+        self.assertIn(self.c.put(f"/api/cameras/{cid}/ptz", headers=self.h(self.capB), json={"onvif_port": 80}).status_code, (403, 404))
+        self.assertEqual(self.c.post("/api/cameras", headers=self.h(self.capA), json={
+            "name": "x", "url": "rtsp://a:b@h/s", "barangay_id": self.brgyA, "onvif_port": 0}).status_code, 422)
+
+    def test_capabilities_say_exactly_what_is_missing(self):
+        no_port = self.add()
+        caps = self.ok(self.c.get(f"/api/ptz/capabilities?camera_id={no_port}", headers=self.h(self.capA)))
+        self.assertFalse(caps["configured"])
+        self.assertIn("ONVIF port", caps["reason"])
+        no_login = self.add(url="rtsp://127.0.0.1:554/s", port=2020)
+        caps = self.ok(self.c.get(f"/api/ptz/capabilities?camera_id={no_login}", headers=self.h(self.capA)))
+        self.assertFalse(caps["configured"])
+        self.assertIn("login", caps["reason"])
+
+    def test_only_camera_managers_drive_it(self):
+        cid = self.add(port=9)
+        # Police see the camera's feed but can't move a barangay's camera.
+        self.assertEqual(self.c.get(f"/api/ptz/capabilities?camera_id={cid}", headers=self.h(self.pnpA)).status_code, 403)
+        self.assertEqual(self.c.post(f"/api/ptz/move?camera_id={cid}", headers=self.h(self.staffA), json={"pan": 0.5}).status_code, 403)
+        self.assertIn(self.c.post(f"/api/ptz/stop?camera_id={cid}", headers=self.h(self.capB)).status_code, (403, 404))
+        # The owner gets a clear failure, not a 500, when the camera can't be reached.
+        r = self.c.post(f"/api/ptz/move?camera_id={cid}", headers=self.h(self.capA), json={"pan": 0.5})
+        self.assertIn(r.status_code, (502, 503), r.text)
+
+    def test_login_taken_from_the_stream_url(self):
+        from ptz_control import PTZConfig
+        cfg = PTZConfig.from_camera("rtsp://admin:p%40ss%3Aword@192.168.1.64:554/Streaming/Channels/101", 80)
+        self.assertEqual((cfg.host, cfg.port, cfg.user, cfg.password), ("192.168.1.64", 80, "admin", "p@ss:word"))
+
+
 class NotifyTargets(Base):
     def test_each_side_manages_its_own_recipients(self):
         t = self.ok(self.c.post("/api/notify_targets", headers=self.h(self.capA),

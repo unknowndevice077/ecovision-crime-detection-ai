@@ -5,7 +5,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useRuntimeConfig } from './hooks/useRuntimeConfig';
 import { useLiveChannel } from './context/WebSocketContext';
-import { maskStreamUrl } from './lib/streams';
+import { maskStreamUrl, sameStreamSource } from './lib/streams';
 import { usePermissions } from './hooks/usePermissions';
 import { useAlertNotifier } from './hooks/useAlertNotifier';
 import { SkeletonRow } from './components/dashboard/Skeleton';
@@ -61,6 +61,7 @@ type Camera = {
   name: string;
   url: string;
   status: 'online' | 'offline';
+  onvif_port?: number | null;
 };
 
 export default function EcoVisionSentinel() {
@@ -281,6 +282,64 @@ export default function EcoVisionSentinel() {
     setTimeout(() => setApplyState('idle'), 2000);
   };
 
+  // Points the AI core at a registered camera's stream. Kept separate from
+  // handleApplyCameraSource so the result shows on the camera's own card
+  // rather than in the Live Monitor's source popover, which isn't open here.
+  // ONVIF port of a PTZ camera (blank clears it). Host and login come from
+  // the camera's own stream URL, so this is the only PTZ setting there is.
+  const [ptzPortDraft, setPtzPortDraft] = useState<Record<string, string>>({});
+  const [ptzPortMsg, setPtzPortMsg] = useState<{ id: string | number; ok: boolean; msg: string } | null>(null);
+  const saveCameraPtzPort = async (id: string | number) => {
+    const raw = (ptzPortDraft[String(id)] ?? '').trim();
+    const port = raw === '' ? null : Number(raw);
+    if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      setPtzPortMsg({ id, ok: false, msg: 'Enter a port from 1 to 65535, or leave it blank for no PTZ.' });
+      return;
+    }
+    try {
+      const token = localStorage.getItem('ecoToken');
+      const res = await fetch(`${apiUrl}/api/cameras/${id}/ptz`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ onvif_port: port }),
+      });
+      if (res.ok) {
+        setPtzPortMsg({ id, ok: true, msg: port === null ? 'PTZ off for this camera.' : 'Saved. Open the camera in Live Monitor to use the controls.' });
+        fetchCameras(currentUser);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setPtzPortMsg({ id, ok: false, msg: typeof body.detail === 'string' ? body.detail : `Could not save (HTTP ${res.status}).` });
+      }
+    } catch {
+      setPtzPortMsg({ id, ok: false, msg: 'Backend connection failure.' });
+    }
+  };
+
+  const [camLiveState, setCamLiveState] = useState<{ id: string | number; state: 'saving' | 'error'; msg?: string } | null>(null);
+  const applyCameraForDetection = async (id: string | number, url: string) => {
+    setCamLiveState({ id, state: 'saving' });
+    try {
+      const token = localStorage.getItem('ecoToken');
+      const res = await fetch(`${aiUrl}/set_camera_source`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ source: url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status === 'reopened') {
+        setCurrentSourceLabel(data.source ?? '');
+        setCamLiveState(null);
+      } else {
+        // The core rolls back to its previous source on failure, so the
+        // feed that was working keeps working; say why this one didn't.
+        setCamLiveState({ id, state: 'error',
+          msg: data.detail || "Couldn't open this stream: check the URL, the camera's login, and that this computer can reach it." });
+      }
+    } catch {
+      setCamLiveState({ id, state: 'error', msg: 'The AI core is not reachable.' });
+    }
+  };
+
 const fetchCameras = async (userObj: any) => {
     try {
       // Backend returns snake_case (barangay_id) -- this used to read the
@@ -414,14 +473,14 @@ const fetchCameras = async (userObj: any) => {
   // login and reload.
   useAlertNotifier(alerts, { enabled: alertsLoaded && !isDevteam });
 
-  const handleUpsertNode = async (name: string, url: string) => {
+  const handleUpsertNode = async (name: string, url: string, onvifPort: number | null = null) => {
     try {
       const barangay = currentUser.barangay_id && currentUser.barangay_id !== 'undefined' ? currentUser.barangay_id : 'cogon';
       const token = localStorage.getItem('ecoToken');
       const res = await fetch(`${apiUrl}/api/cameras`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name, url, barangay_id: barangay })
+        body: JSON.stringify({ name, url, barangay_id: barangay, onvif_port: onvifPort })
       });
       if (res.ok) {
         fetchCameras(currentUser);
@@ -1151,6 +1210,62 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                       >
                         {cam.url ? maskStreamUrl(cam.url) : 'Hidden — needs Manage Cameras'}
                       </p>
+                      {/* Registering a camera only stores its URL -- the AI core
+                          watches ONE source and never reads this list, so a
+                          camera added here was silently never analysed. This
+                          points the detector at it, the same call the Live
+                          Monitor's source box makes. */}
+                      {can('manage_cameras') && cam.url && (
+                        sameStreamSource(cam.url, currentSourceLabel) ? (
+                          <div className="data mt-2 text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--ok)' }}>
+                            ● AI is watching this camera
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => applyCameraForDetection(cam.id, cam.url)}
+                            disabled={camLiveState?.state === 'saving'}
+                            className="mt-2 w-full py-1.5 text-[10px] font-bold uppercase tracking-wider border transition-colors disabled:opacity-40"
+                            style={{ borderColor: 'var(--accent)', color: 'var(--accent)', background: 'transparent' }}
+                          >
+                            {camLiveState?.id === cam.id && camLiveState.state === 'saving' ? 'Connecting…' : 'Use for detection'}
+                          </button>
+                        )
+                      )}
+                      {camLiveState?.id === cam.id && camLiveState.state === 'error' && (
+                        <p className="data mt-1.5 text-[9.5px]" role="alert" style={{ color: 'var(--critical)' }}>
+                          {camLiveState.msg || 'Could not open this stream.'}
+                        </p>
+                      )}
+                      {can('manage_cameras') && cam.url && (
+                        <div className="mt-2">
+                          <label htmlFor={`ptz-port-${cam.id}`} className="label block mb-1">PTZ (ONVIF) port</label>
+                          <div className="flex gap-1.5">
+                            <input
+                              id={`ptz-port-${cam.id}`}
+                              inputMode="numeric"
+                              value={ptzPortDraft[String(cam.id)] ?? (cam.onvif_port != null ? String(cam.onvif_port) : '')}
+                              onChange={(e) => setPtzPortDraft(d => ({ ...d, [String(cam.id)]: e.target.value }))}
+                              onKeyDown={(e) => { if (e.key === 'Enter') saveCameraPtzPort(cam.id); }}
+                              placeholder="blank = no PTZ"
+                              className="data flex-1 min-w-0 px-2 py-1 text-[10px] border outline-none"
+                              style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
+                            />
+                            <button
+                              onClick={() => saveCameraPtzPort(cam.id)}
+                              className="px-2 text-[10px] font-bold uppercase tracking-wider border"
+                              style={{ borderColor: 'var(--line-2)', color: 'var(--text-2)' }}
+                            >
+                              Save
+                            </button>
+                          </div>
+                          {ptzPortMsg?.id === cam.id && (
+                            <p className="data mt-1 text-[9.5px]" role={ptzPortMsg.ok ? undefined : 'alert'}
+                               style={{ color: ptzPortMsg.ok ? 'var(--ok)' : 'var(--critical)' }}>
+                              {ptzPortMsg.msg}
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                   {can('manage_cameras') && (
@@ -1233,7 +1348,7 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                     per-camera action, and a control pad over a multi-feed
                     wall would be ambiguous about which camera it drives. */}
                 <div className="shrink-0 flex items-center justify-center py-1">
-                  <PTZControls apiUrl={apiUrl} />
+                  <PTZControls apiUrl={apiUrl} cameraId={selectedCam.id} />
                 </div>
               </>
             ) : (
@@ -1332,16 +1447,31 @@ Its feed disappears from every dashboard. Recordings and incidents from it are k
                   id="cam-url"
                   className="data w-full px-2.5 py-2 text-[11px] border outline-none"
                   style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
-                  placeholder="rtsp://..."
+                  placeholder="rtsp://user:password@192.168.1.64:554/..."
+                />
+              </div>
+              <div>
+                <label htmlFor="cam-onvif" className="label block mb-1">PTZ (ONVIF) port <span style={{ color: 'var(--text-3)' }}>— optional</span></label>
+                <input
+                  id="cam-onvif"
+                  inputMode="numeric"
+                  className="data w-full px-2.5 py-2 text-[11px] border outline-none"
+                  style={{ background: 'var(--bg)', borderColor: 'var(--line)', color: 'var(--text)' }}
+                  placeholder="80 on most Hikvision/Dahua, 2020 on Tapo; blank if it can't move"
                 />
               </div>
               <button
                 onClick={() => {
                   const n = (document.getElementById('cam-name') as HTMLInputElement).value;
                   const u = (document.getElementById('cam-url') as HTMLInputElement).value;
+                  const p = (document.getElementById('cam-onvif') as HTMLInputElement).value.trim();
                   if (!n.trim() || !u.trim()) { setCamFormError('Enter both a name and a stream URL.'); return; }
+                  const port = p === '' ? null : Number(p);
+                  if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+                    setCamFormError('The PTZ port must be a number from 1 to 65535, or blank.'); return;
+                  }
                   setCamFormError('');
-                  handleUpsertNode(n.trim(), u.trim());
+                  handleUpsertNode(n.trim(), u.trim(), port);
                 }}
                 className="w-full py-2.5 text-[11px] font-bold uppercase tracking-wider text-white transition-all hover:opacity-90 active:scale-[0.98]"
                 style={{ background: 'var(--accent)' }}

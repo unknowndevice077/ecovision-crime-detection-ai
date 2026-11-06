@@ -40,6 +40,15 @@ class CameraSchema(BaseModel):
     # Where the pole stands, pinned on the Incident Map. Optional: the
     # Cameras tab registers a stream without a location, placed later.
     location: Optional[CameraLocationSchema] = None
+    # ONVIF port of a PTZ camera; None = no PTZ. See ptz_control.py.
+    onvif_port: Optional[int] = None
+
+    @field_validator("onvif_port")
+    @classmethod
+    def _port_range(cls, v):
+        if v is not None and not 1 <= v <= 65535:
+            raise ValueError("ONVIF port must be between 1 and 65535")
+        return v
 
 def _row_to_camera_dict(row, include_url: bool = True) -> dict:
     """include_url=False for anyone who can't manage cameras: a stream URL
@@ -47,7 +56,8 @@ def _row_to_camera_dict(row, include_url: bool = True) -> dict:
     d = dict(row)
     return {"id": d["id"], "name": d["name"], "url": d["url"] if include_url else None,
             "status": d["status"], "barangay_id": d.get("barangay_id"),
-            "lat": d.get("lat"), "lng": d.get("lng"), "location_label": d.get("location_label")}
+            "lat": d.get("lat"), "lng": d.get("lng"), "location_label": d.get("location_label"),
+            "onvif_port": d.get("onvif_port")}
 
 
 # --- PERSISTENT CAMERA ROUTINES ---
@@ -109,10 +119,10 @@ async def add_camera(cam: CameraSchema, authorization: Optional[str] = Header(No
     label = ((loc.location_label or "").strip() or None) if loc else None
     try:
         cursor.execute(
-            "INSERT INTO cameras (id, name, url, status, barangay_id, lat, lng, location_label)"
-            " VALUES (?, ?, ?, 'online', ?, ?, ?, ?)",
+            "INSERT INTO cameras (id, name, url, status, barangay_id, lat, lng, location_label, onvif_port)"
+            " VALUES (?, ?, ?, 'online', ?, ?, ?, ?, ?)",
             (cam_id, cam.name, cam.url, cam.barangay_id.lower(),
-             loc.lat if loc else None, loc.lng if loc else None, label),
+             loc.lat if loc else None, loc.lng if loc else None, label, cam.onvif_port),
         )
         snapshot = {"name": cam.name, "barangay_id": cam.barangay_id.lower()}
         if loc:
@@ -227,110 +237,126 @@ class PTZPresetSchema(BaseModel):
     name: str
 
 
-@router.get("/api/ptz/capabilities")
-async def ptz_capabilities(authorization: Optional[str] = Header(None)):
-    """Never raises on an unreachable/unconfigured camera -- the dashboard
-    calls this on load, and 'no camera attached' is a normal state."""
-    require_auth(authorization)
-    from ptz_control import get_controller, PTZNotConfigured
-    # BUG FOUND 2026-08-19: this was the one PTZ endpoint with no try/except
-    # -- every sibling (move/stop/presets/goto/save) catches PTZNotConfigured
-    # and generic errors, this one didn't, directly contradicting its own
-    # docstring's promise. The dashboard calls this unconditionally on every
-    # load, so an unconfigured/unreachable camera turned into a 500 there
-    # too, right when "never raises" mattered most.
+class CameraPTZSchema(BaseModel):
+    onvif_port: Optional[int] = None
+
+    @field_validator("onvif_port")
+    @classmethod
+    def _port_range(cls, v):
+        if v is not None and not 1 <= v <= 65535:
+            raise ValueError("ONVIF port must be between 1 and 65535")
+        return v
+
+
+@router.put("/api/cameras/{cam_id}/ptz")
+async def set_camera_ptz(cam_id: str, data: CameraPTZSchema, authorization: Optional[str] = Header(None)):
+    """Sets (or, with null, clears) a camera's ONVIF port -- the one PTZ
+    setting its RTSP URL doesn't already carry."""
+    payload = require_auth(authorization)
+    conn = get_conn()
+    cursor = conn.cursor()
     try:
-        return get_controller().get_capabilities()
+        _require_own_camera(cursor, payload, cam_id)
+        cursor.execute("UPDATE cameras SET onvif_port = ? WHERE id = ?", (data.onvif_port, cam_id))
+        log_audit(cursor, payload, "camera.ptz_set", "camera", cam_id, snapshot={"onvif_port": data.onvif_port})
+        conn.commit()
+    finally:
+        conn.close()
+    await manager.broadcast({"channel": "cameras", "event": "camera_updated", "id": cam_id})
+    return {"status": "updated", "id": cam_id, "onvif_port": data.onvif_port}
+
+
+# PTZ routes (2026-11-03): per camera. With ?camera_id= the ONVIF connection
+# is built from THAT camera's RTSP host/login plus its onvif_port, after the
+# same ownership check as editing the camera; without it, the environment-
+# configured camera as before.
+#
+# Plain `def`, not `async def`: every ONVIF call is blocking network I/O to
+# the camera. As coroutines they ran on the event loop, so one slow or
+# unreachable camera stalled every other request and the websocket with it;
+# FastAPI runs plain functions on its threadpool instead.
+
+def _ptz_for(payload: dict, camera_id: Optional[str], need_manage: bool):
+    from ptz_control import PTZConfig, get_controller
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        if camera_id:
+            # Every PTZ action needs manage_cameras on this camera; reading
+            # its capabilities does too, since they come from a login made
+            # with the camera's own credentials.
+            row = _require_own_camera(cursor, payload, camera_id)
+            return get_controller(PTZConfig.from_camera(row["url"], row["onvif_port"]))
+        if need_manage:
+            require_permission(cursor, payload, "manage_cameras")
+        return get_controller()
+    finally:
+        conn.close()
+
+
+def _unavailable(reason: str) -> dict:
+    return {"configured": False, "reason": reason, "pan_tilt": False,
+            "zoom": False, "presets": False, "two_way_audio": False}
+
+
+def _ptz_call(payload: dict, camera_id: Optional[str], fn):
+    from ptz_control import PTZNotConfigured
+    try:
+        return fn(_ptz_for(payload, camera_id, need_manage=True))
+    except HTTPException:
+        raise
     except PTZNotConfigured as e:
-        return {"configured": False, "reason": str(e), "pan_tilt": False,
-                "zoom": False, "presets": False, "two_way_audio": False}
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        return {"configured": False, "reason": f"camera error: {e}", "pan_tilt": False,
-                "zoom": False, "presets": False, "two_way_audio": False}
+        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+
+
+@router.get("/api/ptz/capabilities")
+def ptz_capabilities(camera_id: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    """Never raises on an unreachable/unconfigured camera -- the dashboard
+    calls this on load, and 'no camera attached' is a normal state. (A 403
+    for someone without manage_cameras on that camera is still raised: the
+    panel stays hidden for them, which is right -- they can't move it.)"""
+    payload = require_auth(authorization)
+    from ptz_control import PTZNotConfigured
+    try:
+        return _ptz_for(payload, camera_id, need_manage=False).get_capabilities()
+    except HTTPException:
+        raise
+    except PTZNotConfigured as e:
+        return _unavailable(str(e))
+    except Exception as e:
+        return _unavailable(f"camera error: {e}")
 
 
 @router.post("/api/ptz/move")
-async def ptz_move(data: PTZMoveSchema, authorization: Optional[str] = Header(None)):
+def ptz_move(data: PTZMoveSchema, camera_id: Optional[str] = None, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = get_conn()
-    cursor = conn.cursor()
-    try:
-        require_permission(cursor, payload, "manage_cameras")
-    finally:
-        conn.close()
-    from ptz_control import get_controller, PTZNotConfigured
-    try:
-        return get_controller().move(data.pan, data.tilt, data.zoom, data.duration)
-    except PTZNotConfigured as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+    return _ptz_call(payload, camera_id, lambda c: c.move(data.pan, data.tilt, data.zoom, data.duration))
 
 
 @router.post("/api/ptz/stop")
-async def ptz_stop(authorization: Optional[str] = Header(None)):
+def ptz_stop(camera_id: Optional[str] = None, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = get_conn()
-    cursor = conn.cursor()
-    try:
-        require_permission(cursor, payload, "manage_cameras")
-    finally:
-        conn.close()
-    from ptz_control import get_controller, PTZNotConfigured
-    try:
-        return get_controller().stop()
-    except PTZNotConfigured as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+    return _ptz_call(payload, camera_id, lambda c: c.stop())
 
 
 @router.get("/api/ptz/presets")
-async def ptz_list_presets(authorization: Optional[str] = Header(None)):
-    require_auth(authorization)
-    from ptz_control import get_controller, PTZNotConfigured
-    try:
-        return {"presets": get_controller().list_presets()}
-    except PTZNotConfigured as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+def ptz_list_presets(camera_id: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    payload = require_auth(authorization)
+    return _ptz_call(payload, camera_id, lambda c: {"presets": c.list_presets()})
 
 
 @router.post("/api/ptz/presets/{token}/goto")
-async def ptz_goto_preset(token: str, authorization: Optional[str] = Header(None)):
+def ptz_goto_preset(token: str, camera_id: Optional[str] = None, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = get_conn()
-    cursor = conn.cursor()
-    try:
-        require_permission(cursor, payload, "manage_cameras")
-    finally:
-        conn.close()
-    from ptz_control import get_controller, PTZNotConfigured
-    try:
-        return get_controller().goto_preset(token)
-    except PTZNotConfigured as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+    return _ptz_call(payload, camera_id, lambda c: c.goto_preset(token))
 
 
 @router.post("/api/ptz/presets")
-async def ptz_save_preset(data: PTZPresetSchema, authorization: Optional[str] = Header(None)):
+def ptz_save_preset(data: PTZPresetSchema, camera_id: Optional[str] = None, authorization: Optional[str] = Header(None)):
     payload = require_auth(authorization)
-    conn = get_conn()
-    cursor = conn.cursor()
-    try:
-        require_permission(cursor, payload, "manage_cameras")
-    finally:
-        conn.close()
-    from ptz_control import get_controller, PTZNotConfigured
-    try:
-        return get_controller().save_preset(data.name)
-    except PTZNotConfigured as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"camera error: {e}")
+    return _ptz_call(payload, camera_id, lambda c: c.save_preset(data.name))
 
 @router.get("/api/camera_name/{camera_id}")
 async def camera_name(camera_id: str, request: Request):

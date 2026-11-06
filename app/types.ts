@@ -16,6 +16,8 @@ export type Camera = {
   name: string;
   url: string;
   status: 'online' | 'offline';
+  // ONVIF port of a PTZ camera; null = no PTZ (routers/cameras.py).
+  onvif_port?: number | null;
 };
 
 export type UserRole = 'DEVTEAM' | 'PNP_ADMIN' | 'PNP_OFFICER' | 'BARANGAY_ADMIN' | 'BARANGAY_STAFF';

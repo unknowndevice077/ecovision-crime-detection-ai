@@ -36,7 +36,11 @@ type Caps = {
 
 type Preset = { token: string; name: string };
 
-export default function PTZControls({ apiUrl }: { apiUrl: string }) {
+export default function PTZControls({ apiUrl, cameraId }: { apiUrl: string; cameraId?: string | number }) {
+  // Which camera to drive: the backend builds the ONVIF login from that
+  // camera's own stream URL and ONVIF port. Without one it falls back to the
+  // environment-configured camera.
+  const q = cameraId != null ? `?camera_id=${encodeURIComponent(String(cameraId))}` : '';
   const [caps, setCaps] = useState<Caps | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [busy, setBusy] = useState(false);
@@ -54,13 +58,14 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${apiUrl}/api/ptz/capabilities`, { headers: authHeaders() });
+        setCaps(null); setPresets([]);
+        const res = await fetch(`${apiUrl}/api/ptz/capabilities${q}`, { headers: authHeaders() });
         if (!res.ok) return;
         const data: Caps = await res.json();
         if (cancelled) return;
         setCaps(data);
         if (data.presets) {
-          const pr = await fetch(`${apiUrl}/api/ptz/presets`, { headers: authHeaders() });
+          const pr = await fetch(`${apiUrl}/api/ptz/presets${q}`, { headers: authHeaders() });
           if (pr.ok && !cancelled) setPresets((await pr.json()).presets || []);
         }
       } catch {
@@ -68,13 +73,13 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [apiUrl, authHeaders]);
+  }, [apiUrl, authHeaders, q]);
 
   const move = async (pan: number, tilt: number, zoom = 0) => {
     holding.current = true;
     setErr(null);
     try {
-      const res = await fetch(`${apiUrl}/api/ptz/move`, {
+      const res = await fetch(`${apiUrl}/api/ptz/move${q}`, {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({ pan, tilt, zoom, duration: 0.8 }),
@@ -89,14 +94,14 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
     if (!holding.current) return;
     holding.current = false;
     try {
-      await fetch(`${apiUrl}/api/ptz/stop`, { method: 'POST', headers: authHeaders() });
+      await fetch(`${apiUrl}/api/ptz/stop${q}`, { method: 'POST', headers: authHeaders() });
     } catch { /* backend auto-stop is the backstop */ }
   };
 
   const gotoPreset = async (token: string) => {
     setBusy(true); setErr(null);
     try {
-      const res = await fetch(`${apiUrl}/api/ptz/presets/${encodeURIComponent(token)}/goto`,
+      const res = await fetch(`${apiUrl}/api/ptz/presets/${encodeURIComponent(token)}/goto${q}`,
         { method: 'POST', headers: authHeaders() });
       if (!res.ok) setErr((await res.json()).detail || `HTTP ${res.status}`);
     } finally { setBusy(false); }
@@ -113,11 +118,11 @@ export default function PTZControls({ apiUrl }: { apiUrl: string }) {
     if (!name) return;
     setBusy(true); setErr(null);
     try {
-      const res = await fetch(`${apiUrl}/api/ptz/presets`, {
+      const res = await fetch(`${apiUrl}/api/ptz/presets${q}`, {
         method: 'POST', headers: authHeaders(), body: JSON.stringify({ name }),
       });
       if (res.ok) {
-        const pr = await fetch(`${apiUrl}/api/ptz/presets`, { headers: authHeaders() });
+        const pr = await fetch(`${apiUrl}/api/ptz/presets${q}`, { headers: authHeaders() });
         if (pr.ok) setPresets((await pr.json()).presets || []);
         setShowNameModal(false);
       } else {

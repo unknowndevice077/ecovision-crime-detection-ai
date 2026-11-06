@@ -18,6 +18,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["D:\\EcoVisionImagesTraining\\_scratch\\demo_shots\\web\\start_demo.js"],
       "port": 3005
+    },
+    {
+      "name": "landing-page",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["D:\\projects\\EcovisionLandingPage\\node_modules\\next\\dist\\bin\\next", "dev", "D:\\projects\\EcovisionLandingPage", "-p", "3020"],
+      "port": 3020
     }
   ]
 }

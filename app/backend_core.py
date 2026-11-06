@@ -867,6 +867,11 @@ def _migrate_schema(conn, cursor):
     _ensure_column(conn, cursor, "cameras", "lat", "REAL")
     _ensure_column(conn, cursor, "cameras", "lng", "REAL")
     _ensure_column(conn, cursor, "cameras", "location_label", "TEXT")
+    # PTZ per camera (2026-11-03): the ONVIF port of a pan-tilt-zoom camera.
+    # Host and login come from the camera's own RTSP URL (ONVIF uses the same
+    # account on effectively every vendor); only the port differs (80 on
+    # Hikvision/Dahua, 2020 on Tapo, 8000/8899 on others). NULL = no PTZ.
+    _ensure_column(conn, cursor, "cameras", "onvif_port", "INTEGER")
 
     # Structured report requests (2026-10-01): a request used to be one
     # free-text line, so the station had to write back to ask what was

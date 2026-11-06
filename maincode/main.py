@@ -1786,9 +1786,26 @@ def _transcode_to_h264(src_path: str) -> bool:
 # pending clip from a different thread (uvicorn's) at any moment.
 _clip_state_lock = threading.Lock()
 
-# Always-on rolling buffer of (timestamp, annotated_frame) -- topped up every
-# frame regardless of whether anything is currently flagged.
+# Always-on rolling buffer of (timestamp, annotated frame as JPEG bytes) --
+# topped up every frame regardless of whether anything is currently flagged.
+#
+# JPEG, not raw arrays (2026-11-03): 600 raw frames is ~1.7 GB at 720p but
+# ~3.7 GB at 1080p and ~6.6 GB at a 4MP CCTV main stream -- enough to push an
+# 8 GB machine into swap or kill the core the moment a real IP camera is
+# connected. At quality 85 a 1080p frame is ~150-300 KB, so the whole buffer
+# is ~150 MB. Pending clips hold the same bytes; frames are decoded only when
+# a clip is written or a panic snapshot is taken.
 _raw_frame_ring: deque = deque(maxlen=CLIP_PRE_FRAMES)
+RING_JPEG_QUALITY = 85
+MAX_FRAME_WIDTH = 1920
+
+
+def _ring_encode(frame) -> bytes:
+    return cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, RING_JPEG_QUALITY])[1].tobytes()
+
+
+def _ring_decode(data: bytes):
+    return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
 # In-flight clips still accumulating their post-event frames. Each entry is
 # handed off to _clip_exec once it reaches its target length.
@@ -1844,10 +1861,19 @@ def _finalize_and_register_clip(clip: dict):
     filename   = f"AUTO_{safe_event}_{incident_id}.mp4"
     file_path  = os.path.join(RECORDINGS_DIR, filename)
 
-    h, w = frames[0].shape[:2]
+    first = _ring_decode(frames[0])
+    h, w = first.shape[:2]
     writer = cv2.VideoWriter(file_path, cv2.VideoWriter_fourcc(*"mp4v"), encode_fps, (w, h))
     try:
-        for f in frames:
+        writer.write(first)
+        for data in frames[1:]:
+            f = _ring_decode(data)
+            if f is None:
+                continue
+            if f.shape[:2] != (h, w):
+                # The camera was switched mid-clip; VideoWriter drops frames
+                # of the wrong size silently, so fit them instead.
+                f = cv2.resize(f, (w, h))
             writer.write(f)
     finally:
         writer.release()
@@ -1917,11 +1943,14 @@ def panic_capture(payload: PanicCaptureRequest):
     with _clip_state_lock:
         if not _raw_frame_ring:
             return {"status": "no_frame_available", "screenshot_path": None}
-        latest_frame = _raw_frame_ring[-1][1]
+        latest_jpg = _raw_frame_ring[-1][1]
 
     snap_filename = f"snap_{incident_id}.jpg"
     snap_path = os.path.join(SCREENSHOTS_DIR, snap_filename)
-    cv2.imwrite(snap_path, latest_frame)
+    # Already a JPEG -- write the bytes as they are rather than decode and
+    # re-encode (which would only lose quality).
+    with open(snap_path, "wb") as fh:
+        fh.write(latest_jpg)
 
     _start_pending_clip(incident_id, "HARDWARE_PANIC_INTERRUPT", 1.0)
 
@@ -2081,6 +2110,14 @@ while _running:
     _camera_fail_streak = 0
     _camera_last_ok = time.perf_counter()
     _camera_retry_delay = 2.0
+    # IP cameras' main streams are often 4MP or 4K. Every model resizes far
+    # below that (weapons at 960, pose at 416, X3D at 160), and a 4K frame is
+    # ~25 MB per copy, several copies per loop. Above 1920 wide, scale down
+    # once here; 1080p and smaller -- what every measurement used -- pass
+    # through untouched.
+    if frame.shape[1] > MAX_FRAME_WIDTH:
+        _k = MAX_FRAME_WIDTH / frame.shape[1]
+        frame = cv2.resize(frame, (MAX_FRAME_WIDTH, int(round(frame.shape[0] * _k))), interpolation=cv2.INTER_AREA)
     # Untouched copy for training data: everything below draws on `frame`
     # (boxes, HUD, the X3D picture-in-picture), and a model retrained on
     # frames carrying its own overlays learns the overlays. Saved next to
@@ -2592,9 +2629,10 @@ while _running:
     # shared between the ring buffer and any pending clips since nothing
     # downstream mutates it.
     annotated_snapshot = frame.copy()
+    ring_jpg = _ring_encode(annotated_snapshot)
     with _clip_state_lock:
-        _raw_frame_ring.append((time.perf_counter(), annotated_snapshot))
-    _feed_pending_clips(annotated_snapshot)
+        _raw_frame_ring.append((time.perf_counter(), ring_jpg))
+    _feed_pending_clips(ring_jpg)
 
     # Reuse annotated_snapshot for the JPEG-encode submission too -- nothing
     # mutates `frame` between the copy above and here, so a second full-res
